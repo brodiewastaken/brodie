@@ -104,6 +104,37 @@ describe("attempt trajectory status", () => {
     ).toEqual({ status: "success" });
   });
 
+  it("does not classify a provisional message send as terminal success", () => {
+    expect(
+      resolveAttemptTrajectoryTerminal(
+        baseParams({
+          didSendViaMessagingTool: true,
+          messageToolDeliveryState: "provisional",
+          messagingToolSentTargets: [{ channel: "discord" }],
+          conversationOutcome: "sent",
+        }),
+      ),
+    ).toEqual({
+      status: "error",
+      terminalError: NON_DELIVERABLE_TERMINAL_TURN_REASON,
+    });
+  });
+
+  it.each(["sent", "reacted", "deliberate_silence"] as const)(
+    "keeps a committed %s conversational outcome as terminal progress",
+    (conversationOutcome) => {
+      expect(
+        resolveAttemptTrajectoryTerminal(
+          baseParams({
+            conversationOutcome,
+            lastAssistantStopReason: "toolUse",
+            toolMetas: [{ toolName: "message" }],
+          }),
+        ),
+      ).toEqual({ status: "success" });
+    },
+  );
+
   it("keeps accepted session spawns as terminal progress", () => {
     expect(
       resolveAttemptTrajectoryTerminal(

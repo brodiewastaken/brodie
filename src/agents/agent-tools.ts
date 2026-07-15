@@ -19,6 +19,10 @@ import type { DiagnosticTraceContext } from "../infra/diagnostic-trace-context.j
 import { resolveEventSessionRoutingPolicy } from "../infra/event-session-routing.js";
 import { applyExecPolicyLayer } from "../infra/exec-policy.js";
 import { resolveMergedSafeBinProfileFixtures } from "../infra/exec-safe-bin-runtime-policy.js";
+import type {
+  CoreConversationalAction,
+  ConversationalOutcome,
+} from "../infra/outbound/conversational-action.js";
 import { logWarn } from "../logger.js";
 import type { PluginHookChannelContext } from "../plugins/hook-types.js";
 import { getPluginToolMeta } from "../plugins/tools.js";
@@ -503,6 +507,8 @@ export function createOpenClawCodingTools(options?: {
   requireExplicitMessageTarget?: boolean;
   /** Visible source replies must be sent through the message tool when set to message_tool_only. */
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  onConversationOutcome?: (outcome: ConversationalOutcome) => void;
+  allowedConversationalActions?: readonly CoreConversationalAction[];
   inboundEventKind?: InboundEventKind;
   /** If true, omit the message tool from the tool list. */
   disableMessageTool?: boolean;
@@ -1028,6 +1034,8 @@ export function createOpenClawCodingTools(options?: {
           modelHasVision: options?.modelHasVision,
           requireExplicitMessageTarget: options?.requireExplicitMessageTarget,
           sourceReplyDeliveryMode: options?.sourceReplyDeliveryMode,
+          onConversationOutcome: options?.onConversationOutcome,
+          allowedConversationalActions: options?.allowedConversationalActions,
           inboundEventKind: options?.inboundEventKind,
           disableMessageTool: options?.disableMessageTool,
           enableHeartbeatTool,

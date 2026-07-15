@@ -24,6 +24,7 @@ function firstBeforeAgentReplyCall() {
 }
 
 function firstAttemptParams(): {
+  allowedConversationalActions?: readonly string[];
   cleanupBundleMcpOnRunEnd?: boolean;
   modelRun?: boolean;
   promptMode?: string;
@@ -33,6 +34,7 @@ function firstAttemptParams(): {
   const call = mockedRunEmbeddedAttempt.mock.calls[0] as
     | [
         {
+          allowedConversationalActions?: readonly string[];
           cleanupBundleMcpOnRunEnd?: boolean;
           modelRun?: boolean;
           promptMode?: string;
@@ -168,6 +170,18 @@ describe("runEmbeddedAgent cron before_agent_reply seam", () => {
     const attemptParams = firstAttemptParams();
     expect(attemptParams.modelRun).toBe(true);
     expect(attemptParams.promptMode).toBe("none");
+  });
+
+  it("forwards conversational action restrictions into the embedded attempt", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+
+    await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      trigger: "user",
+      allowedConversationalActions: ["reply"],
+    });
+
+    expect(firstAttemptParams().allowedConversationalActions).toEqual(["reply"]);
   });
 
   it("forwards one-shot bundle MCP cleanup into the embedded attempt", async () => {

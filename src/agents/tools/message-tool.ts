@@ -46,6 +46,15 @@ import {
 import { createAbortError } from "../../infra/abort-signal.js";
 import { sha256Base64UrlPrefix } from "../../infra/crypto-digest.js";
 import {
+  CORE_CONVERSATIONAL_ACTIONS,
+  createConversationalAction,
+  type CoreConversationalAction,
+  type ConversationalDispatchResult,
+  type ConversationalOutcome,
+} from "../../infra/outbound/conversational-action.js";
+import { isOutboundDeliveryError } from "../../infra/outbound/deliver-types.js";
+import { resolveOutboundDurableFinalDeliverySupport } from "../../infra/outbound/deliver.js";
+import {
   parseInteractiveParam,
   parseJsonMessageParam,
 } from "../../infra/outbound/message-action-params.js";
@@ -64,9 +73,14 @@ import { stringifyRouteThreadId } from "../../plugin-sdk/channel-route.js";
 import { POLL_CREATION_PARAM_DEFS, SHARED_POLL_CREATION_PARAM_NAMES } from "../../poll-params.js";
 import { normalizeAccountId, parseSessionDeliveryRoute } from "../../routing/session-key.js";
 import { stripFormattedReasoningMessage } from "../../shared/text/formatted-reasoning-message.js";
-import { INTERNAL_MESSAGE_CHANNEL, normalizeMessageChannel } from "../../utils/message-channel.js";
+import {
+  INTERNAL_MESSAGE_CHANNEL,
+  isDeliverableMessageChannel,
+  normalizeMessageChannel,
+} from "../../utils/message-channel.js";
 import { resolveSessionAgentId } from "../agent-scope.js";
 import { listAllChannelSupportedActions, listChannelSupportedActions } from "../channel-tools.js";
+import type { MessageToolDeliveryState } from "../embedded-agent-messaging.types.js";
 import { stripInternalRuntimeContext } from "../internal-runtime-context.js";
 import {
   channelTargetSchema,
@@ -83,6 +97,7 @@ import {
   resolveGatewayOptions,
   type GatewayCallOptions,
 } from "./gateway.js";
+import { buildMessageToolSystemPrompt } from "./message-tool-system-prompt.js";
 import { isPollVoteEchoText } from "./poll-vote-echo.js";
 
 const AllMessageActions = CHANNEL_MESSAGE_ACTION_NAMES;
@@ -520,6 +535,9 @@ function buildSendSchema(options: {
     contentType: Type.Optional(Type.String()),
     mimeType: Type.Optional(Type.String()),
     caption: Type.Optional(Type.String()),
+    interactive: Type.Optional(presentationMessageSchema),
+    channelData: Type.Optional(Type.Unknown()),
+    timeoutMs: Type.Optional(Type.Integer({ minimum: 1 })),
     attachments: Type.Optional(
       Type.Array(
         Type.Object({
@@ -855,22 +873,44 @@ function buildMessageToolSchemaFromActions(
     includeDeliveryPin: boolean;
     includeBestEffort: boolean;
     extraProperties?: Record<string, TSchema>;
+    reactionProperties?: Record<string, TSchema>;
   },
 ) {
+  const actionSet = new Set(actions);
+  const conversationalSchemas = createConversationalAction().buildSchemas({
+    actions: actionSet,
+    sendFields: buildSendSchema(options),
+    reactionFields: options.reactionProperties ?? {},
+    channelTargetSchema: channelTargetSchema(),
+  });
+  const coreActions = new Set<string>(CORE_CONVERSATIONAL_ACTIONS);
+  const adminActions = actions.filter((action) => !coreActions.has(action));
   const props = isSendOnlyActions(actions)
     ? buildSendOnlyMessageToolSchemaProps(options)
     : buildMessageToolSchemaProps(options);
-  return Type.Object({
-    action: stringEnum(actions),
-    ...props,
-  });
+  const adminSchema =
+    adminActions.length > 0
+      ? Type.Object(
+          {
+            action: stringEnum(adminActions),
+            invisibleThinking: Type.String({ minLength: 1 }),
+            ...props,
+          },
+          { additionalProperties: false },
+        )
+      : undefined;
+  const variants = [...conversationalSchemas, ...(adminSchema ? [adminSchema] : [])];
+  return variants.length === 1 ? variants[0] : Type.Union(variants);
 }
 
-const MessageToolSchema = buildMessageToolSchemaFromActions(AllMessageActions, {
-  includePresentation: true,
-  includeDeliveryPin: true,
-  includeBestEffort: false,
-});
+const MessageToolSchema = buildMessageToolSchemaFromActions(
+  uniqueValues([...CORE_CONVERSATIONAL_ACTIONS, ...AllMessageActions]),
+  {
+    includePresentation: true,
+    includeDeliveryPin: true,
+    includeBestEffort: false,
+  },
+);
 
 type MessageToolOptions = {
   agentAccountId?: string;
@@ -883,6 +923,11 @@ type MessageToolOptions = {
   getScopedChannelsCommandSecretTargets?: typeof getScopedChannelsCommandSecretTargets;
   resolveCommandSecretRefsViaGateway?: typeof resolveCommandSecretRefsViaGateway;
   runMessageAction?: typeof runMessageAction;
+  validateConversationalQuote?: (params: {
+    channel: string;
+    target: string;
+    quoteReply: string;
+  }) => Promise<void>;
   currentChannelId?: string;
   currentMessagingTarget?: string;
   currentChannelProvider?: string;
@@ -900,6 +945,8 @@ type MessageToolOptions = {
   inboundEventKind?: InboundEventKind;
   requesterSenderId?: string;
   senderIsOwner?: boolean;
+  onConversationOutcome?: (outcome: ConversationalOutcome) => void;
+  allowedConversationalActions?: readonly CoreConversationalAction[];
 };
 
 type MessageToolDiscoveryParams = {
@@ -975,10 +1022,14 @@ function resolveEffectiveCurrentChannelContext(options?: MessageToolOptions): {
     Boolean(sessionDelivery?.to);
 
   if (!preferSessionDeliveryContext) {
+    const sameChannelSessionTarget =
+      sessionDeliveryChannel === normalizeMessageChannel(currentChannelProvider)
+        ? sessionDelivery?.to
+        : undefined;
     return {
       currentChannelProvider,
-      currentChannelId,
-      currentMessagingTarget: options?.currentMessagingTarget,
+      currentChannelId: currentChannelId ?? sameChannelSessionTarget,
+      currentMessagingTarget: options?.currentMessagingTarget ?? sameChannelSessionTarget,
     };
   }
   return {
@@ -1090,8 +1141,16 @@ function resolveIncludeBestEffort(params: MessageToolDiscoveryParams): boolean {
   );
 }
 
-function buildMessageToolSchema(params: MessageToolDiscoveryParams) {
-  const actions = resolveMessageToolActionSchemaActions(params);
+function buildMessageToolSchema(
+  params: MessageToolDiscoveryParams,
+  allowedConversationalActions?: readonly CoreConversationalAction[],
+) {
+  const discoveredActions = resolveMessageToolActionSchemaActions(params);
+  const coreActions = new Set<string>(CORE_CONVERSATIONAL_ACTIONS);
+  const actions = uniqueValues([
+    ...(allowedConversationalActions ?? CORE_CONVERSATIONAL_ACTIONS),
+    ...discoveredActions.filter((action) => !coreActions.has(action)),
+  ]);
   const includePresentation = resolveIncludePresentation(params);
   const includeDeliveryPin = resolveIncludeDeliveryPin(params);
   const includeBestEffort = resolveIncludeBestEffort(params);
@@ -1101,11 +1160,19 @@ function buildMessageToolSchema(params: MessageToolDiscoveryParams) {
       normalizeMessageChannel(params.currentChannelProvider) ?? undefined,
     ),
   );
-  return buildMessageToolSchemaFromActions(actions.length > 0 ? actions : ["send"], {
+  const reactionProperties = resolveChannelMessageToolSchemaProperties(
+    buildMessageActionDiscoveryInput(
+      params,
+      normalizeMessageChannel(params.currentChannelProvider) ?? undefined,
+    ),
+    "react",
+  );
+  return buildMessageToolSchemaFromActions(actions, {
     includePresentation,
     includeDeliveryPin,
     includeBestEffort,
     extraProperties,
+    reactionProperties,
   });
 }
 
@@ -1129,6 +1196,7 @@ function buildMessageToolDescription(options?: {
   agentId?: string;
   requireExplicitTarget?: boolean;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  allowedConversationalActions?: readonly CoreConversationalAction[];
   requesterSenderId?: string;
   senderIsOwner?: boolean;
 }): string {
@@ -1151,39 +1219,49 @@ function buildMessageToolDescription(options?: {
     : undefined;
 
   if (messageToolDiscoveryParams) {
-    const actions = resolveMessageToolActionSchemaActions(messageToolDiscoveryParams);
+    const discoveredActions = resolveMessageToolActionSchemaActions(messageToolDiscoveryParams);
+    const coreActions = new Set<string>(CORE_CONVERSATIONAL_ACTIONS);
+    const actions = uniqueValues([
+      ...(resolvedOptions.allowedConversationalActions ?? CORE_CONVERSATIONAL_ACTIONS),
+      ...discoveredActions.filter((action) => !coreActions.has(action)),
+    ]);
     if (actions.length > 0) {
       const sortedActions = sortUniqueStrings(actions) as Array<ChannelMessageActionName | "send">;
-      return appendMessageToolReadHint(
+      const described = appendMessageToolReadHint(
         appendMessageToolVisibleReplyHint(
           `${baseDescription} Supports actions: ${sortedActions.join(", ")}.`,
           resolvedOptions.sourceReplyDeliveryMode,
-          resolvedOptions.requireExplicitTarget,
+          resolvedOptions.allowedConversationalActions,
         ),
         sortedActions,
       );
+      return `${described}\n\n${buildMessageToolSystemPrompt({
+        allowedConversationalActions: resolvedOptions.allowedConversationalActions,
+      })}`;
     }
   }
 
-  return appendMessageToolVisibleReplyHint(
+  return `${appendMessageToolVisibleReplyHint(
     `${baseDescription} Supports actions: send, delete, react, poll, pin, threads, and more.`,
     resolvedOptions.sourceReplyDeliveryMode,
-    resolvedOptions.requireExplicitTarget,
-  );
+    resolvedOptions.allowedConversationalActions,
+  )}\n\n${buildMessageToolSystemPrompt({
+    allowedConversationalActions: resolvedOptions.allowedConversationalActions,
+  })}`;
 }
 
 function appendMessageToolVisibleReplyHint(
   description: string,
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode,
-  requireExplicitTarget?: boolean,
+  allowedConversationalActions?: readonly CoreConversationalAction[],
 ): string {
   if (sourceReplyDeliveryMode !== "message_tool_only") {
     return description;
   }
-  const targetGuidance = requireExplicitTarget
-    ? "Include target when sending."
-    : "target defaults to the current source conversation; omit unless sending elsewhere.";
-  return `${description} This turn: use action="send" with message for visible replies to the current source conversation. ${targetGuidance} Normal final answers stay private.`;
+  if (allowedConversationalActions?.length === 1 && allowedConversationalActions[0] === "reply") {
+    return `${description} This turn requires reply with invisibleThinking, exactly one visibleMessages item, and endTurn=true. No other conversational action is available. Normal final answers stay private.`;
+  }
+  return `${description} Every conversational action requires invisibleThinking. reply answers the current conversation, react applies a native reaction, silence delivers nothing. Normal final answers stay private.`;
 }
 
 function appendMessageToolReadHint(
@@ -1198,6 +1276,113 @@ function appendMessageToolReadHint(
   return description;
 }
 
+const MISSING_INVISIBLE_THINKING_ERROR =
+  "every message call requires invisibleThinking: one or two private lines deciding whether this moment needs you, what the one thing worth saying is, and which action carries it. it never reaches the chat.";
+
+function prepareMessageToolArguments(
+  args: unknown,
+  allowedConversationalActions?: readonly CoreConversationalAction[],
+): Record<string, unknown> {
+  const params = asResultRecord(args);
+  if (!params) {
+    return args as Record<string, unknown>;
+  }
+  const action = normalizeOptionalString(params.action);
+  if (!action) {
+    return params;
+  }
+
+  const allowedActions = allowedConversationalActions ?? CORE_CONVERSATIONAL_ACTIONS;
+  const isCoreAction = CORE_CONVERSATIONAL_ACTIONS.includes(action as CoreConversationalAction);
+  if (isCoreAction && !allowedActions.includes(action as CoreConversationalAction)) {
+    if (allowedActions.length === 1 && allowedActions[0] === "reply") {
+      throw new Error(
+        `message action "${action}" is unavailable this turn. this turn is reply-only: use action="reply" and omit channel and target; the current conversation is already bound.`,
+      );
+    }
+    const listedActions = allowedActions.map((allowed) => `"${allowed}"`).join(", ");
+    throw new Error(
+      `message action "${action}" is unavailable this turn. allowed conversational actions: ${listedActions}.`,
+    );
+  }
+  if (
+    action === "send" &&
+    (!normalizeOptionalString(params.channel) || !normalizeOptionalString(params.target))
+  ) {
+    throw new Error(
+      'action="send" is deliberate delivery to a different route and requires explicit channel and target. to answer the current conversation use action="reply" with no target.',
+    );
+  }
+  if (!normalizeOptionalString(params.invisibleThinking)) {
+    throw new Error(MISSING_INVISIBLE_THINKING_ERROR);
+  }
+  return params;
+}
+
+function asResultRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function bubbleTarget(
+  value: Record<string, unknown>,
+  fallback: { channel: string; target: string },
+): { channel: string; target: string; messageId: string } | undefined {
+  const messageId = normalizeOptionalString(value.messageId);
+  if (!messageId) {
+    return undefined;
+  }
+  return {
+    channel: normalizeOptionalString(value.channel) ?? fallback.channel,
+    target:
+      normalizeOptionalString(value.chatId) ??
+      normalizeOptionalString(value.channelId) ??
+      normalizeOptionalString(value.roomId) ??
+      normalizeOptionalString(value.conversationId) ??
+      fallback.target,
+    messageId,
+  };
+}
+
+function successfulDispatchBubbles(
+  result: MessageActionRunResult,
+  fallback: { channel: string; target: string },
+): Array<{ channel: string; target: string; messageId: string }> {
+  if (result.kind === "send" && result.sendResult) {
+    const results =
+      result.sendResult.results ?? (result.sendResult.result ? [result.sendResult.result] : []);
+    return results.flatMap((value) => {
+      const bubble = bubbleTarget(asResultRecord(value) ?? {}, fallback);
+      return bubble ? [bubble] : [];
+    });
+  }
+  const toolResult = getToolResult(result);
+  const details = asResultRecord(toolResult?.details);
+  const payload = asResultRecord(result.payload);
+  const candidates = Array.isArray(details?.results)
+    ? details.results
+    : details?.result
+      ? [details.result]
+      : Array.isArray(payload?.results)
+        ? payload.results
+        : payload?.result
+          ? [payload.result]
+          : [result.payload];
+  return candidates.flatMap((value) => {
+    const bubble = bubbleTarget(asResultRecord(value) ?? {}, fallback);
+    return bubble ? [bubble] : [];
+  });
+}
+
+function visibleSuppressionMessage(reason: VisibleTextSuppressionReason): string {
+  return reason === "inbound_metadata_echo"
+    ? "Suppressed outbound message text because it matched inbound runtime metadata."
+    : reason === "poll_vote_echo"
+      ? "Suppressed outbound text because it only restated the poll vote just cast."
+      : "Suppressed outbound message text because it matched internal runtime context.";
+}
+
 export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
   const loadConfigForTool = options?.getRuntimeConfig ?? getRuntimeConfig;
   const getScopedSecretTargetsForTool =
@@ -1205,6 +1390,23 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
   const resolveSecretRefsForTool =
     options?.resolveCommandSecretRefsViaGateway ?? resolveCommandSecretRefsViaGateway;
   const runMessageActionForTool = options?.runMessageAction ?? runMessageAction;
+  const validateConversationalQuote =
+    options?.validateConversationalQuote ??
+    (async ({ channel }: { channel: string; target: string; quoteReply: string }) => {
+      const normalizedChannel = normalizeMessageChannel(channel);
+      if (!normalizedChannel || !isDeliverableMessageChannel(normalizedChannel)) {
+        throw new Error(`quote is unsupported for channel ${channel}`);
+      }
+      const support = await resolveOutboundDurableFinalDeliverySupport({
+        cfg: options?.config ?? loadConfigForTool(),
+        channel: normalizedChannel,
+        requirements: { replyTo: true },
+      });
+      if (!support.ok) {
+        const detail = support.reason === "capability_mismatch" ? ` (${support.capability})` : "";
+        throw new Error(`quote is unsupported for channel ${normalizedChannel}${detail}`);
+      }
+    });
   let generatedIdempotencyCounter = 0;
   // Poll-vote echo record lives in the session-scoped map (recentPollVoteBySession)
   // so it survives the run boundary between the vote and the follow-up text; a
@@ -1237,19 +1439,22 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
         })
       : undefined);
   const schema = options?.config
-    ? buildMessageToolSchema({
-        cfg: options.config,
-        currentChannelProvider: effectiveCurrentChannel.currentChannelProvider,
-        currentChannelId: effectiveCurrentChannel.currentChannelId,
-        currentThreadTs,
-        currentMessageId: options.currentMessageId,
-        currentAccountId: agentAccountId,
-        sessionKey: options.agentSessionKey,
-        sessionId: options.sessionId,
-        agentId: resolvedAgentId,
-        requesterSenderId: options.requesterSenderId,
-        senderIsOwner: options.senderIsOwner,
-      })
+    ? buildMessageToolSchema(
+        {
+          cfg: options.config,
+          currentChannelProvider: effectiveCurrentChannel.currentChannelProvider,
+          currentChannelId: effectiveCurrentChannel.currentChannelId,
+          currentThreadTs,
+          currentMessageId: options.currentMessageId,
+          currentAccountId: agentAccountId,
+          sessionKey: options.agentSessionKey,
+          sessionId: options.sessionId,
+          agentId: resolvedAgentId,
+          requesterSenderId: options.requesterSenderId,
+          senderIsOwner: options.senderIsOwner,
+        },
+        options.allowedConversationalActions,
+      )
     : MessageToolSchema;
   const description = buildMessageToolDescription({
     config: options?.config,
@@ -1263,6 +1468,7 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
     agentId: resolvedAgentId,
     requireExplicitTarget: options?.requireExplicitTarget,
     sourceReplyDeliveryMode: options?.sourceReplyDeliveryMode,
+    allowedConversationalActions: options?.allowedConversationalActions,
     requesterSenderId: options?.requesterSenderId,
     senderIsOwner: options?.senderIsOwner,
   });
@@ -1273,6 +1479,8 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
     displaySummary: "Send and manage messages across configured channels.",
     description,
     parameters: schema,
+    prepareArguments: (args) =>
+      prepareMessageToolArguments(args, options?.allowedConversationalActions) as never,
     execute: async (toolCallId, args, signal) => {
       if (signal?.aborted) {
         throw createAbortError("Message send aborted");
@@ -1316,22 +1524,322 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
         const suppressionReason = sanitizeStringArrayParam(params, field, bootPromptForSession);
         suppressedVisiblePayloadReason ??= suppressionReason;
       }
-      const sanitizedPresentation = sanitizePresentationTextFieldsResult(
-        params.presentation,
-        bootPromptForSession,
-      );
-      params.presentation = sanitizedPresentation.value;
-      suppressedVisiblePayloadReason ??= sanitizedPresentation.suppressionReason;
-      const sanitizedInteractive = sanitizePresentationTextFieldsResult(
-        params.interactive,
-        bootPromptForSession,
-      );
-      params.interactive = sanitizedInteractive.value;
-      suppressedVisiblePayloadReason ??= sanitizedInteractive.suppressionReason;
+      if ("presentation" in params) {
+        const sanitizedPresentation = sanitizePresentationTextFieldsResult(
+          params.presentation,
+          bootPromptForSession,
+        );
+        params.presentation = sanitizedPresentation.value;
+        suppressedVisiblePayloadReason ??= sanitizedPresentation.suppressionReason;
+      }
+      if ("interactive" in params) {
+        const sanitizedInteractive = sanitizePresentationTextFieldsResult(
+          params.interactive,
+          bootPromptForSession,
+        );
+        params.interactive = sanitizedInteractive.value;
+        suppressedVisiblePayloadReason ??= sanitizedInteractive.suppressionReason;
+      }
 
       const action = readStringParam(params, "action", {
         required: true,
       }) as ChannelMessageActionName;
+      const isConversationalAction = CORE_CONVERSATIONAL_ACTIONS.includes(
+        action as (typeof CORE_CONVERSATIONAL_ACTIONS)[number],
+      );
+      if (isConversationalAction) {
+        const pollVoteEchoRoute = resolvePollVoteEchoRoute({
+          action,
+          args: params,
+          channel:
+            normalizeOptionalString(params.channel) ??
+            effectiveCurrentChannel.currentChannelProvider,
+          accountId: normalizeOptionalString(params.accountId) ?? agentAccountId,
+          currentChannelId: effectiveCurrentChannel.currentChannelId,
+          currentMessagingTarget: effectiveCurrentChannel.currentMessagingTarget,
+        });
+        let recentPollVote = pollEchoSessionKey
+          ? recentPollVoteBySession.get(pollEchoSessionKey)
+          : undefined;
+        if (
+          recentPollVote &&
+          pollEchoSessionKey &&
+          Date.now() - recentPollVote.recordedAt > POLL_VOTE_ECHO_TTL_MS
+        ) {
+          recentPollVoteBySession.delete(pollEchoSessionKey);
+          recentPollVote = undefined;
+        }
+        let pollVoteEchoConsumed = false;
+        const allowedMessageFields = new Set(
+          Object.keys(
+            buildSendSchema({
+              includePresentation: true,
+              includeDeliveryPin: true,
+              includeBestEffort: true,
+            }),
+          ),
+        );
+        const allowedReactionFields = new Set(
+          Object.keys(
+            resolveChannelMessageToolSchemaProperties(
+              buildMessageActionDiscoveryInput(
+                {
+                  cfg: options?.config ?? loadConfigForTool(),
+                  currentChannelProvider: effectiveCurrentChannel.currentChannelProvider,
+                  currentChannelId: effectiveCurrentChannel.currentChannelId,
+                  currentThreadTs,
+                  currentMessageId: options?.currentMessageId,
+                  currentAccountId: agentAccountId,
+                  sessionKey: options?.agentSessionKey,
+                  sessionId: options?.sessionId,
+                  agentId: resolvedAgentId,
+                  requesterSenderId: options?.requesterSenderId,
+                  senderIsOwner: options?.senderIsOwner,
+                },
+                normalizeMessageChannel(effectiveCurrentChannel.currentChannelProvider) ??
+                  undefined,
+              ),
+              "react",
+            ),
+          ),
+        );
+        for (const ownedField of ["message", "replyTo", "quoteText", "threadId"]) {
+          allowedMessageFields.delete(ownedField);
+        }
+        const atomic = await createConversationalAction().execute(params, {
+          currentReplyTarget:
+            effectiveCurrentChannel.currentChannelProvider &&
+            effectiveCurrentChannel.currentMessagingTarget
+              ? {
+                  channel: effectiveCurrentChannel.currentChannelProvider,
+                  target: effectiveCurrentChannel.currentMessagingTarget,
+                  ...(options?.currentMessageId != null
+                    ? { messageId: String(options.currentMessageId) }
+                    : {}),
+                  ...(agentAccountId ? { accountId: agentAccountId } : {}),
+                }
+              : undefined,
+          allowedMessageFields,
+          allowedReactionFields,
+          hasMessageContent: hasSanitizedSendPayloadContent,
+          validateQuote: validateConversationalQuote,
+          sanitizeVisibleMessage: (value) => {
+            if (
+              !pollVoteEchoConsumed &&
+              recentPollVote &&
+              pollEchoSessionKey &&
+              sourceReplySinkDeliveryMode === "message_tool_only" &&
+              pollVoteEchoRoute === recentPollVote.route
+            ) {
+              pollVoteEchoConsumed = true;
+              recentPollVoteBySession.delete(pollEchoSessionKey);
+              if (isPollVoteEchoText(recentPollVote.option, value)) {
+                return {
+                  text: "",
+                  suppression: {
+                    reason: "poll_vote_echo",
+                    message: visibleSuppressionMessage("poll_vote_echo"),
+                  },
+                };
+              }
+            }
+            const sanitized = sanitizeUserVisibleToolTextResult(value, bootPromptForSession);
+            const text = normalizeOptionalString(sanitized.text) ?? "";
+            return {
+              text,
+              ...(sanitized.suppressionReason
+                ? {
+                    suppression: {
+                      reason: sanitized.suppressionReason,
+                      message: visibleSuppressionMessage(sanitized.suppressionReason),
+                    },
+                  }
+                : {}),
+            };
+          },
+          recordOutcome: options?.onConversationOutcome,
+          dispatch: async (dispatchInput): Promise<ConversationalDispatchResult> => {
+            const dispatchParams = { ...dispatchInput.params };
+            const dispatchAction = dispatchInput.action;
+            const rawConfig = options?.config ?? loadConfigForTool();
+            const scope = resolveMessageSecretScope({
+              channel: dispatchParams.channel,
+              target: dispatchParams.target,
+              fallbackChannel: effectiveCurrentChannel.currentChannelProvider,
+              accountId: dispatchParams.accountId,
+              fallbackAccountId: agentAccountId,
+            });
+            const scopedTargets = getScopedSecretTargetsForTool({
+              config: rawConfig,
+              channel: scope.channel,
+              accountId: scope.accountId,
+            });
+            const cfg = (
+              await resolveSecretRefsForTool({
+                config: rawConfig,
+                commandName: "tools.message",
+                targetIds: scopedTargets.targetIds,
+                ...(scopedTargets.allowedPaths ? { allowedPaths: scopedTargets.allowedPaths } : {}),
+                mode: "enforce_resolved",
+              })
+            ).resolvedConfig;
+            const accountId = readStringParam(dispatchParams, "accountId") ?? agentAccountId;
+            if (accountId) {
+              dispatchParams.accountId = accountId;
+            }
+            let autogeneratedDeliveryFingerprint: string | undefined;
+            let actionIdempotencyKey = normalizeOptionalString(dispatchParams.idempotencyKey);
+            if (!actionIdempotencyKey && options?.runId) {
+              autogeneratedDeliveryFingerprint = buildMessageToolDeliveryFingerprint({
+                action: dispatchAction,
+                params: dispatchParams,
+              });
+              actionIdempotencyKey = failedAutogeneratedIdempotencyKeys.get(
+                autogeneratedDeliveryFingerprint,
+              );
+              if (!actionIdempotencyKey) {
+                const operationId =
+                  normalizeMessageToolIdempotencyKeyPart(toolCallId) ??
+                  String(++generatedIdempotencyCounter);
+                actionIdempotencyKey = buildMessageToolAutogeneratedIdempotencyKey({
+                  runId: normalizeMessageToolIdempotencyKeyPart(options.runId) ?? options.runId,
+                  deliveryFingerprint: autogeneratedDeliveryFingerprint,
+                  operationId: `${operationId}:${dispatchInput.authoredIndex}`,
+                });
+              }
+              dispatchParams.idempotencyKey = actionIdempotencyKey;
+            }
+            const gatewayResolved = resolveGatewayOptions(readGatewayCallOptions(dispatchParams));
+            const gateway = {
+              url: gatewayResolved.url,
+              token: gatewayResolved.token,
+              timeoutMs: gatewayResolved.timeoutMs,
+              clientName: GATEWAY_CLIENT_IDS.GATEWAY_CLIENT,
+              clientDisplayName: "agent",
+              mode: GATEWAY_CLIENT_MODES.BACKEND,
+            };
+            const toolContext = {
+              currentChannelId: effectiveCurrentChannel.currentChannelId,
+              currentMessagingTarget: effectiveCurrentChannel.currentMessagingTarget,
+              currentChannelProvider: effectiveCurrentChannel.currentChannelProvider,
+              currentThreadTs,
+              currentMessageId: options?.currentMessageId,
+              replyToMode,
+              hasRepliedRef: options?.hasRepliedRef,
+              sameChannelThreadRequired: options?.sameChannelThreadRequired,
+              skipCrossContextDecoration: true,
+            };
+            const fallback = {
+              channel:
+                normalizeOptionalString(dispatchParams.channel) ??
+                effectiveCurrentChannel.currentChannelProvider ??
+                "unknown",
+              target:
+                normalizeOptionalString(dispatchParams.target) ??
+                effectiveCurrentChannel.currentMessagingTarget ??
+                "unknown",
+            };
+            try {
+              const result = await runMessageActionForTool({
+                cfg,
+                action: dispatchAction,
+                params: dispatchParams,
+                defaultAccountId: accountId ?? undefined,
+                requesterAccountId: agentAccountId,
+                requesterSenderId: options?.requesterSenderId,
+                senderIsOwner: options?.senderIsOwner,
+                gateway,
+                toolContext,
+                sessionKey: options?.agentSessionKey,
+                sessionId: options?.sessionId,
+                agentId: resolvedAgentId,
+                sandboxRoot: options?.sandboxRoot,
+                sourceReplyDeliveryMode: sourceReplySinkDeliveryMode,
+                inboundEventKind: options?.inboundEventKind,
+                inboundAudio: options?.hasCurrentInboundAudio?.() ?? options?.currentInboundAudio,
+                literalSyntax: true,
+                abortSignal: signal,
+              });
+              const sendResult = result.kind === "send" ? result.sendResult : undefined;
+              const bubbles = successfulDispatchBubbles(result, fallback);
+              if (
+                autogeneratedDeliveryFingerprint &&
+                actionIdempotencyKey &&
+                failedAutogeneratedIdempotencyKeys.get(autogeneratedDeliveryFingerprint) ===
+                  actionIdempotencyKey
+              ) {
+                failedAutogeneratedIdempotencyKeys.delete(autogeneratedDeliveryFingerprint);
+              }
+              if (sendResult?.deliveryStatus === "suppressed") {
+                return {
+                  ok: true,
+                  bubbles,
+                  suppressed: {
+                    reason: "output_safety",
+                    message: "The outbound payload was suppressed before platform delivery.",
+                  },
+                };
+              }
+              if (
+                sendResult?.deliveryStatus === "failed" ||
+                sendResult?.deliveryStatus === "partial_failed"
+              ) {
+                if (autogeneratedDeliveryFingerprint && actionIdempotencyKey) {
+                  failedAutogeneratedIdempotencyKeys.set(
+                    autogeneratedDeliveryFingerprint,
+                    actionIdempotencyKey,
+                  );
+                }
+                return {
+                  ok: false,
+                  bubbles,
+                  error: sendResult.error ?? "message delivery failed",
+                };
+              }
+              return { ok: true, bubbles };
+            } catch (error) {
+              if (autogeneratedDeliveryFingerprint && actionIdempotencyKey) {
+                failedAutogeneratedIdempotencyKeys.set(
+                  autogeneratedDeliveryFingerprint,
+                  actionIdempotencyKey,
+                );
+              }
+              if (isOutboundDeliveryError(error)) {
+                return {
+                  ok: false,
+                  bubbles: error.results.flatMap((value) => {
+                    const bubble = bubbleTarget(asResultRecord(value) ?? {}, fallback);
+                    return bubble ? [bubble] : [];
+                  }),
+                  error: error.message,
+                };
+              }
+              return {
+                ok: false,
+                bubbles: [],
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+          },
+        });
+        return {
+          ...jsonResult({
+            ...atomic.payload,
+            ...(atomic.terminate && atomic.outcome ? { conversationOutcome: atomic.outcome } : {}),
+            ...(atomic.outcome === "sent"
+              ? {
+                  messageToolDeliveryState: (params.endTurn === false
+                    ? "provisional"
+                    : "terminal") satisfies MessageToolDeliveryState,
+                }
+              : {}),
+          }),
+          ...(atomic.terminate ? { terminate: true } : {}),
+        };
+      }
+      if (!normalizeOptionalString(params.invisibleThinking)) {
+        throw new Error(`${action} requires non-empty invisibleThinking`);
+      }
       if (
         suppressedVisiblePayloadReason &&
         action === "send" &&
@@ -1508,6 +2016,12 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
           abortSignal: signal,
         });
       } catch (error) {
+        if (autogeneratedDeliveryFingerprint && actionIdempotencyKey) {
+          failedAutogeneratedIdempotencyKeys.set(
+            autogeneratedDeliveryFingerprint,
+            actionIdempotencyKey,
+          );
+        }
         if (autogeneratedDeliveryFingerprint && actionIdempotencyKey) {
           failedAutogeneratedIdempotencyKeys.set(
             autogeneratedDeliveryFingerprint,

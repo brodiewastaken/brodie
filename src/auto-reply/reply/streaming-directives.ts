@@ -1,28 +1,10 @@
 // Converts streaming reply directives into payload delivery decisions.
 import { hasOutboundReplyContent } from "openclaw/plugin-sdk/reply-payload";
 import { parseInlineDirectives } from "../../utils/directive-tags.js";
-import {
-  isSilentReplyPrefixText,
-  isSilentReplyText,
-  SILENT_REPLY_TOKEN,
-  startsWithSilentToken,
-  stripLeadingSilentToken,
-} from "../tokens.js";
 import type { ReplyDirectiveParseResult } from "./reply-directives.js";
-
-type PendingReplyState = {
-  explicitId?: string;
-  sawCurrent: boolean;
-  hasTag: boolean;
-};
-
-type ParsedChunk = ReplyDirectiveParseResult & {
-  replyToExplicitId?: string;
-};
 
 type ConsumeOptions = {
   final?: boolean;
-  silentToken?: string;
 };
 
 type SplitTrailingDirectiveOptions = {
@@ -91,35 +73,25 @@ export const splitTrailingDirective = (
   };
 };
 
-const parseChunk = (raw: string, options?: { silentToken?: string }): ParsedChunk => {
+const parseChunk = (raw: string): ReplyDirectiveParseResult => {
   let text = raw ?? "";
 
   const replyParsed = parseInlineDirectives(text, {
     stripAudioTag: true,
-    stripReplyTags: true,
+    stripReplyTags: false,
   });
 
-  if (replyParsed.hasReplyTag || replyParsed.hasAudioTag) {
+  if (replyParsed.hasAudioTag) {
     text = replyParsed.text;
-  }
-
-  const silentToken = options?.silentToken ?? SILENT_REPLY_TOKEN;
-  const isSilent =
-    isSilentReplyText(text, silentToken) || isSilentReplyPrefixText(text, silentToken);
-  if (isSilent) {
-    text = "";
-  } else if (startsWithSilentToken(text, silentToken)) {
-    text = stripLeadingSilentToken(text, silentToken);
   }
 
   return {
     text,
-    replyToId: replyParsed.replyToId,
-    replyToExplicitId: replyParsed.replyToExplicitId,
-    replyToCurrent: replyParsed.replyToCurrent,
-    replyToTag: replyParsed.hasReplyTag,
+    replyToId: undefined,
+    replyToCurrent: undefined,
+    replyToTag: false,
     audioAsVoice: replyParsed.audioAsVoice,
-    isSilent,
+    isSilent: false,
   };
 };
 
@@ -128,13 +100,9 @@ const hasRenderableContent = (parsed: ReplyDirectiveParseResult): boolean =>
 
 export function createStreamingDirectiveAccumulator() {
   let pendingTail = "";
-  let pendingReply: PendingReplyState = { sawCurrent: false, hasTag: false };
-  let activeReply: PendingReplyState = { sawCurrent: false, hasTag: false };
 
   const reset = () => {
     pendingTail = "";
-    pendingReply = { sawCurrent: false, hasTag: false };
-    activeReply = { sawCurrent: false, hasTag: false };
   };
 
   const consume = (raw: string, options: ConsumeOptions = {}): ReplyDirectiveParseResult | null => {
@@ -151,40 +119,11 @@ export function createStreamingDirectiveAccumulator() {
       return null;
     }
 
-    const parsed = parseChunk(combined, { silentToken: options.silentToken });
-    const hasTag = activeReply.hasTag || pendingReply.hasTag || parsed.replyToTag;
-    const sawCurrent =
-      activeReply.sawCurrent || pendingReply.sawCurrent || parsed.replyToCurrent === true;
-    const explicitId =
-      parsed.replyToExplicitId ?? pendingReply.explicitId ?? activeReply.explicitId;
-
-    const combinedResult: ReplyDirectiveParseResult = {
-      ...parsed,
-      replyToId: explicitId,
-      replyToCurrent: sawCurrent,
-      replyToTag: hasTag,
-    };
-
-    if (!hasRenderableContent(combinedResult)) {
-      if (hasTag) {
-        pendingReply = {
-          explicitId,
-          sawCurrent,
-          hasTag,
-        };
-      }
+    const parsed = parseChunk(combined);
+    if (!hasRenderableContent(parsed)) {
       return null;
     }
-
-    // Keep reply context sticky for the full assistant message so split/newline chunks
-    // stay on the same native reply target until reset() is called for the next message.
-    activeReply = {
-      explicitId,
-      sawCurrent,
-      hasTag,
-    };
-    pendingReply = { sawCurrent: false, hasTag: false };
-    return combinedResult;
+    return parsed;
   };
 
   return {

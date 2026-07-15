@@ -55,14 +55,16 @@ describe("group runtime loading", () => {
       silentToken: "NO_REPLY",
     });
     expect(toolOnlyContext).toContain("Normal final replies are private");
-    expect(toolOnlyContext).toContain("message tool with action=send");
+    expect(toolOnlyContext).toContain("message tool with action=reply");
     expect(toolOnlyContext).toContain("Be a good group participant");
     expect(toolOnlyContext).toContain("Avoid Markdown tables");
     expect(toolOnlyContext).toContain("wrap bare URLs");
     expect(toolOnlyContext).toContain("<https://example.com>");
-    expect(toolOnlyContext).toContain("do not call message(action=send)");
     expect(toolOnlyContext).toContain(
-      "Be extremely selective: reply only when directly addressed or clearly helpful.",
+      "use message(action=silence) with the reason in invisibleThinking",
+    );
+    expect(toolOnlyContext).toContain(
+      "Be extremely selective: reply only when directly addressed or clearly additive. If a message is addressed to someone else by name, it is theirs to answer; stay out unless invited or correcting a key fact.",
     );
     expect(toolOnlyContext).not.toContain('reply with exactly "NO_REPLY"');
     const channelToolOnlyContext = isolatedGroups.buildGroupChatContext({
@@ -71,10 +73,9 @@ describe("group runtime loading", () => {
       silentReplyPolicy: "allow",
       silentToken: "NO_REPLY",
     });
-    expect(channelToolOnlyContext).toContain("visible channel response");
-    expect(channelToolOnlyContext).toContain("posted to this channel");
-    expect(channelToolOnlyContext).not.toContain("visible group response");
-    expect(channelToolOnlyContext).not.toContain("posted to the group");
+    expect(channelToolOnlyContext).toContain("message tool with action=reply");
+    expect(channelToolOnlyContext).toContain("current conversation is already bound");
+    expect(channelToolOnlyContext).not.toContain("message tool with action=send");
     const telegramContext = isolatedGroups.buildGroupChatContext({
       sessionCtx: { ChatType: "group", Provider: "telegram" },
       silentReplyPolicy: "allow",
@@ -115,8 +116,10 @@ describe("group runtime loading", () => {
       sourceReplyDeliveryMode: "message_tool_only",
     });
     expect(toolOnlyContext).toContain("Normal final replies are private");
-    expect(toolOnlyContext).toContain("message tool with action=send");
-    expect(toolOnlyContext).toContain("do not call message(action=send)");
+    expect(toolOnlyContext).toContain("message tool with action=reply");
+    expect(toolOnlyContext).toContain(
+      "use message(action=silence) with the reason in invisibleThinking",
+    );
     expect(toolOnlyContext).not.toContain("NO_REPLY");
     expect(toolOnlyContext).not.toContain("Your replies are automatically sent");
   });

@@ -398,7 +398,7 @@ describe("handleMessageUpdate text signatures", () => {
     expect(context.state.lastStreamedAssistantCleaned).toBe("Hello");
   });
 
-  it("keeps stripped reply directives out of later plain deltas", () => {
+  it("keeps legacy reply directives literal across later plain deltas", () => {
     const onAgentEvent = vi.fn();
     const context = createMessageUpdateContext({ onAgentEvent });
 
@@ -418,11 +418,14 @@ describe("handleMessageUpdate text signatures", () => {
     expect(onAgentEvent.mock.calls.map(([event]) => event)).toMatchObject([
       {
         stream: "assistant",
-        data: { text: "Hello", delta: "Hello" },
+        data: {
+          text: "[[reply_to_current]]\nHello",
+          delta: "[[reply_to_current]]\nHello",
+        },
       },
       {
         stream: "assistant",
-        data: { text: "Hello world", delta: " world" },
+        data: { text: "[[reply_to_current]]\nHello world", delta: " world" },
       },
     ]);
   });
@@ -720,7 +723,7 @@ describe("handleMessageUpdate text signatures", () => {
     expect(context.state.lastAssistantStreamItemId).toBe("item-2");
   });
 
-  it("preserves phase-aware voice and reply directives while deferring final media delivery", () => {
+  it("preserves literal reply text while deferring phase-aware voice and media delivery", () => {
     const accumulator = createStreamingDirectiveAccumulator();
     const ctx = createMessageUpdateContext({
       consumePartialReplyDirectives: vi.fn((text: string, options?: { final?: boolean }) =>
@@ -753,17 +756,14 @@ describe("handleMessageUpdate text signatures", () => {
       }),
     );
 
-    expect(ctx.state.blockBuffer).toBe("Done.");
+    expect(ctx.state.blockBuffer).toBe("Done.\n[[reply_to_current]]");
     expect(
       consumePendingAssistantReplyDirectivesIntoReply(ctx.state, {
-        text: "Done.",
+        text: "Done.\n[[reply_to_current]]",
       }),
     ).toEqual({
-      text: "Done.",
+      text: "Done.\n[[reply_to_current]]",
       audioAsVoice: true,
-      replyToId: undefined,
-      replyToTag: true,
-      replyToCurrent: true,
     });
   });
 });

@@ -18,11 +18,14 @@ import { hasOnlyAssistantReasoningContent } from "../../replay-turn-classificati
 import type { AgentMessage } from "../../runtime/index.js";
 import {
   hasCommittedMessagingToolDeliveryEvidence,
+  hasCommittedSourceReplyDeliveryEvidence,
   hasMessagingToolDeliveryEvidence,
+  hasVisibleTerminalOutboundDeliveryEvidence,
 } from "../delivery-evidence.js";
 import { isZeroUsageEmptyStopAssistantTurn } from "../empty-assistant-turn.js";
 import { assessLastAssistantMessage } from "../thinking.js";
 import type { EmbeddedRunLivenessState } from "../types.js";
+import { hasCommittedConversationalOutcome } from "./attempt-trajectory-status.js";
 import type { EmbeddedRunAttemptResult } from "./types.js";
 
 type ReplayMetadataAttempt = Pick<
@@ -39,6 +42,7 @@ type IncompleteTurnAttempt = Pick<
   EmbeddedRunAttemptResult,
   | "assistantTexts"
   | "clientToolCalls"
+  | "conversationOutcome"
   | "currentAttemptAssistant"
   | "yieldDetected"
   | "didSendDeterministicApprovalPrompt"
@@ -47,9 +51,11 @@ type IncompleteTurnAttempt = Pick<
   | "toolAudioAsVoice"
   | "toolTrustedLocalMedia"
   | "hasToolMediaBlockReply"
-  | "didDeliverSourceReplyViaMessageTool"
-  | "messagingToolSourceReplyPayloads"
   | "didSendViaMessagingTool"
+  | "messageToolDeliveryState"
+  | "didDeliverSourceReplyViaMessageTool"
+  | "messageToolSourceReplyDeliveryState"
+  | "messagingToolSourceReplyPayloads"
   | "messagingToolSentTexts"
   | "messagingToolSentMediaUrls"
   | "messagingToolSentTargets"
@@ -177,7 +183,9 @@ type TerminalAttemptState = Pick<
   | "toolAudioAsVoice"
   | "toolTrustedLocalMedia"
   | "hasToolMediaBlockReply"
+  | "messageToolDeliveryState"
   | "didDeliverSourceReplyViaMessageTool"
+  | "messageToolSourceReplyDeliveryState"
   | "messagingToolSourceReplyPayloads"
   | "successfulCronAdds"
 > &
@@ -185,6 +193,8 @@ type TerminalAttemptState = Pick<
     Pick<
       EmbeddedRunAttemptResult,
       | "acceptedSessionSpawns"
+      | "conversationOutcome"
+      | "didSendViaMessagingTool"
       | "messagingToolSentTexts"
       | "messagingToolSentMediaUrls"
       | "messagingToolSentTargets"
@@ -195,6 +205,7 @@ type TerminalAttemptState = Pick<
 
 export function hasAttemptTerminalState(attempt: TerminalAttemptState): boolean {
   return Boolean(
+    hasCommittedConversationalOutcome(attempt.conversationOutcome) ||
     attempt.clientToolCalls ||
     attempt.yieldDetected ||
     attempt.didSendDeterministicApprovalPrompt ||
@@ -204,16 +215,31 @@ export function hasAttemptTerminalState(attempt: TerminalAttemptState): boolean 
     attempt.toolAudioAsVoice ||
     attempt.toolTrustedLocalMedia ||
     attempt.hasToolMediaBlockReply ||
-    attempt.didDeliverSourceReplyViaMessageTool ||
-    attempt.messagingToolSourceReplyPayloads?.length ||
-    hasCommittedMessagingToolDeliveryEvidence({
+    hasVisibleTerminalOutboundDeliveryEvidence({
+      didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+      messageToolDeliveryState: attempt.messageToolDeliveryState,
+      didDeliverSourceReplyViaMessageTool: attempt.didDeliverSourceReplyViaMessageTool,
+      messageToolSourceReplyDeliveryState: attempt.messageToolSourceReplyDeliveryState,
+      messagingToolSourceReplyPayloads: attempt.messagingToolSourceReplyPayloads,
       messagingToolSentTexts: attempt.messagingToolSentTexts ?? [],
       messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls ?? [],
       messagingToolSentTargets: attempt.messagingToolSentTargets ?? [],
+      acceptedSessionSpawns: attempt.acceptedSessionSpawns,
+      successfulCronAdds: attempt.successfulCronAdds,
     }) ||
-    hasAcceptedSessionSpawn(attempt.acceptedSessionSpawns) ||
-    hasAsyncStartedToolActivity(attempt.toolMetas) ||
-    (attempt.successfulCronAdds ?? 0) > 0,
+    hasAsyncStartedToolActivity(attempt.toolMetas),
+  );
+}
+
+function hasCompletedProvisionalSourceReply(params: {
+  attempt: IncompleteTurnAttempt;
+  assistant: { stopReason?: string } | null | undefined;
+}): boolean {
+  const stopReason = params.assistant?.stopReason?.trim().toLowerCase();
+  return (
+    params.attempt.messageToolSourceReplyDeliveryState === "provisional" &&
+    hasCommittedSourceReplyDeliveryEvidence(params.attempt) &&
+    (stopReason === "completed" || stopReason === "end_turn" || stopReason === "stop")
   );
 }
 
@@ -232,7 +258,9 @@ export function resolveIncompleteTurnPayloadText(params: {
   // Prefer the current attempt's terminal message. The session fallback can
   // still point at the pre-tool turn after a post-tool answer completes. (#80918)
   const assistant = params.attempt.currentAttemptAssistant ?? params.attempt.lastAssistant;
-  const hasTerminalOutput = hasAttemptTerminalState(params.attempt);
+  const hasTerminalOutput =
+    hasAttemptTerminalState(params.attempt) ||
+    hasCompletedProvisionalSourceReply({ attempt: params.attempt, assistant });
   // Tool-use expects a post-tool continuation, while length means the output
   // budget ended. Partial visible text completes neither. (#76477)
   const incompleteTerminalAssistant = isIncompleteTerminalAssistantTurn({
@@ -261,19 +289,11 @@ export function resolveIncompleteTurnPayloadText(params: {
     return null;
   }
 
+  if (hasTerminalOutput) {
+    return null;
+  }
+
   if (hasOnlySilentAssistantReply(params.attempt.assistantTexts)) {
-    return null;
-  }
-
-  if (hasCommittedMessagingToolDeliveryEvidence(params.attempt)) {
-    return null;
-  }
-
-  if (hasAcceptedSessionSpawn(params.attempt.acceptedSessionSpawns)) {
-    return null;
-  }
-
-  if (hasAsyncStartedToolActivity(params.attempt.toolMetas)) {
     return null;
   }
 
@@ -643,6 +663,9 @@ export function shouldTreatEmptyAssistantReplyAsSilent(params: {
   timedOut: boolean;
   attempt: IncompleteTurnAttempt;
 }): boolean {
+  if (params.attempt.conversationOutcome === "deliberate_silence") {
+    return true;
+  }
   if (!params.allowEmptyAssistantReplyAsSilent || shouldSkipNonVisibleTurnRetry(params)) {
     return false;
   }

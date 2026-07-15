@@ -200,6 +200,8 @@ export async function prepareOutboundMirrorRoute(params: {
     replyToIsExplicit: params.replyToIsExplicit,
   });
   const replyToId = readStringParam(params.actionParams, "replyTo");
+  const routeReplyToId =
+    params.replyToIsExplicit === false && params.currentSessionKey ? undefined : replyToId;
   const outboundRoute =
     params.agentId && !params.dryRun
       ? await params.resolveOutboundSessionRoute({
@@ -210,7 +212,7 @@ export async function prepareOutboundMirrorRoute(params: {
           target: params.to,
           currentSessionKey: params.currentSessionKey,
           resolvedTarget: params.resolvedTarget,
-          replyToId,
+          ...(routeReplyToId ? { replyToId: routeReplyToId } : {}),
           threadId: resolvedThreadId,
         })
       : null;

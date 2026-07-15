@@ -28,6 +28,8 @@ export type CommandContext = {
   to?: string;
   /** Internal marker to prevent duplicate reset-hook emission across command pipelines. */
   resetHookTriggered?: boolean;
+  /** Authorized hard reset/new action recognized by the command pipeline. */
+  resetTriggeredAction?: "new" | "reset";
   /** Internal marker for prompt reload without session rollover. */
   softResetTriggered?: boolean;
   /** Optional tail to append after a soft reset startup prompt. */

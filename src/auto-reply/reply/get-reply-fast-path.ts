@@ -310,6 +310,11 @@ export function initFastReplySessionState(params: {
     sessionId,
     isNewSession: resetTriggered || !existingEntry,
     resetTriggered,
+    resetTriggeredAction: resetTriggered
+      ? resetMatch?.[1]?.toLowerCase() === "reset"
+        ? "reset"
+        : "new"
+      : undefined,
     systemSent: false,
     abortedLastRun: false,
     storePath,

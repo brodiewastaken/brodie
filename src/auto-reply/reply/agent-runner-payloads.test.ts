@@ -1197,7 +1197,7 @@ describe("buildReplyPayloads media filter integration", () => {
 
     expect(replyPayloads).toHaveLength(1);
     expectFields(replyPayloads[0], {
-      text: undefined,
+      text: "NO_REPLY",
       mediaUrl: "file:///tmp/voice.opus",
       audioAsVoice: true,
     });
@@ -1213,7 +1213,7 @@ describe("buildReplyPayloads media filter integration", () => {
     expect(replyPayloads).toHaveLength(0);
   });
 
-  it("suppresses warning text when silent media payloads fail normalization", async () => {
+  it("does not treat retired silence text as a silent failed-media payload", async () => {
     const normalizeMediaPaths = async () => {
       throw new Error("file not found");
     };
@@ -1224,7 +1224,13 @@ describe("buildReplyPayloads media filter integration", () => {
       normalizeMediaPaths,
     });
 
-    expect(replyPayloads).toHaveLength(0);
+    expect(replyPayloads).toHaveLength(1);
+    expectFields(replyPayloads[0], {
+      text: "NO_REPLY\n⚠️ Media failed.",
+      mediaUrl: undefined,
+      mediaUrls: undefined,
+      audioAsVoice: false,
+    });
   });
 
   it("surfaces a warning when non-silent media payloads fail normalization", async () => {

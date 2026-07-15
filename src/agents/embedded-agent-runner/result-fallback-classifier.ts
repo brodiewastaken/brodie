@@ -73,6 +73,9 @@ export function mergeEmbeddedAgentRunResultForModelFallbackExhaustion(params: {
 }
 
 export function hasDeliberateSilentTerminalReply(result: EmbeddedAgentRunResult): boolean {
+  if (result.conversationOutcome === "deliberate_silence") {
+    return true;
+  }
   if (result.meta.error?.kind === "hook_block") {
     return true;
   }
@@ -228,6 +231,9 @@ export function classifyEmbeddedAgentRunResultForModelFallback(params: {
       includeReasoningPayloads: false,
     })
   ) {
+    return null;
+  }
+  if (hasDeliberateSilentTerminalReply(params.result)) {
     return null;
   }
   if (fallbackSafeIncompleteTurn) {

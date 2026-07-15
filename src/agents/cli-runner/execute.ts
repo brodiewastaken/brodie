@@ -54,9 +54,13 @@ import {
   isMessagingToolSendAction,
   isMessagingToolTargetEvidenceAction,
 } from "../embedded-agent-messaging.js";
-import type {
-  MessagingToolSend,
-  MessagingToolSourceReplyPayload,
+import {
+  mergeMessageToolDeliveryState,
+  mergeMessageToolSourceReplyDeliveryState,
+  type MessageToolDeliveryState,
+  type MessageToolSourceReplyDeliveryState,
+  type MessagingToolSend,
+  type MessagingToolSourceReplyPayload,
 } from "../embedded-agent-messaging.types.js";
 import {
   collectMessagingMediaUrlsFromRecord,
@@ -608,7 +612,9 @@ export async function executePreparedCliRun(
       let cleanupMcpCaptureAttempt: (() => Promise<void>) | undefined;
       let yielded = false;
       let didSendViaMessagingTool = false;
+      let messageToolDeliveryState: MessageToolDeliveryState | undefined;
       let didDeliverSourceReplyViaMessageTool = false;
+      let messageToolSourceReplyDeliveryState: MessageToolSourceReplyDeliveryState | undefined;
       let inFlightUnclassifiedMcpRequests = 0;
       let inFlightMessagingToolCalls = 0;
       const inFlightPreparedMessagingCalls = new Set<McpLoopbackToolCallStart>();
@@ -831,9 +837,11 @@ export async function executePreparedCliRun(
           ...output,
           ...(yielded ? { yielded: true as const } : {}),
           ...(didSendViaMessagingTool ? { didSendViaMessagingTool: true } : {}),
+          ...(messageToolDeliveryState ? { messageToolDeliveryState } : {}),
           ...(didDeliverSourceReplyViaMessageTool
             ? { didDeliverSourceReplyViaMessageTool: true }
             : {}),
+          ...(messageToolSourceReplyDeliveryState ? { messageToolSourceReplyDeliveryState } : {}),
           ...(messagingToolSentTexts.length > 0
             ? { messagingToolSentTexts: messagingToolSentTexts.slice() }
             : {}),
@@ -964,6 +972,15 @@ export async function executePreparedCliRun(
           didSendViaMessagingTool = true;
           const toolArgs = paramsLocal.args ?? {};
           const isMessagingSend = isMessagingToolSendAction(paramsLocal.toolName, toolArgs);
+          if (
+            isMessagingSend ||
+            isMessagingToolTargetEvidenceAction(paramsLocal.toolName, toolArgs)
+          ) {
+            messageToolDeliveryState = mergeMessageToolDeliveryState(
+              messageToolDeliveryState,
+              toolArgs.endTurn === false ? "provisional" : "terminal",
+            );
+          }
           const content = isMessagingSend
             ? extractCliMessagingContent(toolArgs, paramsLocal.result)
             : {};
@@ -988,6 +1005,10 @@ export async function executePreparedCliRun(
               })
             ) {
               didDeliverSourceReplyViaMessageTool = true;
+              messageToolSourceReplyDeliveryState = mergeMessageToolSourceReplyDeliveryState(
+                messageToolSourceReplyDeliveryState,
+                toolArgs.endTurn === false ? "provisional" : "terminal",
+              );
               const sourceReplyPayload = extractMessagingToolSourceReplyPayload(paramsLocal.result);
               if (sourceReplyPayload) {
                 if (messagingToolSourceReplyPayloads.length >= CLI_MESSAGING_EVIDENCE_MAX_CALLS) {
@@ -1920,7 +1941,9 @@ export async function executePreparedCliRun(
       if (runFailed) {
         throw attachCliMessagingDeliveryEvidence(runError, {
           didSendViaMessagingTool,
+          messageToolDeliveryState,
           didDeliverSourceReplyViaMessageTool,
+          messageToolSourceReplyDeliveryState,
           messagingToolSentTexts,
           messagingToolSentMediaUrls,
           messagingToolSentTargets,

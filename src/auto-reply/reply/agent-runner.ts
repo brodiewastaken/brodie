@@ -13,8 +13,10 @@ import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import { isLikelyContextOverflowError } from "../../agents/embedded-agent-helpers/errors.js";
 import {
   hasCommittedSourceReplyDeliveryEvidence,
+  hasCommittedTerminalSourceReplyDeliveryEvidence,
   hasVisibleCommittedMessagingToolDeliveryEvidence,
   hasVisibleOutboundDeliveryEvidence,
+  hasVisibleTerminalOutboundDeliveryEvidence,
 } from "../../agents/embedded-agent-runner/delivery-evidence.js";
 import { hasDeliberateSilentTerminalReply } from "../../agents/embedded-agent-runner/result-fallback-classifier.js";
 import {
@@ -67,6 +69,7 @@ import {
   isReplyPayloadStatusNotice,
   markReplyPayloadForSourceSuppressionDelivery,
   setReplyPayloadMetadata,
+  shouldReplyPayloadBypassSourceSuppression,
 } from "../reply-payload.js";
 import type { OriginatingChannelType, TemplateContext } from "../templating.js";
 import type { VerboseLevel } from "../thinking.js";
@@ -139,11 +142,11 @@ import type { TypingController } from "./typing.js";
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
 const RESTART_LIFECYCLE_REPLY_TEXT =
   "⚠️ Gateway is restarting. Please wait a few seconds and try again.";
-
 function scheduleFollowupDrainAfterReplyOperationClear(params: {
   operation: ReplyOperation;
   queueKey: string;
   runFollowup: (run: FollowupRun) => Promise<void>;
+  beforeDrain?: () => Promise<void>;
 }): void {
   runAfterReplyOperationClear(params.operation, (admissionSessionId) => {
     const completedSessionId = params.operation.sessionId;
@@ -156,7 +159,12 @@ function scheduleFollowupDrainAfterReplyOperationClear(params: {
                 ? { ...queued, admissionSessionId }
                 : queued,
             );
-    scheduleFollowupDrain(params.queueKey, runFollowupAfterClear);
+    const schedule = () => scheduleFollowupDrain(params.queueKey, runFollowupAfterClear);
+    if (!params.beforeDrain) {
+      schedule();
+      return;
+    }
+    void params.beforeDrain().then(schedule, schedule);
   });
 }
 
@@ -199,6 +207,7 @@ function resolveSourceReplyPolicy(params: {
   sessionKey: string;
   runtimePolicySessionKey?: string;
   opts?: GetReplyOptions;
+  requestedSourceReplyDeliveryMode?: GetReplyOptions["sourceReplyDeliveryMode"];
 }): ReturnType<typeof resolveSourceReplyVisibilityPolicy> {
   const sendPolicy = resolveSendPolicy({
     cfg: params.cfg,
@@ -214,7 +223,7 @@ function resolveSourceReplyPolicy(params: {
   return resolveSourceReplyVisibilityPolicy({
     cfg: params.cfg,
     ctx: params.sessionCtx,
-    requested: params.opts?.sourceReplyDeliveryMode,
+    requested: params.opts?.sourceReplyDeliveryMode ?? params.requestedSourceReplyDeliveryMode,
     sendPolicy,
   });
 }
@@ -1534,6 +1543,11 @@ export async function runReplyAgent(params: {
         current.sessionId === replyOperation.sessionId && current.abortedLastRun !== true
           ? patch
           : null,
+      {
+        // Restart recovery metadata does not change assembled context.
+        skipMaintenance: true,
+        takeCacheOwnership: true,
+      },
     );
     if (persisted) {
       activeSessionEntry = persisted;
@@ -1564,6 +1578,13 @@ export async function runReplyAgent(params: {
         current.restartRecoveryDeliveryRunId === restartRecoveryDeliveryRunId
           ? patch
           : null,
+      {
+        // This cleanup runs before the reply operation releases its session
+        // writer. Scheduling maintenance here can wait on that same writer and
+        // prevent a terminal failure payload from reaching the dispatcher.
+        skipMaintenance: true,
+        takeCacheOwnership: true,
+      },
     );
     if (persisted) {
       activeSessionEntry = persisted;
@@ -1623,6 +1644,7 @@ export async function runReplyAgent(params: {
       cleanupTranscripts: true,
     });
   let preflightCompactionApplied;
+  let completedReplyResult: ReplyPayload | ReplyPayload[] | undefined;
 
   try {
     await typingSignals.signalRunStart();
@@ -1978,7 +2000,6 @@ export async function runReplyAgent(params: {
       clearCliSessionBinding,
       preserveFreshTotalTokensOnStaleUsage: preflightCompactionApplied,
     });
-
     const successfulSourceReplyDelivery = hasSuccessfulSourceReplyDelivery({
       blockReplyPipeline,
       directlySentBlockKeys,
@@ -1988,6 +2009,19 @@ export async function runReplyAgent(params: {
     });
     const committedMessagingToolSourceReplyDelivery =
       hasCommittedSourceReplyDeliveryEvidence(runResult);
+    const committedTerminalMessagingToolSourceReplyDelivery =
+      hasCommittedTerminalSourceReplyDeliveryEvidence(runResult);
+    const sourceReplyDeliverySuppressed = sessionKey
+      ? resolveSourceReplyPolicy({
+          cfg,
+          sessionCtx,
+          sessionEntry: activeSessionEntry,
+          sessionKey,
+          runtimePolicySessionKey,
+          opts,
+          requestedSourceReplyDeliveryMode: followupRun.run.sourceReplyDeliveryMode,
+        }).suppressDelivery
+      : false;
     const successfulSideEffectDelivery =
       successfulSourceReplyDelivery ||
       committedMessagingToolSourceReplyDelivery ||
@@ -1998,8 +2032,7 @@ export async function runReplyAgent(params: {
         blockReplyPipeline,
         directlySentBlockPayloads,
       }) ||
-      committedMessagingToolSourceReplyDelivery ||
-      hasVisibleOutboundDeliveryEvidence(runResult) ||
+      hasVisibleTerminalOutboundDeliveryEvidence(runResult) ||
       runResult.didSendDeterministicApprovalPrompt === true;
     // Compaction notices are progress, not a terminal reply. Dispatcher-backed
     // delivery settles after this run returns, so it cannot prove turn completion here.
@@ -2031,7 +2064,7 @@ export async function runReplyAgent(params: {
         });
     if (
       opts?.sourceReplyDeliveryMode === "message_tool_only" &&
-      committedMessagingToolSourceReplyDelivery
+      committedTerminalMessagingToolSourceReplyDelivery
     ) {
       await opts.onObservedReplyDelivery?.();
     }
@@ -2219,7 +2252,19 @@ export async function runReplyAgent(params: {
         !isReplyPayloadStatusNotice(payload) &&
         normalizeReplyPayload(payload, { applyChannelTransforms: false }) !== null,
     );
-    if (shouldDeliverTerminalFailure && !hasTerminalReplyPayload && terminalFailurePayload) {
+    const hasDeliverableTerminalReplyPayload = replyPayloads.some(
+      (payload) =>
+        !payload.isReasoning &&
+        !payload.isCommentary &&
+        !isReplyPayloadStatusNotice(payload) &&
+        normalizeReplyPayload(payload, { applyChannelTransforms: false }) !== null &&
+        (!sourceReplyDeliverySuppressed || shouldReplyPayloadBypassSourceSuppression(payload)),
+    );
+    if (
+      shouldDeliverTerminalFailure &&
+      !hasDeliverableTerminalReplyPayload &&
+      terminalFailurePayload
+    ) {
       const terminalPayloadResult = await buildFinalPayloads([terminalFailurePayload]);
       replyPayloads = [...replyPayloads, ...terminalPayloadResult.replyPayloads];
       didLogHeartbeatStrip = terminalPayloadResult.didLogHeartbeatStrip;
@@ -2592,6 +2637,7 @@ export async function runReplyAgent(params: {
         sessionKey,
         runtimePolicySessionKey,
         opts,
+        requestedSourceReplyDeliveryMode: followupRun.run.sourceReplyDeliveryMode,
       });
       const finalDeliveryText = buildPendingFinalDeliveryText(finalPayloads);
       // #85714: warn only for unusually substantive private final text. In
@@ -2663,8 +2709,7 @@ export async function runReplyAgent(params: {
     const result = returnWithQueuedFollowupDrain(
       finalPayloads.length === 1 ? finalPayloads[0] : finalPayloads,
     );
-
-    return result;
+    completedReplyResult = result;
   } catch (error) {
     // Drain/restart aborts stay silent and defer to post-restart main-session
     // recovery, which resumes the interrupted turn (or emits its own genuine
@@ -2723,26 +2768,44 @@ export async function runReplyAgent(params: {
     returnWithQueuedFollowupDrain(undefined);
     throw error;
   } finally {
-    try {
-      await clearRestartRecoveryDeliveryContext();
-    } catch (error) {
-      logVerbose(
-        `failed to clear restart recovery delivery context for ${sessionKey ?? "unknown"}: ${String(
-          error,
-        )}`,
-      );
-    }
-    if (shouldDrainQueuedFollowupsAfterClear) {
-      scheduleFollowupDrainAfterReplyOperationClear({
-        operation: replyOperation,
-        queueKey,
-        runFollowup: runFollowupTurn,
-      });
-      if (!providedReplyOperation) {
-        replyOperation.complete();
+    const clearRecoveryContext = async () => {
+      try {
+        await clearRestartRecoveryDeliveryContext();
+      } catch (error) {
+        logVerbose(
+          `failed to clear restart recovery delivery context for ${sessionKey ?? "unknown"}: ${String(
+            error,
+          )}`,
+        );
       }
-    } else if (!providedReplyOperation) {
-      replyOperation.complete();
+    };
+    if (providedReplyOperation) {
+      // Dispatch owns this operation until the returned payload has settled.
+      // Clearing persisted recovery metadata while the operation is active can
+      // wait on the same session writer and prevent the payload from returning.
+      if (shouldDrainQueuedFollowupsAfterClear) {
+        scheduleFollowupDrainAfterReplyOperationClear({
+          operation: replyOperation,
+          queueKey,
+          runFollowup: runFollowupTurn,
+          beforeDrain: clearRecoveryContext,
+        });
+      } else {
+        runAfterReplyOperationClear(replyOperation, () => {
+          void clearRecoveryContext();
+        });
+      }
+    } else {
+      const recoveryCleanup = clearRecoveryContext();
+      if (shouldDrainQueuedFollowupsAfterClear) {
+        scheduleFollowupDrainAfterReplyOperationClear({
+          operation: replyOperation,
+          queueKey,
+          runFollowup: runFollowupTurn,
+        });
+      }
+      replyOperation.completeWithAfterClearBarrier(recoveryCleanup);
+      await recoveryCleanup;
     }
     blockReplyPipeline?.stop();
     typing.markRunComplete();
@@ -2754,4 +2817,5 @@ export async function runReplyAgent(params: {
     // `active` flag.  Same pattern as the followup runner fix (#26881).
     typing.markDispatchIdle();
   }
+  return completedReplyResult;
 }

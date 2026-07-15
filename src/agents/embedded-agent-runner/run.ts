@@ -418,7 +418,11 @@ function normalizeEmbeddedRunAttemptResult(
     messagingToolSourceReplyPayloads?:
       | EmbeddedRunAttemptForRunner["messagingToolSourceReplyPayloads"]
       | null;
+    messageToolDeliveryState?: EmbeddedRunAttemptForRunner["messageToolDeliveryState"] | null;
     didDeliverSourceReplyViaMessageTool?: boolean | null;
+    messageToolSourceReplyDeliveryState?:
+      | EmbeddedRunAttemptForRunner["messageToolSourceReplyDeliveryState"]
+      | null;
     itemLifecycle?: EmbeddedRunAttemptForRunner["itemLifecycle"] | null;
   };
   return {
@@ -431,7 +435,16 @@ function normalizeEmbeddedRunAttemptResult(
     messagingToolSentMediaUrls: raw.messagingToolSentMediaUrls ?? [],
     messagingToolSentTargets: raw.messagingToolSentTargets ?? [],
     messagingToolSourceReplyPayloads: raw.messagingToolSourceReplyPayloads ?? [],
+    messageToolDeliveryState:
+      raw.messageToolDeliveryState === "provisional" || raw.messageToolDeliveryState === "terminal"
+        ? raw.messageToolDeliveryState
+        : undefined,
     didDeliverSourceReplyViaMessageTool: raw.didDeliverSourceReplyViaMessageTool === true,
+    messageToolSourceReplyDeliveryState:
+      raw.messageToolSourceReplyDeliveryState === "provisional" ||
+      raw.messageToolSourceReplyDeliveryState === "terminal"
+        ? raw.messageToolSourceReplyDeliveryState
+        : undefined,
     itemLifecycle: raw.itemLifecycle ?? {
       startedCount: 0,
       completedCount: 0,
@@ -2304,6 +2317,7 @@ async function runEmbeddedAgentInternal(
             onExecutionPhase: params.onExecutionPhase,
             extraSystemPrompt: params.extraSystemPrompt,
             sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+            allowedConversationalActions: params.allowedConversationalActions,
             inputProvenance: params.inputProvenance,
             streamParams: params.streamParams,
             modelRun: params.modelRun,
@@ -3639,6 +3653,7 @@ async function runEmbeddedAgentInternal(
             retriesSoFar: consecutiveSameModelRateLimitRetries,
             retriedSameModelRateLimit: false,
           });
+          let terminalAssistantFailoverError: Error | undefined;
           if (assistantFailoverOutcome.action === "throw") {
             traceAttempts.push({
               provider: activeErrorContext.provider,
@@ -3665,7 +3680,11 @@ async function runEmbeddedAgentInternal(
                 failedModel: assistantFailoverOutcome.error.model ?? modelId,
               });
             }
-            throw assistantFailoverOutcome.error;
+            if (hasMessagingToolDeliveryEvidence(attempt)) {
+              terminalAssistantFailoverError = assistantFailoverOutcome.error;
+            } else {
+              throw assistantFailoverOutcome.error;
+            }
           }
           const usageMeta = buildUsageAgentMetaFields({
             usageAccumulator,
@@ -3736,6 +3755,56 @@ async function runEmbeddedAgentInternal(
             toolTrustedLocalMedia: attempt.toolTrustedLocalMedia,
             sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
           });
+          if (terminalAssistantFailoverError) {
+            const providerErrorMessage = formatErrorMessage(terminalAssistantFailoverError);
+            const attemptToolSummary = buildTraceToolSummary({
+              toolMetas: attempt.toolMetas,
+              hadFailure: true,
+            });
+            const failureSignal = resolveEmbeddedRunFailureSignal({
+              trigger: params.trigger,
+              lastToolError: attempt.lastToolError,
+            });
+            setTerminalLifecycleMeta({
+              replayInvalid: true,
+              livenessState: "abandoned",
+              stopReason: attemptAssistant?.stopReason as string | undefined,
+            });
+            return {
+              meta: {
+                durationMs: Date.now() - started,
+                agentMeta,
+                aborted,
+                systemPromptReport: attempt.systemPromptReport,
+                finalPromptText: attempt.finalPromptText,
+                finalAssistantVisibleText,
+                finalAssistantRawText,
+                replayInvalid: true,
+                livenessState: "abandoned",
+                error: {
+                  kind: "provider_error",
+                  message: providerErrorMessage,
+                  fallbackSafe: false,
+                },
+                toolSummary: attemptToolSummary,
+                ...(failureSignal ? { failureSignal } : {}),
+                agentHarnessResultClassification: attempt.agentHarnessResultClassification,
+              },
+              didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              messageToolDeliveryState: attempt.messageToolDeliveryState,
+              didDeliverSourceReplyViaMessageTool:
+                attempt.didDeliverSourceReplyViaMessageTool === true,
+              messageToolSourceReplyDeliveryState: attempt.messageToolSourceReplyDeliveryState,
+              didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
+              messagingToolSentTexts: attempt.messagingToolSentTexts,
+              messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
+              messagingToolSentTargets: attempt.messagingToolSentTargets,
+              messagingToolSourceReplyPayloads: attempt.messagingToolSourceReplyPayloads,
+              heartbeatToolResponse: attempt.heartbeatToolResponse,
+              successfulCronAdds: attempt.successfulCronAdds,
+              acceptedSessionSpawns: attempt.acceptedSessionSpawns,
+            };
+          }
           const timedOutDuringPrompt =
             timedOut && !timedOutDuringCompaction && !timedOutDuringToolExecution;
           const finalAssistantStopReason = (attemptAssistant?.stopReason ?? "")
@@ -3856,8 +3925,10 @@ async function runEmbeddedAgentInternal(
                 agentHarnessResultClassification: attempt.agentHarnessResultClassification,
               },
               didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              messageToolDeliveryState: attempt.messageToolDeliveryState,
               didDeliverSourceReplyViaMessageTool:
                 attempt.didDeliverSourceReplyViaMessageTool === true,
+              messageToolSourceReplyDeliveryState: attempt.messageToolSourceReplyDeliveryState,
               didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
               messagingToolSentTexts: attempt.messagingToolSentTexts,
               messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
@@ -4067,8 +4138,10 @@ async function runEmbeddedAgentInternal(
                 agentHarnessResultClassification: attempt.agentHarnessResultClassification,
               },
               didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              messageToolDeliveryState: attempt.messageToolDeliveryState,
               didDeliverSourceReplyViaMessageTool:
                 attempt.didDeliverSourceReplyViaMessageTool === true,
+              messageToolSourceReplyDeliveryState: attempt.messageToolSourceReplyDeliveryState,
               didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
               messagingToolSentTexts: attempt.messagingToolSentTexts,
               messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
@@ -4159,8 +4232,10 @@ async function runEmbeddedAgentInternal(
                 agentHarnessResultClassification: attempt.agentHarnessResultClassification,
               },
               didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+              messageToolDeliveryState: attempt.messageToolDeliveryState,
               didDeliverSourceReplyViaMessageTool:
                 attempt.didDeliverSourceReplyViaMessageTool === true,
+              messageToolSourceReplyDeliveryState: attempt.messageToolSourceReplyDeliveryState,
               didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
               messagingToolSentTexts: attempt.messagingToolSentTexts,
               messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
@@ -4288,10 +4363,17 @@ async function runEmbeddedAgentInternal(
               },
               contextManagement:
                 autoCompactionCount > 0 ? { lastTurnCompactions: autoCompactionCount } : undefined,
+              trajectoryTerminalStatus: attempt.trajectoryTerminalStatus,
+              trajectoryTerminalError: attempt.trajectoryTerminalError,
             },
             didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+            messageToolDeliveryState: attempt.messageToolDeliveryState,
+            ...(attempt.conversationOutcome
+              ? { conversationOutcome: attempt.conversationOutcome }
+              : {}),
             didDeliverSourceReplyViaMessageTool:
               attempt.didDeliverSourceReplyViaMessageTool === true,
+            messageToolSourceReplyDeliveryState: attempt.messageToolSourceReplyDeliveryState,
             didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
             messagingToolSentTexts: attempt.messagingToolSentTexts,
             messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,

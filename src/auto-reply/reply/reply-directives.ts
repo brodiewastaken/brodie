@@ -1,7 +1,5 @@
 /** Parses inline reply directives such as media, reply targets, audio, and silence. */
 import { splitMediaFromOutput } from "../../media/parse.js";
-import { parseInlineDirectives } from "../../utils/directive-tags.js";
-import { isSilentReplyPayloadText, SILENT_REPLY_TOKEN } from "../tokens.js";
 
 /** Parsed outbound reply directives and media extracted from model text. */
 export type ReplyDirectiveParseResult = {
@@ -27,31 +25,6 @@ type ReplyDirectiveParseOptions = {
   extractMarkdownImages?: boolean;
   extractMediaDirectives?: boolean;
 };
-
-const REACTION_DIRECTIVE_RE = /\[\[\s*(react|react_to_current)\s*:\s*([^\]\n]+?)\s*\]\]/giu;
-
-function parseReactionDirective(text: string, currentMessageId?: string) {
-  let reaction:
-    | {
-        emoji: string;
-        replyToCurrent?: boolean;
-        replyToId?: string;
-      }
-    | undefined;
-  const cleaned = text.replace(REACTION_DIRECTIVE_RE, (_match, kind: string, rawEmoji: string) => {
-    const emoji = rawEmoji.trim();
-    if (emoji && !reaction) {
-      const replyToCurrent = kind.toLowerCase() === "react_to_current";
-      reaction = {
-        emoji,
-        ...(replyToCurrent ? { replyToCurrent: true } : {}),
-        ...(replyToCurrent && currentMessageId ? { replyToId: currentMessageId } : {}),
-      };
-    }
-    return "";
-  });
-  return { text: reaction ? cleaned.trimStart() : cleaned, reaction };
-}
 
 export function mergeReactionDirectiveChannelData(
   channelData: Record<string, unknown> | undefined,
@@ -84,38 +57,17 @@ export function parseReplyDirectives(
     extractMarkdownImages: options.extractMarkdownImages,
     extractMediaDirectives: options.extractMediaDirectives,
   });
-  let text = split.text ?? "";
-
-  const reactionParsed = parseReactionDirective(text, options.currentMessageId);
-  text = reactionParsed.text;
-
-  const replyParsed = parseInlineDirectives(text, {
-    currentMessageId: options.currentMessageId,
-    stripAudioTag: false,
-    stripReplyTags: true,
-  });
-
-  if (replyParsed.hasReplyTag) {
-    text = replyParsed.text;
-  }
-
-  const silentToken = options.silentToken ?? SILENT_REPLY_TOKEN;
-  const isSilent = isSilentReplyPayloadText(text, silentToken);
-  if (isSilent) {
-    // Silent payloads must not leak the control token into channel delivery.
-    text = "";
-  }
+  const text = split.text ?? "";
 
   return {
     text,
     mediaUrls: split.mediaUrls,
     mediaUrl: split.mediaUrl,
-    reaction: reactionParsed.reaction,
-    replyToId: replyParsed.replyToId ?? reactionParsed.reaction?.replyToId,
-    replyToCurrent:
-      replyParsed.replyToCurrent || reactionParsed.reaction?.replyToCurrent || undefined,
-    replyToTag: replyParsed.hasReplyTag,
+    reaction: undefined,
+    replyToId: undefined,
+    replyToCurrent: undefined,
+    replyToTag: false,
     audioAsVoice: split.audioAsVoice,
-    isSilent,
+    isSilent: false,
   };
 }

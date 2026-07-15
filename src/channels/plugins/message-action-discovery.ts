@@ -359,6 +359,7 @@ function mergeToolSchemaProperties(
  */
 export function resolveChannelMessageToolSchemaProperties(
   params: ChannelMessageActionDiscoveryParams,
+  action?: ChannelMessageActionName,
 ): Record<string, TSchema> {
   const properties: Record<string, TSchema> = {};
   const currentChannel = resolveMessageActionDiscoveryChannelId(params.channel);
@@ -376,6 +377,9 @@ export function resolveChannelMessageToolSchemaProperties(
       context: discoveryBase,
       includeSchema: true,
     }).schemaContributions) {
+      if (action && contribution.actions?.length && !contribution.actions.includes(action)) {
+        continue;
+      }
       const visibility = contribution.visibility ?? "current-channel";
       if (currentChannel) {
         if (visibility === "all-configured" || plugin.id === currentChannel) {
@@ -397,6 +401,9 @@ export function resolveChannelMessageToolSchemaProperties(
         context: discoveryBase,
         includeSchema: true,
       }).schemaContributions) {
+        if (action && contribution.actions?.length && !contribution.actions.includes(action)) {
+          continue;
+        }
         const visibility = contribution.visibility ?? "current-channel";
         if (visibility === "all-configured" || currentActions.pluginId === currentChannel) {
           mergeToolSchemaProperties(properties, contribution.properties);

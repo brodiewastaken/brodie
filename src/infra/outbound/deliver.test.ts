@@ -2488,7 +2488,7 @@ describe("deliverOutboundPayloads", () => {
     expect(sendText).not.toHaveBeenCalled();
   });
 
-  it("keeps payload outcome indexes tied to original input payload positions", async () => {
+  it("keeps literal retired-token payload outcome indexes tied to input positions", async () => {
     const sendMatrix = vi.fn().mockResolvedValue({
       messageId: "visible",
       roomId: "!room:example",
@@ -2506,13 +2506,19 @@ describe("deliverOutboundPayloads", () => {
       },
     });
 
-    expect(results).toHaveLength(1);
+    expect(results).toHaveLength(2);
     expect(results[0]?.channel).toBe("matrix");
     expect(results[0]?.messageId).toBe("visible");
-    expect(payloadOutcomes).toHaveLength(1);
-    const payloadOutcome = payloadOutcomes[0] as { index?: unknown; status?: unknown } | undefined;
-    expect(payloadOutcome?.index).toBe(1);
-    expect(payloadOutcome?.status).toBe("sent");
+    expect(payloadOutcomes).toHaveLength(2);
+    expect(
+      payloadOutcomes.map((outcome) => {
+        const value = outcome as { index?: unknown; status?: unknown };
+        return { index: value.index, status: value.status };
+      }),
+    ).toEqual([
+      { index: 0, status: "sent" },
+      { index: 1, status: "sent" },
+    ]);
   });
 
   it("strips internal runtime scaffolding added by message_sending hooks before delivery", async () => {
@@ -3759,7 +3765,7 @@ describe("deliverOutboundPayloads", () => {
     expect(sendMatrixOptions?.mediaUrl).toBeUndefined();
   });
 
-  it("extracts markdown images for channels that opt in", async () => {
+  it("keeps markdown images literal when legacy extraction is requested", async () => {
     const sendMatrix = vi.fn().mockResolvedValue({ messageId: "m-media", roomId: "!room" });
     setActivePluginRegistry(
       createTestRegistry([
@@ -3785,8 +3791,8 @@ describe("deliverOutboundPayloads", () => {
     const sendMatrixCall = requireMatrixSendCall(sendMatrix);
     const sendMatrixOptions = sendMatrixCall[2] as { mediaUrl?: unknown } | undefined;
     expect(sendMatrixCall[0]).toBe("!room:example");
-    expect(sendMatrixCall[1]).toBe("Chart now");
-    expect(sendMatrixOptions?.mediaUrl).toBe("https://example.com/chart.png");
+    expect(sendMatrixCall[1]).toBe("Chart ![chart](https://example.com/chart.png) now");
+    expect(sendMatrixOptions?.mediaUrl).toBeUndefined();
   });
 
   it("normalizes payloads and drops empty entries", () => {
@@ -3797,7 +3803,7 @@ describe("deliverOutboundPayloads", () => {
     ]);
     expect(normalized).toEqual([
       { text: "hi", mediaUrls: [], audioAsVoice: undefined },
-      { text: "", mediaUrls: ["https://x.test/a.jpg"], audioAsVoice: undefined },
+      { text: "MEDIA:https://x.test/a.jpg", mediaUrls: [], audioAsVoice: undefined },
     ]);
   });
 
@@ -4156,7 +4162,7 @@ describe("deliverOutboundPayloads", () => {
     expect(queuedDelivery?.renderedBatchPlan).toBe(renderedBatchPlan);
   });
 
-  it("suppresses direct silent replies from the outbound session", async () => {
+  it("delivers retired direct silence tokens as literal text", async () => {
     const sendMatrix = vi.fn().mockResolvedValue({ messageId: "m-silent", roomId: "!room" });
     const cfg: OpenClawConfig = {
       agents: {
@@ -4181,10 +4187,10 @@ describe("deliverOutboundPayloads", () => {
       },
     });
 
-    expect(sendMatrix).not.toHaveBeenCalled();
+    expect(sendMatrix).toHaveBeenCalledWith("!room:example", "NO_REPLY", expect.any(Object));
   });
 
-  it("keeps allowed group silent replies silent during outbound delivery", async () => {
+  it("delivers retired group silence tokens as literal text", async () => {
     const sendMatrix = vi.fn().mockResolvedValue({ messageId: "m-silent", roomId: "!room" });
 
     await deliverOutboundPayloads({
@@ -4198,7 +4204,7 @@ describe("deliverOutboundPayloads", () => {
       },
     });
 
-    expect(sendMatrix).not.toHaveBeenCalled();
+    expect(sendMatrix).toHaveBeenCalledWith("!room:example", "NO_REPLY", expect.any(Object));
   });
 
   it("bails out without sending when a concurrent drain already claimed the queue entry", async () => {

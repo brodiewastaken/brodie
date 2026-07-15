@@ -43,6 +43,9 @@ describe("buildSessionResetSystemMessage", () => {
     expect(prompt).toContain("Abhay just sent `brodie /new keep the model`");
     expect(prompt).toContain("today: memory/journal/2026-07/2026-07-15.md");
     expect(prompt).toContain("yesterday: memory/journal/2026-07/2026-07-14.md");
+    expect(prompt).toContain(
+      "keep `invisibleThinking` honest and short here: this is a scripted greeting, so one line noting the room and the vibe is plenty.",
+    );
     expect(prompt).not.toContain("[missing]");
   });
 
@@ -102,5 +105,8 @@ describe("buildSessionResetSystemMessage", () => {
     });
     expect(prompt).toContain("- member-1");
     expect(prompt).toContain("- member-40");
+    expect(prompt).toContain(
+      "keep `invisibleThinking` honest and short here: this is a scripted greeting, so one line noting the room and the vibe is plenty.",
+    );
   });
 });

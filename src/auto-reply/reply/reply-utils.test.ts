@@ -1312,15 +1312,13 @@ describe("isSingleUseReplyToMode", () => {
 });
 
 describe("createStreamingDirectiveAccumulator", () => {
-  it("stashes reply_to_current until a renderable chunk arrives", () => {
+  it("keeps reply_to_current as literal renderable text", () => {
     const accumulator = createStreamingDirectiveAccumulator();
 
-    expect(accumulator.consume("[[reply_to_current]]")).toBeNull();
-
-    const result = accumulator.consume("Hello");
-    expect(result?.text).toBe("Hello");
-    expect(result?.replyToCurrent).toBe(true);
-    expect(result?.replyToTag).toBe(true);
+    const result = accumulator.consume("[[reply_to_current]]");
+    expect(result?.text).toBe("[[reply_to_current]]");
+    expect(result?.replyToCurrent).toBeUndefined();
+    expect(result?.replyToTag).toBe(false);
   });
 
   it("handles reply tags split across chunks", () => {
@@ -1328,8 +1326,8 @@ describe("createStreamingDirectiveAccumulator", () => {
     expect(accumulator.consume("[[reply_to_")).toBeNull();
 
     const result = accumulator.consume("current]] Yo");
-    expect(result?.text).toBe("Yo");
-    expect(result?.replyToCurrent).toBe(true);
+    expect(result?.text).toBe("[[reply_to_current]] Yo");
+    expect(result?.replyToCurrent).toBeUndefined();
   });
 
   it("handles reply tags split before the second bracket", () => {
@@ -1337,8 +1335,8 @@ describe("createStreamingDirectiveAccumulator", () => {
     expect(accumulator.consume("[")).toBeNull();
 
     const result = accumulator.consume("[reply_to_current]] Yo");
-    expect(result?.text).toBe("Yo");
-    expect(result?.replyToCurrent).toBe(true);
+    expect(result?.text).toBe("[[reply_to_current]] Yo");
+    expect(result?.replyToCurrent).toBeUndefined();
   });
 
   it("does not emit padding before a buffered trailing reply tag", () => {
@@ -1351,41 +1349,41 @@ describe("createStreamingDirectiveAccumulator", () => {
     expect(second?.text).toBe("[[");
   });
 
-  it("propagates explicit reply ids across current and subsequent chunks", () => {
+  it("keeps explicit reply ids literal without propagating metadata", () => {
     const accumulator = createStreamingDirectiveAccumulator();
 
-    expect(accumulator.consume("[[reply_to: abc-123]]")).toBeNull();
+    expect(accumulator.consume("[[reply_to: abc-123]]")?.text).toBe("[[reply_to: abc-123]]");
 
     const first = accumulator.consume("Hi");
     expect(first?.text).toBe("Hi");
-    expect(first?.replyToId).toBe("abc-123");
-    expect(first?.replyToTag).toBe(true);
+    expect(first?.replyToId).toBeUndefined();
+    expect(first?.replyToTag).toBe(false);
 
     const second = accumulator.consume("test 2");
-    expect(second?.replyToId).toBe("abc-123");
-    expect(second?.replyToTag).toBe(true);
+    expect(second?.replyToId).toBeUndefined();
+    expect(second?.replyToTag).toBe(false);
   });
 
   it("clears sticky reply context on reset", () => {
     const accumulator = createStreamingDirectiveAccumulator();
 
-    expect(accumulator.consume("[[reply_to_current]]")).toBeNull();
-    expect(accumulator.consume("first")?.replyToCurrent).toBe(true);
+    expect(accumulator.consume("[[reply_to_current]]")?.text).toBe("[[reply_to_current]]");
+    expect(accumulator.consume("first")?.replyToCurrent).toBeUndefined();
 
     accumulator.reset();
 
     const afterReset = accumulator.consume("second");
-    expect(afterReset?.replyToCurrent).toBe(false);
+    expect(afterReset?.replyToCurrent).toBeUndefined();
     expect(afterReset?.replyToTag).toBe(false);
     expect(afterReset?.replyToId).toBeUndefined();
   });
 
-  it("strips a glued leading NO_REPLY token from streamed text", () => {
+  it("keeps a glued leading NO_REPLY token as literal text", () => {
     const accumulator = createStreamingDirectiveAccumulator();
 
     const result = accumulator.consume("NO_REPLYThe user is saying hello");
 
-    expect(result?.text).toBe("The user is saying hello");
+    expect(result?.text).toBe("NO_REPLYThe user is saying hello");
   });
 
   it("keeps punctuation-start text after a leading NO_REPLY token", () => {

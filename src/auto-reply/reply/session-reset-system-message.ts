@@ -28,7 +28,7 @@ here's a few generic examples:
 
 do not limit yourself to these examples. keep it fresh and freestyle the vibe.
 
-keep every private thought in \`invisibleThinking\`. do not narrate what you read, what memory is loaded, or what you're doing. no model names, no session details, no technical meta. literally just send the greeting. one message. done.
+keep \`invisibleThinking\` honest and short here: this is a scripted greeting, so one line noting the room and the vibe is plenty. no memory contents, model names, session details, or technical meta. reply with the greeting. one message. done.
 [⚙️][SESSION RESET END]`;
 
 const GROUP_TEMPLATE = `[⚙️][SESSION RESET START]
@@ -58,7 +58,7 @@ if this is a genuinely new group with no vibe file yet, maybe something like:
 
 do not limit yourself to these examples. keep it fresh and freestyle the vibe.
 
-keep every private thought in \`invisibleThinking\`. do not narrate what you read, what memory is loaded, or what you're doing. no model names, no session details, no technical meta. literally just send the greeting. one message. done.
+keep \`invisibleThinking\` honest and short here: this is a scripted greeting, so one line noting the room and the vibe is plenty. no memory contents, model names, session details, or technical meta. reply with the greeting. one message. done.
 [⚙️][SESSION RESET END]`;
 
 function replaceAll(template: string, values: Record<string, string>): string {

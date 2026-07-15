@@ -44,7 +44,12 @@ import {
 } from "../../agents/embedded-agent-helpers.js";
 import { sanitizeUserFacingText } from "../../agents/embedded-agent-helpers/sanitize-user-facing-text.js";
 import { isMessagingToolSendAction } from "../../agents/embedded-agent-messaging.js";
+import {
+  hasProvisionalMessageToolDeliveryEvidence,
+  isAbortedRunTerminalFailure,
+} from "../../agents/embedded-agent-runner/delivery-evidence.js";
 import { mergeEmbeddedAgentRunResultForModelFallbackExhaustion } from "../../agents/embedded-agent-runner/result-fallback-classifier.js";
+import { resolvePersistedAttemptMessageToolDeliveryState } from "../../agents/embedded-agent-runner/run/message-tool-terminal.js";
 import type { RunEmbeddedAgentParams } from "../../agents/embedded-agent-runner/run/params.js";
 import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import { isFailoverError } from "../../agents/failover-error.js";
@@ -1050,6 +1055,7 @@ function buildExternalRunFailureReply(
 
 function markAgentRunFailureReplyPayload<T extends ReplyPayload>(payload: T): T {
   const marked = markReplyPayloadForSourceSuppressionDelivery(payload);
+  marked.isAgentRunFailure = true;
   if (!isSilentReplyText(marked.text, SILENT_REPLY_TOKEN)) {
     marked.isError = true;
   }
@@ -1060,16 +1066,20 @@ export function buildTerminalAgentRunFailureReplyPayload(params: {
   isHeartbeat?: boolean;
   sessionCtx: ExternalFailureConversationContext;
   cfg?: OpenClawConfig;
+  forceVisible?: boolean;
 }): ReplyPayload {
+  const failureText = params.isHeartbeat
+    ? HEARTBEAT_EXTERNAL_RUN_FAILURE_TEXT
+    : GENERIC_EXTERNAL_RUN_FAILURE_TEXT;
   return markAgentRunFailureReplyPayload({
-    text: resolveExternalRunFailureTextForConversation({
-      text: params.isHeartbeat
-        ? HEARTBEAT_EXTERNAL_RUN_FAILURE_TEXT
-        : GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
-      sessionCtx: params.sessionCtx,
-      isGenericRunnerFailure: true,
-      cfg: params.cfg,
-    }),
+    text: params.forceVisible
+      ? failureText
+      : resolveExternalRunFailureTextForConversation({
+          text: failureText,
+          sessionCtx: params.sessionCtx,
+          isGenericRunnerFailure: true,
+          cfg: params.cfg,
+        }),
   });
 }
 
@@ -2520,6 +2530,8 @@ async function runAgentTurnWithFallbackInternal(
                     lane: runLane,
                     extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
                     sourceReplyDeliveryMode: params.followupRun.run.sourceReplyDeliveryMode,
+                    allowedConversationalActions:
+                      params.followupRun.run.allowedConversationalActions,
                     silentReplyPromptMode: params.followupRun.run.silentReplyPromptMode,
                     allowEmptyAssistantReplyAsSilent:
                       params.followupRun.run.allowEmptyAssistantReplyAsSilent,
@@ -2664,6 +2676,8 @@ async function runAgentTurnWithFallbackInternal(
                     currentInboundContext: params.followupRun.currentInboundContext,
                     extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
                     sourceReplyDeliveryMode: params.followupRun.run.sourceReplyDeliveryMode,
+                    allowedConversationalActions:
+                      params.followupRun.run.allowedConversationalActions,
                     forceMessageTool:
                       params.followupRun.run.sourceReplyDeliveryMode === "message_tool_only",
                     silentReplyPromptMode: params.followupRun.run.silentReplyPromptMode,
@@ -3163,7 +3177,12 @@ async function runAgentTurnWithFallbackInternal(
       const terminalErrorMessage =
         deferredLifecycleError ??
         userFacingErrorPayload ??
-        (embeddedError ? "Agent run failed" : undefined);
+        (embeddedError ||
+        runResult.meta?.trajectoryTerminalStatus === "error" ||
+        isAbortedRunTerminalFailure(runResult)
+          ? "Agent run failed"
+          : undefined);
+      const terminalStopReason = normalizeLowercaseStringOrEmpty(runResult.meta?.stopReason);
       const emitSettledLifecycleError = (error: Error, extraData?: Record<string, unknown>) => {
         if (settledLifecycleTerminal) {
           settledLifecycleTerminal.emit("error", error, extraData);
@@ -3232,7 +3251,14 @@ async function runAgentTurnWithFallbackInternal(
         });
         params.replyOperation?.retainFailureUntilComplete();
         params.replyOperation?.fail("run_failed", exhaustionError);
-      } else if (deferredLifecycleError || embeddedError) {
+      } else if (
+        deferredLifecycleError ||
+        embeddedError ||
+        userFacingErrorPayload ||
+        runResult.meta?.trajectoryTerminalStatus === "error" ||
+        isAbortedRunTerminalFailure(runResult) ||
+        terminalStopReason === "error"
+      ) {
         const terminalError = new Error(terminalErrorMessage ?? "Agent run failed");
         terminalRunFailed = true;
         emitSettledLifecycleError(terminalError, terminalMetadata);
@@ -3474,12 +3500,18 @@ async function runAgentTurnWithFallbackInternal(
               : shouldSurfaceToControlUi
                 ? `⚠️ Agent failed before reply: ${trimmedMessage}.\nLogs: openclaw logs --follow`
                 : (externalRunFailureReply?.text ?? genericFallbackText);
-      const userVisibleFallbackText = resolveExternalRunFailureTextForConversation({
-        text: fallbackText,
-        sessionCtx: params.sessionCtx,
-        isGenericRunnerFailure: externalRunFailureReply?.isGenericRunnerFailure ?? false,
-        cfg: params.followupRun.run.config,
-      });
+      const persistedMessageToolDeliveryState = resolvePersistedAttemptMessageToolDeliveryState(
+        params.followupRun.run.sessionFile,
+      );
+      const userVisibleFallbackText =
+        persistedMessageToolDeliveryState === "provisional"
+          ? fallbackText
+          : resolveExternalRunFailureTextForConversation({
+              text: fallbackText,
+              sessionCtx: params.sessionCtx,
+              isGenericRunnerFailure: externalRunFailureReply?.isGenericRunnerFailure ?? false,
+              cfg: params.followupRun.run.config,
+            });
       const abortedSignal =
         params.replyOperation?.abortSignal.aborted === true
           ? params.replyOperation.abortSignal
@@ -3589,14 +3621,17 @@ async function runAgentTurnWithFallbackInternal(
       }
     }
   }
+  const hasProvisionalDeliveryEvidence = runResult
+    ? hasProvisionalMessageToolDeliveryEvidence(runResult)
+    : false;
   const terminalFailurePayload = terminalRunFailed
     ? buildTerminalAgentRunFailureReplyPayload({
         isHeartbeat: params.isHeartbeat,
         sessionCtx: params.sessionCtx,
         cfg: params.followupRun.run.config,
+        forceVisible: hasProvisionalDeliveryEvidence,
       })
     : undefined;
-
   return {
     kind: "success",
     runId,

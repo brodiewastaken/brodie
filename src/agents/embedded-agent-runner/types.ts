@@ -8,8 +8,11 @@ import type {
   SessionSystemPromptReport,
 } from "../../config/sessions/types.js";
 import type { DiagnosticTraceContext } from "../../infra/diagnostic-trace-context.js";
+import type { ConversationalOutcome } from "../../infra/outbound/conversational-action.js";
 import type { AcceptedSessionSpawn } from "../accepted-session-spawn.js";
 import type {
+  MessageToolDeliveryState,
+  MessageToolSourceReplyDeliveryState,
   MessagingToolSend,
   MessagingToolSourceReplyPayload,
 } from "../embedded-agent-messaging.types.js";
@@ -179,6 +182,7 @@ export type EmbeddedAgentRunMeta = {
       | "image_size"
       | "retry_limit"
       | "incomplete_turn"
+      | "provider_error"
       | "hook_block";
     message: string;
     /** True only when model fallback can retry this terminal error without repeating side effects. */
@@ -201,6 +205,9 @@ export type EmbeddedAgentRunMeta = {
   toolSummary?: ToolSummaryTrace;
   completion?: CompletionTrace;
   contextManagement?: ContextManagementTrace;
+  /** Authoritative terminal classification emitted by the completed attempt. */
+  trajectoryTerminalStatus?: "success" | "error" | "interrupted";
+  trajectoryTerminalError?: "non_deliverable_terminal_turn";
 };
 
 export type EmbeddedAgentRunResult = {
@@ -222,8 +229,13 @@ export type EmbeddedAgentRunResult = {
   // True if a messaging tool successfully sent a message.
   // Used to suppress agent's confirmation text.
   didSendViaMessagingTool?: boolean;
+  // Whether committed messaging sends were progress-only or completed visible delivery.
+  messageToolDeliveryState?: MessageToolDeliveryState;
+  conversationOutcome?: ConversationalOutcome;
   // True if message_tool_only delivered a visible reply to the current source conversation.
   didDeliverSourceReplyViaMessageTool?: boolean;
+  // Whether the source reply was progress-only or completed the visible turn.
+  messageToolSourceReplyDeliveryState?: MessageToolSourceReplyDeliveryState;
   // True if a deterministic approval prompt was sent through the tool-result channel.
   didSendDeterministicApprovalPrompt?: boolean;
   // Texts successfully sent via messaging tools during the run.

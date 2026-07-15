@@ -204,6 +204,7 @@ describe("handleCommands reset hooks", () => {
       if ("expectedContext" in testCase) {
         expectObjectFields(event.context, testCase.expectedContext, `${testCase.name}.context`);
       }
+      expect(testCase.params.command.resetTriggeredAction, testCase.name).toBe("new");
       triggerInternalHookMock.mockClear();
     }
   });

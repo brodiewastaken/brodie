@@ -136,6 +136,8 @@ export type RunMessageActionParams = {
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
   inboundEventKind?: InboundEventKind;
   inboundAudio?: boolean;
+  /** Tool-authored text treats retired control markers as literal text. */
+  literalSyntax?: boolean;
   abortSignal?: AbortSignal;
 };
 
@@ -946,10 +948,12 @@ async function buildSendPayloadParts(params: {
     message = caption;
   }
 
-  const parsed = parseInlineDirectives(message, {
-    stripAudioTag: true,
-    stripReplyTags: true,
-  });
+  const parsed = input.literalSyntax
+    ? { text: message, audioAsVoice: false, replyToId: undefined }
+    : parseInlineDirectives(message, {
+        stripAudioTag: true,
+        stripReplyTags: true,
+      });
   const mergedMediaUrls: string[] = [];
   const seenMedia = new Set<string>();
   const pushMedia = (value?: string | null) => {
