@@ -61,6 +61,7 @@ export async function createBaseDiscordMessageContext(
     displayChannelSlug: "general",
     guildInfo: null,
     guildSlug: "guild",
+    guildName: "Guild",
     channelConfig: null,
     baseSessionKey: "agent:main:discord:guild:g1",
     route: {

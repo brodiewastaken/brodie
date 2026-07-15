@@ -5,6 +5,7 @@ import {
   resolveDiscordChannelNameSafe,
   resolveDiscordChannelParentSafe,
 } from "./channel-access.js";
+import type { DiscordMessageProcessContext } from "./message-handler.context.js";
 import type { DiscordMessagePreflightContext } from "./message-handler.preflight.types.js";
 
 type DiscordInboundJobRuntimeField =
@@ -27,6 +28,7 @@ export type DiscordInboundJob = {
   payload: DiscordInboundJobPayload;
   runtime: DiscordInboundJobRuntime;
   replayKeys?: string[];
+  preparedProcessContext?: DiscordMessageProcessContext;
 };
 
 export function resolveDiscordInboundJobQueueKey(ctx: DiscordMessagePreflightContext): string {
@@ -45,7 +47,10 @@ export function resolveDiscordInboundJobQueueKey(ctx: DiscordMessagePreflightCon
 
 export function buildDiscordInboundJob(
   ctx: DiscordMessagePreflightContext,
-  options?: { replayKeys?: readonly string[] },
+  options?: {
+    replayKeys?: readonly string[];
+    preparedProcessContext?: DiscordMessageProcessContext;
+  },
 ): DiscordInboundJob {
   const {
     runtime,
@@ -83,6 +88,7 @@ export function buildDiscordInboundJob(
       discordRestFetch,
     },
     replayKeys: options?.replayKeys ? [...options.replayKeys] : undefined,
+    preparedProcessContext: options?.preparedProcessContext,
   };
 }
 

@@ -34,6 +34,7 @@ import {
   DiscordReactionListener,
   DiscordReactionRemoveListener,
   DiscordThreadUpdateListener,
+  DiscordTypingListener,
   registerDiscordListener,
 } from "./listeners.js";
 import { resolveDiscordPresenceUpdate } from "./presence.js";
@@ -293,6 +294,14 @@ export function registerDiscordMonitorListeners(params: {
   registerDiscordListener(
     params.client.listeners,
     new DiscordThreadUpdateListener(params.cfg, params.accountId, params.logger),
+  );
+  registerDiscordListener(
+    params.client.listeners,
+    new DiscordTypingListener({
+      cfg: params.cfg,
+      accountId: params.accountId,
+      botUserId: params.botUserId,
+    }),
   );
 
   if (params.discordConfig.intents?.presence) {

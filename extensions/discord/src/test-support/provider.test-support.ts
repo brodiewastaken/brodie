@@ -510,6 +510,7 @@ vi.mock(buildDiscordSourceModuleId("monitor/listeners.js"), () => ({
   DiscordReactionListener: function DiscordReactionListener() {},
   DiscordReactionRemoveListener: function DiscordReactionRemoveListener() {},
   DiscordThreadUpdateListener: function DiscordThreadUpdateListener() {},
+  DiscordTypingListener: function DiscordTypingListener() {},
   registerDiscordListener: vi.fn(),
 }));
 

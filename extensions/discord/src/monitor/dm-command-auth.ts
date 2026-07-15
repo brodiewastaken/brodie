@@ -1,6 +1,5 @@
 // Discord plugin module implements dm command auth behavior.
 import {
-  type AccessGroupMembershipFact,
   type ChannelIngressEventInput,
   type ChannelIngressIdentifierKind,
   createChannelIngressResolver,
@@ -151,24 +150,6 @@ function createDiscordIngressResolver(params: {
   });
 }
 
-function syntheticAccessGroupMembership(
-  groupName: string,
-  allowed: boolean,
-): AccessGroupMembershipFact {
-  return allowed
-    ? {
-        kind: "matched",
-        groupName,
-        source: "dynamic",
-        matchedEntryIds: [groupName],
-      }
-    : {
-        kind: "not-matched",
-        groupName,
-        source: "dynamic",
-      };
-}
-
 export async function resolveDiscordDmCommandAccess(params: {
   accountId: string;
   dmPolicy: DiscordDmPolicy;
@@ -226,11 +207,6 @@ export async function resolveDiscordTextCommandAccess(params: {
   rest?: RequestClient;
 }) {
   const ownerAllowFrom = (params.ownerAllowFrom ?? []).filter((entry) => entry.trim() !== "*");
-  const memberAccessGroup = "discord-member-access";
-  const commandGroup = params.memberAccessConfigured ? [`accessGroup:${memberAccessGroup}`] : [];
-  const accessGroupMembership = params.memberAccessConfigured
-    ? [syntheticAccessGroupMembership(memberAccessGroup, params.memberAllowed)]
-    : [];
   const result = await createDiscordIngressResolver({
     accountId: params.accountId,
     cfg: params.cfg,
@@ -242,14 +218,13 @@ export async function resolveDiscordTextCommandAccess(params: {
       kind: "group",
       id: "discord-command",
     },
-    accessGroupMembership,
     dmPolicy: "allowlist",
-    groupPolicy: "allowlist",
+    groupPolicy: "open",
     policy: {
       mutableIdentifierMatching: params.allowNameMatching ? "enabled" : "disabled",
     },
     allowFrom: ownerAllowFrom,
-    groupAllowFrom: commandGroup,
+    groupAllowFrom: [],
     command: {
       allowTextCommands: params.allowTextCommands,
       hasControlCommand: params.hasControlCommand,

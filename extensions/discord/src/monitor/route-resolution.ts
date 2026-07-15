@@ -134,8 +134,10 @@ export function shouldIgnoreStaleDiscordRouteBinding(params: {
   }
   const bound = parseAgentSessionKey(boundSessionKey);
   const routed = parseAgentSessionKey(params.route.sessionKey);
-  if (!bound || !routed || bound.rest !== routed.rest) {
+  if (!bound || !routed) {
     return false;
   }
-  return bound.agentId !== params.route.agentId;
+  const sameRouteShape =
+    bound.rest === routed.rest || bound.rest.startsWith(`${params.route.channel}:`);
+  return sameRouteShape && bound.agentId !== params.route.agentId;
 }

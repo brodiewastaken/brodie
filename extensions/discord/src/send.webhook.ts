@@ -16,6 +16,7 @@ import {
   readRetryAfter,
 } from "./internal/rest-errors.js";
 import { rewriteDiscordKnownMentions } from "./mentions.js";
+import { runDiscordOutboundSerialized } from "./outbound-serializer.js";
 import { createDiscordSendResult } from "./send.receipt.js";
 import type { DiscordSendResult } from "./send.types.js";
 
@@ -100,54 +101,61 @@ export async function sendWebhookMessageDiscord(
     mentionAliases: account.config.mentionAliases,
   });
 
-  const response = await (proxyFetch ?? fetch)(
-    resolveWebhookExecutionUrl({
-      webhookId,
-      webhookToken,
-      threadId: opts.threadId,
-      wait: opts.wait,
-    }),
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        content: rewrittenText,
-        username: normalizeOptionalString(opts.username),
-        avatar_url: normalizeOptionalString(opts.avatarUrl),
-        ...(messageReference ? { message_reference: messageReference } : {}),
-      }),
-    },
-  );
-  if (!response.ok) {
-    await throwWebhookResponseError(response);
-  }
+  return await runDiscordOutboundSerialized({
+    accountId: account.accountId,
+    threadId: opts.threadId,
+    fallbackId: `webhook:${webhookId}`,
+    task: async () => {
+      const response = await (proxyFetch ?? fetch)(
+        resolveWebhookExecutionUrl({
+          webhookId,
+          webhookToken,
+          threadId: opts.threadId,
+          wait: opts.wait,
+        }),
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            content: rewrittenText,
+            username: normalizeOptionalString(opts.username),
+            avatar_url: normalizeOptionalString(opts.avatarUrl),
+            ...(messageReference ? { message_reference: messageReference } : {}),
+          }),
+        },
+      );
+      if (!response.ok) {
+        await throwWebhookResponseError(response);
+      }
 
-  const payload: {
-    id?: string;
-    channel_id?: string;
-  } =
-    response.status === 204
-      ? {}
-      : await readProviderJsonResponse<{ id?: string; channel_id?: string }>(
-          response,
-          "Discord webhook send",
-        ).catch(() => ({}));
-  try {
-    recordChannelActivity({
-      channel: "discord",
-      accountId: account.accountId,
-      direction: "outbound",
-    });
-  } catch {
-    // Best-effort telemetry only.
-  }
-  return createDiscordSendResult({
-    result: payload,
-    fallbackChannelId: opts.threadId ? String(opts.threadId) : "",
-    kind: "text",
-    ...(opts.threadId != null ? { threadId: opts.threadId } : {}),
-    ...(replyTo ? { replyToId: replyTo } : {}),
+      const payload: {
+        id?: string;
+        channel_id?: string;
+      } =
+        response.status === 204
+          ? {}
+          : await readProviderJsonResponse<{ id?: string; channel_id?: string }>(
+              response,
+              "Discord webhook send",
+            ).catch(() => ({}));
+      try {
+        recordChannelActivity({
+          channel: "discord",
+          accountId: account.accountId,
+          direction: "outbound",
+        });
+      } catch {
+        // Best-effort telemetry only.
+      }
+      return createDiscordSendResult({
+        result: payload,
+        fallbackChannelId: opts.threadId ? String(opts.threadId) : "",
+        kind: "text",
+        ...(opts.threadId != null ? { threadId: opts.threadId } : {}),
+        ...(replyTo ? { replyToId: replyTo } : {}),
+      });
+    },
   });
 }

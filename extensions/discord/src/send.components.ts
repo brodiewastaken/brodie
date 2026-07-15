@@ -23,6 +23,7 @@ import {
   type MessagePayloadObject,
   type RequestClient,
 } from "./internal/discord.js";
+import { runDiscordOutboundSerialized } from "./outbound-serializer.js";
 import { parseAndResolveChannelRecipient } from "./recipient-resolution.js";
 import type { DiscordReplyReference } from "./reply-reference.js";
 import { loadOutboundMediaFromUrl } from "./runtime-api.js";
@@ -311,46 +312,52 @@ export async function sendDiscordComponentMessage(
     accountId: accountInfo.accountId,
   });
 
-  let result: { id: string; channel_id: string };
-  try {
-    result = (await request(
-      () =>
-        createChannelMessage<{ id: string; channel_id: string }>(rest, channelId, {
-          body,
-        }),
-      "components",
-    )) as { id: string; channel_id: string };
-  } catch (err) {
-    throw await buildDiscordSendError(err, {
-      channelId,
-      cfg,
-      rest,
-      token,
-      hasMedia: Boolean(opts.mediaUrl),
-    });
-  }
-
-  const deliveryResult = createDiscordSendResult({
-    result,
-    fallbackChannelId: channelId,
-    kind: "card",
-    ...(opts.reply ? { reply: opts.reply } : {}),
-  });
-  await opts.onDeliveryResult?.(deliveryResult);
-
-  registerBuiltDiscordComponentMessage({
-    buildResult,
-    messageId: result.id,
-    ttlMs: resolveDiscordComponentRegistryTtlMs(accountInfo.config),
-  });
-
-  recordChannelActivity({
-    channel: "discord",
+  return await runDiscordOutboundSerialized({
     accountId: accountInfo.accountId,
-    direction: "outbound",
-  });
+    channelId,
+    task: async () => {
+      let result: { id: string; channel_id: string };
+      try {
+        result = (await request(
+          () =>
+            createChannelMessage<{ id: string; channel_id: string }>(rest, channelId, {
+              body,
+            }),
+          "components",
+        )) as { id: string; channel_id: string };
+      } catch (err) {
+        throw await buildDiscordSendError(err, {
+          channelId,
+          cfg,
+          rest,
+          token,
+          hasMedia: Boolean(opts.mediaUrl),
+        });
+      }
 
-  return deliveryResult;
+      const deliveryResult = createDiscordSendResult({
+        result,
+        fallbackChannelId: channelId,
+        kind: "card",
+        ...(opts.reply ? { reply: opts.reply } : {}),
+      });
+      await opts.onDeliveryResult?.(deliveryResult);
+
+      registerBuiltDiscordComponentMessage({
+        buildResult,
+        messageId: result.id,
+        ttlMs: resolveDiscordComponentRegistryTtlMs(accountInfo.config),
+      });
+
+      recordChannelActivity({
+        channel: "discord",
+        accountId: accountInfo.accountId,
+        direction: "outbound",
+      });
+
+      return deliveryResult;
+    },
+  });
 }
 
 export async function editDiscordComponentMessage(

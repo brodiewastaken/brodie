@@ -12,12 +12,12 @@ describe("resolveDiscordOutboundSessionRoute", () => {
     });
 
     expect(route).toEqual({
-      baseSessionKey: "agent:main:discord:channel:thread-1",
+      baseSessionKey: "agent:main:conversation:discord:default:channel:thread-1",
       chatType: "channel",
       from: "discord:channel:thread-1",
       peer: { kind: "channel", id: "thread-1" },
       recipientSessionExact: false,
-      sessionKey: "agent:main:discord:channel:thread-1",
+      sessionKey: "agent:main:conversation:discord:default:channel:thread-1",
       threadId: "thread-1",
       to: "channel:thread-1",
     });
@@ -32,10 +32,10 @@ describe("resolveDiscordOutboundSessionRoute", () => {
     });
 
     expect(route).toMatchObject({
-      baseSessionKey: "agent:main:discord:channel:456",
+      baseSessionKey: "agent:main:conversation:discord:default:channel:456",
       peer: { kind: "channel", id: "456" },
       recipientSessionExact: true,
-      sessionKey: "agent:main:discord:channel:456",
+      sessionKey: "agent:main:conversation:discord:default:channel:456",
       to: "channel:456",
     });
   });
@@ -49,12 +49,12 @@ describe("resolveDiscordOutboundSessionRoute", () => {
     });
 
     expect(route).toEqual({
-      baseSessionKey: "agent:main:discord:channel:123",
+      baseSessionKey: "agent:main:conversation:discord:default:channel:123",
       chatType: "channel",
       from: "discord:channel:123",
       peer: { kind: "channel", id: "123" },
       recipientSessionExact: true,
-      sessionKey: "agent:main:discord:channel:123",
+      sessionKey: "agent:main:conversation:discord:default:channel:123",
       to: "channel:123",
     });
     expect(route?.threadId).toBeUndefined();
@@ -68,11 +68,11 @@ describe("resolveDiscordOutboundSessionRoute", () => {
     });
 
     expect(route).toMatchObject({
-      baseSessionKey: "agent:main:discord:channel:123",
+      baseSessionKey: "agent:main:conversation:discord:default:channel:123",
       chatType: "channel",
       from: "discord:channel:123",
       peer: { kind: "channel", id: "123" },
-      sessionKey: "agent:main:discord:channel:123",
+      sessionKey: "agent:main:conversation:discord:default:channel:123",
       to: "channel:123",
     });
   });

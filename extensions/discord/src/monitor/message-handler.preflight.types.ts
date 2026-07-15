@@ -71,6 +71,7 @@ export type DiscordMessagePreflightContext = DiscordMessagePreflightSharedFields
 
   guildInfo: DiscordGuildEntryResolved | null;
   guildSlug: string;
+  guildName?: string;
 
   threadChannel: DiscordThreadChannel | null;
   threadParentId?: string;
@@ -95,6 +96,8 @@ export type DiscordMessagePreflightContext = DiscordMessagePreflightSharedFields
   allowTextCommands: boolean;
   shouldBypassMention: boolean;
   effectiveWasMentioned: boolean;
+  /** Platform addressing only; never set by the control-command bypass. */
+  addressed: boolean;
   inboundEventKind: InboundEventKind;
   canDetectMention: boolean;
 

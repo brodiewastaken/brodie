@@ -42,7 +42,7 @@ describe("resolveDiscordTextCommandAccess", () => {
     expect(result.shouldBlockControlCommand).toBe(false);
   });
 
-  it("authorizes guild text commands from member access facts", async () => {
+  it("does not promote member access into owner command authority", async () => {
     const result = await resolveDiscordTextCommandAccess({
       accountId: "default",
       sender,
@@ -53,11 +53,11 @@ describe("resolveDiscordTextCommandAccess", () => {
       allowTextCommands: true,
       hasControlCommand: true,
     });
-    expect(result.authorized).toBe(true);
+    expect(result.authorized).toBe(false);
     expect(result.shouldBlockControlCommand).toBe(false);
   });
 
-  it("blocks unauthorized guild text control commands", async () => {
+  it("keeps unauthorized control-shaped text as conversation", async () => {
     const result = await resolveDiscordTextCommandAccess({
       accountId: "default",
       sender,
@@ -69,10 +69,10 @@ describe("resolveDiscordTextCommandAccess", () => {
       hasControlCommand: true,
     });
     expect(result.authorized).toBe(false);
-    expect(result.shouldBlockControlCommand).toBe(true);
+    expect(result.shouldBlockControlCommand).toBe(false);
   });
 
-  it("preserves configured mode when access groups are disabled", async () => {
+  it("does not grant owner authority from an empty command allowlist", async () => {
     const result = await resolveDiscordTextCommandAccess({
       accountId: "default",
       sender,
@@ -84,7 +84,7 @@ describe("resolveDiscordTextCommandAccess", () => {
       allowTextCommands: true,
       hasControlCommand: true,
     });
-    expect(result.authorized).toBe(true);
+    expect(result.authorized).toBe(false);
     expect(result.shouldBlockControlCommand).toBe(false);
   });
 });

@@ -1,15 +1,20 @@
 // Discord plugin module implements listeners behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { getRuntimeConversationScheduler } from "openclaw/plugin-sdk/conversation-scheduler";
+import { resolveConversationRoute } from "openclaw/plugin-sdk/routing";
 import { danger } from "openclaw/plugin-sdk/runtime-env";
 import {
   type Client,
+  type DiscordTypingStartDispatchData,
   InteractionCreateListener,
   MessageCreateListener,
   PresenceUpdateListener,
   ThreadUpdateListener,
+  TypingStartListener,
 } from "../internal/discord.js";
 import { discordEventQueueLog, runDiscordListenerWithSlowLog } from "./listeners.queue.js";
 export { DiscordReactionListener, DiscordReactionRemoveListener } from "./listeners.reactions.js";
+import { resolveDiscordChannelInfo } from "./message-utils.js";
 import { setPresence } from "./presence-cache.js";
 import { isThreadArchived } from "./thread-bindings.discord-api.js";
 import { closeDiscordThreadSessions } from "./thread-session-close.js";
@@ -101,6 +106,54 @@ export class DiscordPresenceListener extends PresenceUpdateListener {
     } catch (err) {
       const logger = this.logger ?? discordEventQueueLog;
       logger.error(danger(`discord presence handler failed: ${String(err)}`));
+    }
+  }
+}
+
+export class DiscordTypingListener extends TypingStartListener {
+  constructor(private options: { cfg: OpenClawConfig; accountId: string; botUserId?: string }) {
+    super();
+  }
+
+  async handle(data: DiscordTypingStartDispatchData, client: Client) {
+    try {
+      const channelId = typeof data?.channel_id === "string" ? data.channel_id : "";
+      const userId = typeof data?.user_id === "string" ? data.user_id : "";
+      if (!channelId || !userId) {
+        return;
+      }
+      if (this.options.botUserId && userId === this.options.botUserId) {
+        return;
+      }
+      const channelInfo = await resolveDiscordChannelInfo(client, channelId).catch(() => null);
+      const parentId = channelInfo?.parentId;
+      const routes = data.guild_id
+        ? [
+            resolveConversationRoute({
+              cfg: this.options.cfg,
+              channel: "discord",
+              accountId: this.options.accountId,
+              peer: { kind: "channel", id: parentId ?? channelId },
+              ...(parentId ? { threadId: channelId } : {}),
+            }),
+          ]
+        : [
+            resolveConversationRoute({
+              cfg: this.options.cfg,
+              channel: "discord",
+              accountId: this.options.accountId,
+              peer: { kind: "direct", id: userId },
+            }),
+            resolveConversationRoute({
+              cfg: this.options.cfg,
+              channel: "discord",
+              accountId: this.options.accountId,
+              peer: { kind: "group", id: channelId },
+            }),
+          ];
+      await Promise.all(routes.map((route) => getRuntimeConversationScheduler().noteTyping(route)));
+    } catch {
+      // Typing is best-effort debounce input; never let it disturb the gateway.
     }
   }
 }
