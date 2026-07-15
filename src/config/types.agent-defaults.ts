@@ -44,6 +44,8 @@ export type AgentModelEntryConfig = {
   agentRuntime?: AgentRuntimePolicyConfig;
   /** Enable streaming for this model (default: true, false for Ollama to avoid SDK issue #1205). */
   streaming?: boolean;
+  /** Journal injection mode selected once when /new starts this model. */
+  startupJournals?: "inline" | "paths";
 };
 
 export type AgentModelListConfig = {

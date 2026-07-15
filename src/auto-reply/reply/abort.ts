@@ -32,6 +32,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { isAcpSessionKey, parseAgentSessionKey } from "../../routing/session-key.js";
+import { stopRuntimeConversationSchedulerSession } from "../../scheduler/runtime-conversation-scheduler.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import type { FinalizedMsgContext } from "../templating.js";
 import {
@@ -72,6 +73,7 @@ const defaultAbortDeps = {
   getLatestSubagentRunByChildSessionKey,
   listSubagentRunsForController,
   markSubagentRunTerminated,
+  stopRuntimeConversationSchedulerSession,
 };
 
 const abortDeps = {
@@ -97,6 +99,9 @@ export const testing = {
       deps?.listSubagentRunsForController ?? defaultAbortDeps.listSubagentRunsForController;
     abortDeps.markSubagentRunTerminated =
       deps?.markSubagentRunTerminated ?? defaultAbortDeps.markSubagentRunTerminated;
+    abortDeps.stopRuntimeConversationSchedulerSession =
+      deps?.stopRuntimeConversationSchedulerSession ??
+      defaultAbortDeps.stopRuntimeConversationSchedulerSession;
   },
   resetDepsForTests(): void {
     abortDeps.getAcpSessionManager = defaultAbortDeps.getAcpSessionManager;
@@ -410,6 +415,13 @@ export async function tryFastAbortFromMessage(params: {
     if (boundAcpTargetKey && boundAcpTargetKey !== resolvedTargetKey) {
       abortTargetKeys.push(boundAcpTargetKey);
     }
+    await Promise.all(
+      [...new Set([...abortTargetKeys, commandSessionKey])]
+        .filter((key): key is string => Boolean(key))
+        .map((key) =>
+          abortDeps.stopRuntimeConversationSchedulerSession(key, { descendants: true }),
+        ),
+    );
     const acpManager = abortDeps.getAcpSessionManager();
     for (const acpTargetKey of abortTargetKeys.filter(isAcpSessionKey)) {
       const acpResolution = acpManager.resolveSession({

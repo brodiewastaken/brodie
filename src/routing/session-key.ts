@@ -5,9 +5,11 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import type { ChatType } from "../channels/chat-type.js";
 import {
+  encodeCanonicalConversationKeySegment,
   isCronRunSessionKey,
   normalizeSessionPeerId,
   normalizeSessionKeyPreservingOpaquePeerIds,
+  parseCanonicalConversationSessionKey,
   parseAgentSessionKey,
 } from "../sessions/session-key-utils.js";
 import { normalizeAccountId } from "./account-id.js";
@@ -17,10 +19,12 @@ export {
   isCronSessionKey,
   isAcpSessionKey,
   isSubagentSessionKey,
+  parseCanonicalConversationSessionKey,
   parseAgentSessionKey,
   parseSessionDeliveryRoute,
   parseThreadSessionSuffix,
   type ParsedAgentSessionKey,
+  type ParsedCanonicalConversationSessionKey,
   type ParsedSessionDeliveryRoute,
 } from "../sessions/session-key-utils.js";
 export {
@@ -32,6 +36,69 @@ export {
 export const DEFAULT_AGENT_ID = "main";
 export const DEFAULT_MAIN_KEY = "main";
 export type SessionKeyShape = "missing" | "agent" | "legacy_or_alias" | "malformed_agent";
+
+const URI_SHAPED_SESSION_KEY_RE = /^[a-z][a-z0-9+.-]*:\/\//iu;
+
+/** Session keys are opaque identifiers, never URLs or URI references. */
+export function assertOpaqueSessionKey(value: string): string {
+  const normalized = value.trim();
+  if (!normalized || URI_SHAPED_SESSION_KEY_RE.test(normalized)) {
+    throw new Error("invalid session key: expected a non-empty opaque identifier");
+  }
+  return normalized;
+}
+
+function encodeConversationKeyPart(value: string | undefined): string {
+  return value === undefined ? "-" : `${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+export function buildCanonicalConversationLaneKey(params: {
+  channel: string;
+  accountId?: string | null;
+  conversationKind: "direct" | "group" | "channel";
+  conversationId: string;
+  threadId?: string | null;
+}): string {
+  const channel = normalizeLowercaseStringOrEmpty(params.channel) || "unknown";
+  const accountId = normalizeAccountId(params.accountId);
+  const conversationId = params.conversationId.trim();
+  if (!conversationId) {
+    throw new Error("conversation route requires a non-empty conversation id");
+  }
+  const threadId = params.threadId?.trim() || undefined;
+  return [channel, accountId, params.conversationKind, conversationId, threadId]
+    .map(encodeConversationKeyPart)
+    .join("|");
+}
+
+export function buildCanonicalConversationSessionKey(params: {
+  agentId: string;
+  channel: string;
+  accountId?: string | null;
+  conversationKind: "direct" | "group" | "channel";
+  conversationId: string;
+  threadId?: string | null;
+}): string {
+  const channel = normalizeLowercaseStringOrEmpty(params.channel) || "unknown";
+  const accountId = normalizeAccountId(params.accountId);
+  const conversationId = params.conversationId.trim();
+  if (!conversationId) {
+    throw new Error("conversation route requires a non-empty conversation id");
+  }
+  const dimensions = [
+    normalizeAgentId(params.agentId),
+    channel,
+    accountId,
+    params.conversationKind,
+    conversationId,
+  ].map(encodeCanonicalConversationKeySegment);
+  const threadId = params.threadId?.trim();
+  return assertOpaqueSessionKey(
+    `agent:${dimensions[0]}:conversation:${dimensions.slice(1).join(":")}${
+      threadId ? `:thread:${encodeCanonicalConversationKeySegment(threadId)}` : ""
+    }`,
+  );
+}
 
 // Pre-compiled regex
 const VALID_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
@@ -117,7 +184,8 @@ export function toAgentStoreSessionKey(params: {
   requestKey: string | undefined | null;
   mainKey?: string | undefined;
 }): string {
-  const raw = (params.requestKey ?? "").trim();
+  const rawInput = (params.requestKey ?? "").trim();
+  const raw = rawInput ? assertOpaqueSessionKey(rawInput) : "";
   const lowered = normalizeLowercaseStringOrEmpty(raw);
   if (!raw || lowered === DEFAULT_MAIN_KEY) {
     return buildAgentMainSessionKey({ agentId: params.agentId, mainKey: params.mainKey });
@@ -350,8 +418,21 @@ export function resolveThreadSessionKeys(params: {
   const normalizedThread =
     params.normalizeThreadId?.(threadId) ?? normalizeLowercaseStringOrEmpty(threadId);
   const useSuffix = params.useSuffix ?? true;
-  const sessionKey = useSuffix
-    ? `${params.baseSessionKey}:thread:${normalizedThread}`
-    : params.baseSessionKey;
+  let sessionKey = params.baseSessionKey;
+  if (useSuffix) {
+    const canonical = parseCanonicalConversationSessionKey(params.baseSessionKey);
+    if (canonical) {
+      sessionKey = buildCanonicalConversationSessionKey({
+        agentId: canonical.agentId,
+        channel: canonical.channel,
+        accountId: canonical.accountId,
+        conversationKind: canonical.conversationKind,
+        conversationId: canonical.conversationId,
+        threadId: normalizedThread,
+      });
+    } else {
+      sessionKey = `${params.baseSessionKey}:thread:${encodeCanonicalConversationKeySegment(normalizedThread)}`;
+    }
+  }
   return { sessionKey, parentSessionKey: params.parentSessionKey };
 }

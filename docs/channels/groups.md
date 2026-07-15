@@ -111,13 +111,13 @@ Two different controls are involved in group safety:
 
 By default OpenClaw keeps context as received: allowlists decide who can trigger actions, not what quoted or historical snippets the model sees. To also filter supplemental context, set `contextVisibility`:
 
-| Mode                | Behavior                                                                         |
-| ------------------- | -------------------------------------------------------------------------------- |
-| `"all"` (default)   | Keep supplemental context as received.                                           |
-| `"allowlist"`       | Only inject history/thread/quote/forwarded context from allowlisted senders.     |
-| `"allowlist_quote"` | `allowlist`, plus keep the explicitly quoted/replied-to message from any sender. |
+| Mode                | Behavior                                                                                    |
+| ------------------- | ------------------------------------------------------------------------------------------- |
+| `"all"` (default)   | Keep supplemental context as received.                                                      |
+| `"allowlist"`       | Keep explicit quotes from any sender; filter history/thread/forwarded context by allowlist. |
+| `"allowlist_quote"` | Keep explicit quotes and filter other supplemental context by sender allowlist.             |
 
-Set it per channel (`channels.<channel>.contextVisibility`), per account (`channels.<channel>.accounts.<accountId>.contextVisibility`), or globally (`channels.defaults.contextVisibility`). Channels that fetch supplemental context (Discord, Feishu, iMessage, Matrix, Microsoft Teams, Signal, Slack, Telegram, WhatsApp) apply the policy when building inbound context; unknown policy combinations fail closed and omit the context.
+Set it per channel (`channels.<channel>.contextVisibility`), per account (`channels.<channel>.accounts.<accountId>.contextVisibility`), or globally (`channels.defaults.contextVisibility`). Channels that fetch supplemental context (Discord, Feishu, iMessage, Matrix, Microsoft Teams, Signal, Slack, Telegram, WhatsApp) apply the policy when building inbound context. A human reply always includes the selected quote, including quotes authored by the agent or another bot; quote authorship grants no trigger or command authority. Unknown policy combinations fail closed and omit non-quote supplemental context.
 
 ![Group message flow](/images/groups-flow.svg)
 

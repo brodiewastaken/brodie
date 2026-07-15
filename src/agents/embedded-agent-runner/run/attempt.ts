@@ -4241,6 +4241,10 @@ export async function runEmbeddedAttempt(
         );
         const effectiveTranscriptPrompt =
           params.transcriptPrompt === undefined ? undefined : params.transcriptPrompt;
+        const shouldTrackModelPromptBuild =
+          hasPromptBuildContext ||
+          (Boolean(effectiveTranscriptPrompt?.trim()) &&
+            promptBeforePromptBuildHooks !== effectiveTranscriptPrompt);
         let transcriptPromptForRuntimeSplit = effectiveTranscriptPrompt;
         let promptForRuntimeContextSplit = promptBeforePromptBuildHooks;
         // Repair orphaned trailing user messages so new prompts don't violate role ordering.
@@ -4413,11 +4417,11 @@ export async function runEmbeddedAttempt(
           const promptSubmission = resolveRuntimeContextPromptParts({
             effectivePrompt: promptForRuntimeContextSplit,
             transcriptPrompt: transcriptPromptForRuntimeSplit,
-            modelPrompt: hasPromptBuildContext
+            modelPrompt: shouldTrackModelPromptBuild
               ? promptForModelBeforeRuntimeContextSplit
               : undefined,
             modelPromptBuildContext:
-              hasPromptBuildContext && effectiveTranscriptPrompt !== undefined
+              shouldTrackModelPromptBuild && effectiveTranscriptPrompt !== undefined
                 ? {
                     promptBeforeHooks: promptBeforePromptBuildHooks,
                     transcriptPromptBeforeTransforms: effectiveTranscriptPrompt,

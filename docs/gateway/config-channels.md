@@ -97,7 +97,7 @@ Use `channels.defaults` for shared group-policy and heartbeat behavior across pr
 ```
 
 - `channels.defaults.groupPolicy`: fallback group policy when a provider-level `groupPolicy` is unset.
-- `channels.defaults.contextVisibility`: default supplemental context visibility mode for all channels. Values: `all` (default, include all quoted/thread/history context), `allowlist` (only include context from allowlisted senders), `allowlist_quote` (same as allowlist but keep explicit quote/reply context). Per-channel override: `channels.<channel>.contextVisibility`.
+- `channels.defaults.contextVisibility`: default supplemental context visibility mode for all channels. Values: `all` (default, include all supplemental context), `allowlist` and `allowlist_quote` (always include explicit quotes and filter other supplemental context by sender allowlist). Per-channel override: `channels.<channel>.contextVisibility`.
 - `channels.defaults.heartbeat.showOk`: include healthy channel statuses in heartbeat output (default `false`).
 - `channels.defaults.heartbeat.showAlerts`: include degraded/error statuses in heartbeat output (default `true`).
 - `channels.defaults.heartbeat.useIndicator`: render compact indicator-style heartbeat output (default `true`).

@@ -7,3 +7,4 @@ export {
   isControlCommandMessage,
   shouldComputeCommandAuthorized,
 } from "../auto-reply/command-detection.js";
+export { isUnaddressedCommandExecutable } from "../auto-reply/command-invocation.js";

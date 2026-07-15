@@ -9,10 +9,12 @@ function countOccurrences(text: string | undefined, needle: string): number {
 }
 
 describe("buildReplyPromptEnvelope", () => {
-  it("keeps bare reset runtime context in the model prompt and out of transcript/current-turn context", () => {
+  it("keeps the authored reset command separate from the exact model-visible reset input", () => {
     const sessionCtx = finalizeInboundContext({
-      Body: "",
+      Body: "/reset",
       BodyStripped: "",
+      RawBody: "/reset",
+      CommandBody: "/reset",
       Provider: "telegram",
       ChatType: "direct",
       SenderId: "telegram-user-1",
@@ -31,7 +33,15 @@ describe("buildReplyPromptEnvelope", () => {
 
     expect(envelope.prefixedCommandBody).toContain("sender_id=telegram-user-1");
     expect(envelope.prefixedCommandBody).toContain("Startup context");
-    expect(envelope.transcriptCommandBody).toBe("[OpenClaw session reset]");
+    expect(envelope.effectiveBaseBody).toBe(
+      [
+        "Conversation info (untrusted metadata):\nsender_id=telegram-user-1",
+        "Startup context",
+        "A new session was started via /new or /reset.",
+      ].join("\n\n"),
+    );
+    expect(envelope.transcriptCommandBody).toBe("/reset");
+    expect(envelope.transcriptCommandBody).not.toContain("[OpenClaw session");
     expect(envelope.currentInboundContext).toBeUndefined();
   });
 
@@ -172,7 +182,7 @@ describe("buildReplyPromptEnvelope", () => {
           "#35675 User ->#35674: Are you fr fr",
         ].join("\n"),
         "Current event:\n#35676 Keśava: No wtf",
-        "Treat this as observed room activity. Default: no reply; most room events need no response from you. Send a visible reply via message(action=send) only when you are directly addressed or have concrete value to add; your final text here stays private either way.",
+        "Treat this as observed room activity. Default: no response; most room events need nothing from you. Reply via message(action=reply) only when directly addressed or you have concrete value to add; your final text stays private either way.",
       ].join("\n\n"),
     );
     expect(envelope.currentInboundContext?.resumableText).toBe(
@@ -187,7 +197,7 @@ describe("buildReplyPromptEnvelope", () => {
           "```",
         ].join("\n"),
         "Current event:\n#35676 Keśava: No wtf",
-        "Treat this as observed room activity. Default: no reply; most room events need no response from you. Send a visible reply via message(action=send) only when you are directly addressed or have concrete value to add; your final text here stays private either way.",
+        "Treat this as observed room activity. Default: no response; most room events need nothing from you. Reply via message(action=reply) only when directly addressed or you have concrete value to add; your final text stays private either way.",
       ].join("\n\n"),
     );
     expect(envelope.currentInboundContext?.resumableText).not.toContain(
@@ -291,10 +301,12 @@ describe("buildReplyPromptEnvelope", () => {
     expect(envelope.transcriptCommandBody).toContain("https://example.com/photo.jpg");
   });
 
-  it("keeps soft reset user notes visible without leaking startup context into transcripts", () => {
+  it("persists the complete authored soft reset without leaking startup context", () => {
     const sessionCtx = finalizeInboundContext({
-      Body: "",
+      Body: "/reset soft re-read persona files",
       BodyStripped: "",
+      RawBody: "/reset soft re-read persona files",
+      CommandBody: "/reset soft re-read persona files",
       Provider: "slack",
       ChatType: "direct",
     });
@@ -314,7 +326,7 @@ describe("buildReplyPromptEnvelope", () => {
     expect(envelope.prefixedCommandBody).toContain("Conversation info (untrusted metadata):");
     expect(envelope.prefixedCommandBody).toContain("Startup context");
     expect(envelope.prefixedCommandBody).toContain("re-read persona files");
-    expect(envelope.transcriptCommandBody).toBe("re-read persona files");
+    expect(envelope.transcriptCommandBody).toBe("/reset soft re-read persona files");
     expect(envelope.transcriptCommandBody).not.toContain("Startup context");
   });
 });

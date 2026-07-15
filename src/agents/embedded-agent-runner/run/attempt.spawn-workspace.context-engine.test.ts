@@ -904,6 +904,72 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     }
   });
 
+  it("submits a transformed reset envelope while preserving the authored transcript", async () => {
+    const resetEnvelope = [
+      "[SESSION RESET START]",
+      "Abhay just sent `/new`.",
+      "Reply with one short greeting.",
+      "[SESSION RESET END]",
+    ].join("\n");
+    const seen: { modelMessages?: unknown[]; prompt?: string; messages?: unknown[] } = {};
+
+    const result = await createContextEngineAttemptRunner({
+      contextEngine: createContextEngineBootstrapAndAssemble(),
+      sessionKey,
+      tempPaths,
+      trajectory: true,
+      attemptOverrides: {
+        prompt: resetEnvelope,
+        transcriptPrompt: "brodie /new",
+        inputProvenance: {
+          kind: "inter_session",
+          sourceSessionKey: "agent:main:discord:source",
+          sourceTool: "sessions_send",
+        },
+      },
+      sessionPrompt: async (session, prompt) => {
+        seen.prompt = prompt;
+        seen.messages = [...session.messages];
+        const transformContext = (
+          session.agent as {
+            transformContext?: (messages: AgentMessage[]) => Promise<AgentMessage[]>;
+          }
+        ).transformContext;
+        seen.modelMessages = await transformContext?.([
+          { role: "user", content: [{ type: "text", text: prompt }], timestamp: 1 },
+        ]);
+        session.messages = [
+          ...session.messages,
+          { role: "assistant", content: "done", timestamp: 2 },
+        ];
+      },
+    });
+
+    expect(seen.prompt).toBe("brodie /new");
+    expect(result.finalPromptText).toBe("brodie /new");
+    const modelMessage = requireRecord(
+      requireRecords(seen.modelMessages, "model messages")[0],
+      "model message",
+    );
+    expect(modelMessage.content).toEqual([{ type: "text", text: resetEnvelope }]);
+    expect(modelMessage["__openclawTranscriptPromptText"]).toBe("brodie /new");
+    const runtimeContext = findRecord(
+      requireRecords(seen.messages, "seen messages"),
+      (message) => message.customType === "openclaw.runtime-context",
+      "runtime context message",
+    );
+    expect(runtimeContext.content).toContain("[Inter-session message]");
+    expect(runtimeContext.content).not.toContain("[SESSION RESET START]");
+    const trajectoryEvents = (
+      await fs.readFile(path.join(tempPaths[0] ?? "", "session.trajectory.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as TrajectoryEvent);
+    const promptSubmitted = trajectoryEvents.find((event) => event.type === "prompt.submitted");
+    expect(promptSubmitted?.data?.prompt).toBe(resetEnvelope);
+  });
+
   it("filters heartbeat response-tool transcript artifacts before normal prompt snapshots", async () => {
     const contextEngine = createContextEngineBootstrapAndAssemble();
     const sessionMessages = [
@@ -1947,7 +2013,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
             "visible_reply_contract: message_tool_only",
             "Room context:\n#2001 Alice: lunch at 2?\n#2002 Bob: works",
             "Current event:\n#2003 Bob: hey claw summarize the plan",
-            "Treat this as observed room activity. Default: no reply; most room events need no response from you. Send a visible reply via message(action=send) only when you are directly addressed or have concrete value to add; your final text here stays private either way.",
+            "Treat this as observed room activity. Default: no response; most room events need nothing from you. Reply via message(action=reply) only when directly addressed or you have concrete value to add; your final text stays private either way.",
           ].join("\n\n"),
         },
         suppressNextUserMessagePersistence: true,

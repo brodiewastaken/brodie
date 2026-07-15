@@ -54,6 +54,7 @@ import {
   normalizeAgentId,
   parseAgentSessionKey,
 } from "../routing/session-key.js";
+import { stopRuntimeConversationSchedulerSession } from "../scheduler/runtime-conversation-scheduler.js";
 import {
   hasOnlySessionLifecycleMutationKindActive,
   interruptSessionWorkAdmissions,
@@ -402,6 +403,9 @@ async function ensureSessionRuntimeCleanup(params: {
   if (params.sessionId) {
     queueKeys.add(params.sessionId);
   }
+  await stopRuntimeConversationSchedulerSession(params.target.canonicalKey, {
+    descendants: true,
+  });
   clearSessionResetRuntimeState([...queueKeys], {
     activeReplySessionId: params.sessionId,
   });

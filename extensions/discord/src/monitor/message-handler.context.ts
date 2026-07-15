@@ -320,6 +320,7 @@ export async function buildDiscordMessageProcessContext(params: {
         });
 
   const ctxPayload = await buildChannelInboundEventContext({
+    cfg,
     channel: "discord",
     resolveSupplementalMedia: true,
     contextVisibility: contextVisibilityMode,
@@ -341,7 +342,7 @@ export async function buildDiscordMessageProcessContext(params: {
       isBot: author.bot && !sender.isPluralKit ? true : undefined,
     },
     conversation: {
-      kind: isDirectMessage ? "direct" : "channel",
+      kind: isDirectMessage ? "direct" : ctx.isGroupDm ? "group" : "channel",
       id: messageChannelId,
       label: fromLabel,
       spaceId: isGuildMessage ? (guildInfo?.id ?? guildSlug) || undefined : undefined,

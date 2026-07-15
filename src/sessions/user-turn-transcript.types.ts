@@ -20,6 +20,8 @@ export type PersistedUserTurnMessage = Extract<AgentMessage, { role: "user" }>;
 
 export type UserTurnInput = {
   text?: string | null;
+  /** Original human-authored text when persisted content is the distinct model-visible input. */
+  sourceMessage?: string | null;
   media?: readonly PersistedUserTurnMediaInput[] | null;
   timestamp?: number;
   idempotencyKey?: string;

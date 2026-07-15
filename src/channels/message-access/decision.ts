@@ -91,7 +91,7 @@ function commandGate(params: {
       reasonCode: "command_authorized",
     };
   }
-  const useAccessGroups = command.useAccessGroups ?? true;
+  const useAccessGroups = true;
   // Command authorization combines owner and group allowlists after mutable-id policy so
   // command control cannot be granted by identifiers the current policy rejects.
   const owner = applyMutableIdentifierPolicy(params.state.allowlists.commandOwner, params.policy);
@@ -99,12 +99,12 @@ function commandGate(params: {
   const authorized = resolveCommandAuthorizedFromAuthorizers({
     useAccessGroups,
     modeWhenAccessGroupsOff: command.modeWhenAccessGroupsOff,
-    authorizers: [
-      { configured: owner.hasConfiguredEntries, allowed: owner.match.matched },
-      { configured: group.hasConfiguredEntries, allowed: group.match.matched },
-    ],
+    authorizers: [{ configured: owner.hasConfiguredEntries, allowed: owner.match.matched }],
   });
-  const shouldBlock = command.allowTextCommands && command.hasControlCommand && !authorized;
+  // Command-shaped text from a non-owner remains admissible conversation.
+  // The centralized invocation classifier wraps it in the configured trusted
+  // envelope and forces a normal turn, so ingress must not drop it here.
+  const shouldBlock = false;
   return {
     id: "command",
     phase: "command",
@@ -183,6 +183,7 @@ function activationMetadata(params: {
   shouldSkip: boolean;
   effectiveWasMentioned?: boolean;
   shouldBypassMention?: boolean;
+  addressed?: boolean;
 }) {
   const mentionFacts = params.mentionFacts;
   return {
@@ -206,6 +207,7 @@ function activationMetadata(params: {
     ...(mentionFacts?.implicitMentionKinds !== undefined
       ? { implicitMentionKinds: mentionFacts.implicitMentionKinds }
       : {}),
+    ...(params.addressed !== undefined ? { addressed: params.addressed } : {}),
     ...(params.effectiveWasMentioned !== undefined
       ? { effectiveWasMentioned: params.effectiveWasMentioned }
       : {}),
@@ -226,6 +228,7 @@ function activationGate(params: {
     shouldSkip: boolean;
     effectiveWasMentioned?: boolean;
     shouldBypassMention?: boolean;
+    addressed?: boolean;
   }): AccessGraphGate => ({
     id: "activation",
     phase: "activation",
@@ -239,15 +242,18 @@ function activationGate(params: {
       shouldSkip: input.shouldSkip,
       effectiveWasMentioned: input.effectiveWasMentioned,
       shouldBypassMention: input.shouldBypassMention,
+      addressed: input.addressed,
     }),
   });
   if (!activation || !mentionFacts) {
     // Without activation policy or mention facts, sender/event authorization is enough.
+    const addressed =
+      mentionFacts &&
+      (mentionFacts.wasMentioned || Boolean(mentionFacts.implicitMentionKinds?.length));
     return activationResult({
       shouldSkip: false,
-      effectiveWasMentioned:
-        mentionFacts &&
-        (mentionFacts.wasMentioned || Boolean(mentionFacts.implicitMentionKinds?.length)),
+      effectiveWasMentioned: addressed,
+      addressed,
     });
   }
   const result = resolveInboundMentionDecision({
@@ -258,6 +264,7 @@ function activationGate(params: {
       allowedImplicitMentionKinds: activation.allowedImplicitMentionKinds,
       allowTextCommands: activation.allowTextCommands,
       hasControlCommand: params.policy.command?.hasControlCommand ?? false,
+      controlCommandExecutable: params.policy.command?.controlCommandExecutable,
       commandAuthorized: params.commandGate.allowed,
     },
   });
@@ -265,6 +272,7 @@ function activationGate(params: {
     shouldSkip: result.shouldSkip,
     effectiveWasMentioned: result.effectiveWasMentioned,
     shouldBypassMention: result.shouldBypassMention,
+    addressed: result.addressed,
   });
 }
 

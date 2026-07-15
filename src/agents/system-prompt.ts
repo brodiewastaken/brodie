@@ -44,6 +44,10 @@ import type {
   EmbeddedSandboxInfo,
 } from "./embedded-agent-runner/types.js";
 import {
+  buildBootstrapOrderIndex,
+  compareBootstrapNamesByOrder,
+} from "./identity-bootstrap-order.js";
+import {
   buildOpenClawToolFallbackText,
   shouldRenderOpenClawToolWorkflowHints,
 } from "./prompt-surface.js";
@@ -66,14 +70,14 @@ import type { PromptMode, SilentReplyPromptMode } from "./system-prompt.types.js
  */
 type OwnerIdDisplay = "raw" | "hash";
 
-const CONTEXT_FILE_ORDER = new Map<string, number>([
-  ["agents.md", 10],
-  ["soul.md", 20],
-  ["identity.md", 30],
-  ["user.md", 40],
-  ["tools.md", 50],
-  ["bootstrap.md", 60],
-  ["memory.md", 70],
+const CONTEXT_FILE_ORDER = buildBootstrapOrderIndex([
+  "AGENTS.md",
+  "SOUL.md",
+  "IDENTITY.md",
+  "USER.md",
+  "TOOLS.md",
+  "BOOTSTRAP.md",
+  "MEMORY.md",
 ]);
 
 const DYNAMIC_CONTEXT_FILE_BASENAMES = new Set(["heartbeat.md"]);
@@ -187,27 +191,30 @@ function sanitizeContextFileContentForPrompt(content: string): string {
   return content.replaceAll(DEFAULT_HEARTBEAT_PROMPT_CONTEXT_BLOCK, "").replace(/\n{3,}/g, "\n\n");
 }
 
-function sortContextFilesForPrompt(contextFiles: EmbeddedContextFile[]): EmbeddedContextFile[] {
+function sortContextFilesForPrompt(
+  contextFiles: EmbeddedContextFile[],
+  orderIndex: ReadonlyMap<string, number> = CONTEXT_FILE_ORDER,
+): EmbeddedContextFile[] {
   return contextFiles.toSorted((a, b) => {
-    const aPath = normalizeContextFilePath(a.path);
-    const bPath = normalizeContextFilePath(b.path);
-    const aBase = getContextFileBasename(a.path);
-    const bBase = getContextFileBasename(b.path);
-    const aOrder = CONTEXT_FILE_ORDER.get(aBase) ?? Number.MAX_SAFE_INTEGER;
-    const bOrder = CONTEXT_FILE_ORDER.get(bBase) ?? Number.MAX_SAFE_INTEGER;
-    if (aOrder !== bOrder) {
-      return aOrder - bOrder;
+    const byName = compareBootstrapNamesByOrder(
+      orderIndex,
+      getContextFileBasename(a.path),
+      getContextFileBasename(b.path),
+    );
+    if (byName !== 0) {
+      return byName;
     }
-    if (aBase !== bBase) {
-      return aBase.localeCompare(bBase);
-    }
-    return aPath.localeCompare(bPath);
+    return normalizeContextFilePath(a.path).localeCompare(normalizeContextFilePath(b.path));
   });
 }
 
-function prepareContextFilesForPrompt(contextFiles: EmbeddedContextFile[] = []) {
+function prepareContextFilesForPrompt(
+  contextFiles: EmbeddedContextFile[] = [],
+  orderIndex?: ReadonlyMap<string, number>,
+) {
   const ordered = sortContextFilesForPrompt(
     contextFiles.filter((file) => typeof file.path === "string" && file.path.trim().length > 0),
+    orderIndex,
   );
   return {
     ordered,
@@ -712,6 +719,7 @@ export function buildAgentSystemPrompt(params: {
   userTime?: string;
   userTimeFormat?: ResolvedTimeFormat;
   contextFiles?: EmbeddedContextFile[];
+  contextFileOrder?: string[];
   bootstrapMode?: BootstrapMode;
   bootstrapTruncationNotice?: string;
   skillsPrompt?: string;
@@ -1010,7 +1018,10 @@ export function buildAgentSystemPrompt(params: {
       .join("\n");
   }
 
-  const contextFiles = prepareContextFilesForPrompt(params.contextFiles);
+  const contextFiles = prepareContextFilesForPrompt(
+    params.contextFiles,
+    params.contextFileOrder ? buildBootstrapOrderIndex(params.contextFileOrder) : undefined,
+  );
   const bootstrapSystemPromptSections = buildAgentBootstrapSystemPromptSections({
     bootstrapMode: params.bootstrapMode,
     bootstrapTruncationNotice: params.bootstrapTruncationNotice,
@@ -1018,6 +1029,7 @@ export function buildAgentSystemPrompt(params: {
   });
   const stablePrefixCacheKey = hashStablePromptInput({
     workspaceDir: params.workspaceDir,
+    contextFileOrder: params.contextFileOrder,
     promptMode,
     promptSurface,
     toolLines,

@@ -35,9 +35,9 @@ export type CommonChannelMessagingConfig = {
   groupPolicy?: GroupPolicy;
   /**
    * Supplemental context visibility policy for fetched/group context.
-   * - "all": include all quoted/thread/history context
-   * - "allowlist": only include context from allowlisted senders
-   * - "allowlist_quote": same as allowlist, but keep explicit quote/reply context
+   * - "all": include all supplemental context
+   * - "allowlist": keep explicit quotes; filter other context by sender allowlist
+   * - "allowlist_quote": keep explicit quotes and allowlist-filter other context
    */
   contextVisibility?: ContextVisibilityMode;
   /** Max group/channel messages to keep as history context (0 disables). */

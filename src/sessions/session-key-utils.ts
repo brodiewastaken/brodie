@@ -28,7 +28,178 @@ export type RawSessionConversationRef = {
   kind: "group" | "channel";
   rawId: string;
   prefix: string;
+  baseSessionKey?: string;
+  threadId?: string;
 };
+
+export type ParsedCanonicalConversationSessionKey = {
+  agentId: string;
+  channel: string;
+  accountId: string;
+  conversationKind: "direct" | "group" | "channel";
+  conversationId: string;
+  threadId?: string;
+  baseSessionKey: string;
+};
+
+function encodeLegacyCanonicalConversationPart(value: string | undefined): string {
+  return value === undefined ? "-" : `${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+function decodeCanonicalConversationLane(lane: string): (string | undefined)[] | null {
+  const bytes = Buffer.from(lane, "utf8");
+  const values: (string | undefined)[] = [];
+  let cursor = 0;
+  while (cursor < bytes.length) {
+    if (bytes[cursor] === 45) {
+      values.push(undefined);
+      cursor += 1;
+    } else {
+      const lengthStart = cursor;
+      while (cursor < bytes.length && bytes[cursor] >= 48 && bytes[cursor] <= 57) {
+        cursor += 1;
+      }
+      if (cursor === lengthStart || bytes[cursor] !== 58) {
+        return null;
+      }
+      const byteLength = Number(bytes.subarray(lengthStart, cursor).toString("ascii"));
+      cursor += 1;
+      const end = cursor + byteLength;
+      if (!Number.isSafeInteger(byteLength) || byteLength < 0 || end > bytes.length) {
+        return null;
+      }
+      values.push(bytes.subarray(cursor, end).toString("utf8"));
+      cursor = end;
+    }
+    if (cursor === bytes.length) {
+      break;
+    }
+    if (bytes[cursor] !== 124) {
+      return null;
+    }
+    cursor += 1;
+  }
+  return values;
+}
+
+export function parseLegacyCanonicalConversationSessionKey(
+  sessionKey: string | undefined | null,
+): ParsedCanonicalConversationSessionKey | null {
+  const raw = normalizeOptionalString(sessionKey);
+  if (!raw) {
+    return null;
+  }
+  const marker = ":conversation-v1:";
+  const markerIndex = raw.indexOf(marker);
+  if (!raw.startsWith("agent:") || markerIndex <= "agent:".length) {
+    return null;
+  }
+  const agentId = normalizeOptionalString(raw.slice("agent:".length, markerIndex));
+  const values = decodeCanonicalConversationLane(raw.slice(markerIndex + marker.length));
+  if (!agentId || values?.length !== 5) {
+    return null;
+  }
+  const [channel, accountId, conversationKind, conversationId, threadId] = values;
+  if (
+    !channel ||
+    !accountId ||
+    !conversationId ||
+    (conversationKind !== "direct" &&
+      conversationKind !== "group" &&
+      conversationKind !== "channel")
+  ) {
+    return null;
+  }
+  const baseLane = [channel, accountId, conversationKind, conversationId, undefined]
+    .map(encodeLegacyCanonicalConversationPart)
+    .join("|");
+  return {
+    agentId,
+    channel,
+    accountId,
+    conversationKind,
+    conversationId,
+    ...(threadId ? { threadId } : {}),
+    baseSessionKey: `${raw.slice(0, markerIndex + marker.length)}${baseLane}`,
+  };
+}
+
+const CANONICAL_CONVERSATION_SEGMENT_SAFE_BYTE_RE = /^[A-Za-z0-9._~!$&'()*+,;=@-]$/u;
+
+/** Encode one readable canonical-key dimension as a colon-delimited URI path segment. */
+export function encodeCanonicalConversationKeySegment(value: string): string {
+  return [...Buffer.from(value, "utf8")]
+    .map((byte) => {
+      const char = String.fromCharCode(byte);
+      return CANONICAL_CONVERSATION_SEGMENT_SAFE_BYTE_RE.test(char)
+        ? char
+        : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    })
+    .join("");
+}
+
+function decodeCanonicalConversationKeySegment(value: string): string | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    const decoded = decodeURIComponent(value);
+    return decoded && encodeCanonicalConversationKeySegment(decoded) === value ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseCanonicalConversationSessionKey(
+  sessionKey: string | undefined | null,
+): ParsedCanonicalConversationSessionKey | null {
+  const raw = normalizeOptionalString(sessionKey);
+  if (!raw?.startsWith("agent:")) {
+    return null;
+  }
+  const marker = ":conversation:";
+  const markerIndex = raw.indexOf(marker, "agent:".length);
+  if (markerIndex <= "agent:".length || raw.includes(marker, markerIndex + marker.length)) {
+    return null;
+  }
+  const encodedAgentId = raw.slice("agent:".length, markerIndex);
+  const parts = raw.slice(markerIndex + marker.length).split(":");
+  if (parts.length !== 4 && parts.length !== 6) {
+    return null;
+  }
+  if (parts.length === 6 && parts[4] !== "thread") {
+    return null;
+  }
+  const agentId = decodeCanonicalConversationKeySegment(encodedAgentId);
+  const channel = decodeCanonicalConversationKeySegment(parts[0] ?? "");
+  const accountId = decodeCanonicalConversationKeySegment(parts[1] ?? "");
+  const conversationKind = parts[2];
+  const conversationId = decodeCanonicalConversationKeySegment(parts[3] ?? "");
+  const threadId =
+    parts.length === 6 ? decodeCanonicalConversationKeySegment(parts[5] ?? "") : null;
+  if (
+    !agentId ||
+    !channel ||
+    !accountId ||
+    !conversationId ||
+    (conversationKind !== "direct" &&
+      conversationKind !== "group" &&
+      conversationKind !== "channel") ||
+    (parts.length === 6 && !threadId)
+  ) {
+    return null;
+  }
+  const baseSessionKey = `agent:${encodedAgentId}:conversation:${parts.slice(0, 4).join(":")}`;
+  return {
+    agentId,
+    channel,
+    accountId,
+    conversationKind,
+    conversationId,
+    ...(threadId ? { threadId } : {}),
+    baseSessionKey,
+  };
+}
 
 /**
  * Generic, opt-in case-preservation policy for session-key peer IDs.
@@ -342,6 +513,11 @@ export function parseThreadSessionSuffix(
     return { baseSessionKey: undefined, threadId: undefined };
   }
 
+  const canonical = parseCanonicalConversationSessionKey(raw);
+  if (canonical) {
+    return { baseSessionKey: canonical.baseSessionKey, threadId: canonical.threadId };
+  }
+
   const lowerRaw = normalizeLowercaseStringOrEmpty(raw);
   const threadMarker = ":thread:";
   const threadIndex = lowerRaw.lastIndexOf(threadMarker);
@@ -366,6 +542,16 @@ const SESSION_DELIVERY_PEER_KINDS = new Set<ParsedSessionDeliveryRoute["peerKind
 export function parseSessionDeliveryRoute(
   sessionKey: string | undefined | null,
 ): ParsedSessionDeliveryRoute | null {
+  const canonical = parseCanonicalConversationSessionKey(sessionKey);
+  if (canonical) {
+    return {
+      accountId: canonical.accountId,
+      channel: canonical.channel,
+      peerId: canonical.conversationId,
+      peerKind: canonical.conversationKind,
+      threadId: canonical.threadId,
+    };
+  }
   const parsedThread = parseThreadSessionSuffix(sessionKey);
   const parsed = parseAgentSessionKey(parsedThread.baseSessionKey ?? sessionKey);
   if (!parsed) {
@@ -411,6 +597,23 @@ export function parseRawSessionConversationRef(
   const raw = normalizeOptionalString(sessionKey);
   if (!raw) {
     return null;
+  }
+
+  const canonical = parseCanonicalConversationSessionKey(raw);
+  if (canonical) {
+    if (canonical.conversationKind === "direct") {
+      return null;
+    }
+    return {
+      channel: canonical.channel,
+      kind: canonical.conversationKind,
+      rawId: canonical.threadId
+        ? `${canonical.conversationId}:thread:${canonical.threadId}`
+        : canonical.conversationId,
+      prefix: `agent:${canonical.agentId}:${canonical.channel}:${canonical.conversationKind}`,
+      baseSessionKey: canonical.baseSessionKey,
+      ...(canonical.threadId ? { threadId: canonical.threadId } : {}),
+    };
   }
 
   const rawParts = raw.split(":");

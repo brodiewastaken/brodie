@@ -51,6 +51,7 @@ export type InboundMentionPolicy = {
   allowTextCommands: boolean;
   hasControlCommand: boolean;
   commandAuthorized: boolean;
+  controlCommandExecutable?: boolean;
 };
 
 /** @deprecated Prefer the nested `{ facts, policy }` call shape for new code. */
@@ -69,6 +70,7 @@ export type InboundMentionDecision = MentionGateResult & {
   implicitMention: boolean;
   matchedImplicitMentionKinds: InboundImplicitMentionKind[];
   shouldBypassMention: boolean;
+  addressed: boolean;
 };
 
 export function implicitMentionKindWhen(
@@ -114,14 +116,15 @@ function resolveMentionDecisionCore(params: {
     allowedImplicitMentionKinds: params.allowedImplicitMentionKinds,
   });
   const implicitMention = matchedImplicitMentionKinds.length > 0;
-  const effectiveWasMentioned =
-    params.wasMentioned || implicitMention || params.shouldBypassMention;
+  const addressed = params.wasMentioned || implicitMention;
+  const effectiveWasMentioned = addressed || params.shouldBypassMention;
   const shouldSkip = params.requireMention && params.canDetectMention && !effectiveWasMentioned;
   return {
     implicitMention,
     matchedImplicitMentionKinds,
     effectiveWasMentioned,
     shouldBypassMention: params.shouldBypassMention,
+    addressed,
     shouldSkip,
   };
 }
@@ -149,6 +152,7 @@ function normalizeMentionDecisionParams(
     allowTextCommands,
     hasControlCommand,
     commandAuthorized,
+    controlCommandExecutable,
   } = params;
   return {
     facts: {
@@ -164,6 +168,7 @@ function normalizeMentionDecisionParams(
       allowTextCommands,
       hasControlCommand,
       commandAuthorized,
+      controlCommandExecutable,
     },
   };
 }
@@ -179,7 +184,8 @@ export function resolveInboundMentionDecision(
     !(facts.hasAnyMention ?? false) &&
     policy.allowTextCommands &&
     policy.commandAuthorized &&
-    policy.hasControlCommand;
+    policy.hasControlCommand &&
+    policy.controlCommandExecutable !== false;
   return resolveMentionDecisionCore({
     requireMention: policy.requireMention,
     canDetectMention: facts.canDetectMention,

@@ -7,6 +7,7 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { buildTtsSystemPromptHint } from "../tts/tts.js";
 import { resolveAgentConfig } from "./agent-scope.js";
+import { resolveIdentityBootstrapOrder } from "./identity-bootstrap-order.js";
 import { buildModelAliasLines } from "./model-alias-lines.js";
 import { resolveOwnerDisplaySetting } from "./owner-display.js";
 import { buildAgentSystemPrompt } from "./system-prompt.js";
@@ -24,6 +25,7 @@ type ResolvedAgentSystemPromptConfig = Pick<
   | "modelAliasLines"
   | "memoryCitationsMode"
   | "fsWorkspaceOnly"
+  | "contextFileOrder"
 >;
 
 type ConfiguredAgentSystemPromptParams = AgentSystemPromptRenderParams & {
@@ -51,6 +53,7 @@ export function resolveAgentSystemPromptConfig(params: {
     modelAliasLines: buildModelAliasLines(config),
     memoryCitationsMode: config?.memory?.citations,
     fsWorkspaceOnly: resolveEffectiveToolFsWorkspaceOnly({ cfg: config, agentId }),
+    contextFileOrder: resolveIdentityBootstrapOrder(config),
   };
 }
 

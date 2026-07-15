@@ -38,7 +38,7 @@ import { createSessionConversationTestRegistry } from "../../test-utils/session-
 import { replyRunRegistry } from "./reply-run-registry.js";
 import { drainFormattedSystemEvents } from "./session-updates.js";
 import { persistSessionUsageUpdate } from "./session-usage.js";
-import { initSessionState } from "./session.js";
+import { initSessionState, testing as sessionTesting } from "./session.js";
 
 const sessionForkMocks = vi.hoisted(() => ({
   forkSessionFromParent: vi.fn(),
@@ -904,6 +904,10 @@ describe("initSessionState thread forking", () => {
 });
 
 describe("initSessionState RawBody", () => {
+  it("preserves descendant scheduler lanes during a session reset", () => {
+    expect(sessionTesting.resetSchedulerStopOptions).toEqual({ descendants: false });
+  });
+
   it("uses RawBody for command extraction and reset triggers when Body contains wrapped context", async () => {
     const root = await makeCaseDir("openclaw-rawbody-");
     const storePath = path.join(root, "sessions.json");
@@ -2726,7 +2730,7 @@ describe("initSessionState reset policy", () => {
 });
 
 describe("initSessionState browser tab cleanup", () => {
-  it("closes tracked browser tabs when idle session expires", async () => {
+  it("preserves tracked browser tabs when idle session expires", async () => {
     vi.setSystemTime(new Date(2026, 0, 18, 5, 30, 0));
     const storePath = await createStorePath("openclaw-tab-cleanup-idle-");
     const sessionKey = "agent:main:whatsapp:dm:tab-idle";
@@ -2752,11 +2756,7 @@ describe("initSessionState browser tab cleanup", () => {
     });
 
     expect(result.isNewSession).toBe(true);
-    const cleanupParams = requireMockCallArg(
-      browserMaintenanceMocks.closeTrackedBrowserTabsForSessions,
-      "closeTrackedBrowserTabsForSessions",
-    );
-    expect(cleanupParams.sessionKeys).toEqual([existingSessionId, sessionKey]);
+    expect(browserMaintenanceMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
   });
 
   it("skips browser tab cleanup when root browser support is disabled", async () => {
@@ -2819,7 +2819,7 @@ describe("initSessionState browser tab cleanup", () => {
     expect(browserMaintenanceMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
   });
 
-  it("closes tracked browser tabs on explicit /new reset", async () => {
+  it("preserves tracked browser tabs on explicit /new reset", async () => {
     const storePath = await createStorePath("openclaw-tab-cleanup-reset-");
     const sessionKey = "agent:main:telegram:dm:tab-reset";
     const existingSessionId = "tab-reset-session-id";
@@ -2846,11 +2846,7 @@ describe("initSessionState browser tab cleanup", () => {
     });
 
     expect(result.isNewSession).toBe(true);
-    const cleanupParams = requireMockCallArg(
-      browserMaintenanceMocks.closeTrackedBrowserTabsForSessions,
-      "closeTrackedBrowserTabsForSessions",
-    );
-    expect(cleanupParams.sessionKeys).toEqual([existingSessionId, sessionKey]);
+    expect(browserMaintenanceMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
   });
 
   it("does not close browser tabs for a fresh session without previous state", async () => {
@@ -2873,7 +2869,7 @@ describe("initSessionState browser tab cleanup", () => {
     expect(browserMaintenanceMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
   });
 
-  it("includes the peer-scoped runtime key for direct-message cleanup", async () => {
+  it("preserves peer-scoped direct-message browser state", async () => {
     const storePath = await createStorePath("openclaw-tab-cleanup-peer-key-");
     const canonicalKey = "agent:main:main";
     const existingSessionId = "tab-peer-key-session-id";
@@ -2899,15 +2895,7 @@ describe("initSessionState browser tab cleanup", () => {
     });
 
     expect(result.isNewSession).toBe(true);
-    const cleanupParams = requireMockCallArg(
-      browserMaintenanceMocks.closeTrackedBrowserTabsForSessions,
-      "closeTrackedBrowserTabsForSessions",
-    );
-    expect(cleanupParams.sessionKeys).toEqual([
-      existingSessionId,
-      canonicalKey,
-      "agent:main:telegram:default:direct:12345",
-    ]);
+    expect(browserMaintenanceMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
   });
 });
 
@@ -3157,7 +3145,7 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
     });
   }
 
-  it("preserves behavior overrides across /new and /reset", async () => {
+  it("preserves behavior overrides on /new and resets them to defaults on /reset", async () => {
     const storePath = await createStorePath("openclaw-reset-overrides-");
     const sessionKey = "agent:main:telegram:dm:user-overrides";
     const existingSessionId = "existing-session-overrides";
@@ -3209,7 +3197,16 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
       expect(result.isNewSession, testCase.name).toBe(true);
       expect(result.resetTriggered, testCase.name).toBe(true);
       expect(result.sessionId, testCase.name).not.toBe(existingSessionId);
-      expectEntryFields(result.sessionEntry, overrides, testCase.name);
+      if (testCase.body === "/new") {
+        expectEntryFields(result.sessionEntry, overrides, testCase.name);
+      } else {
+        for (const key of Object.keys(overrides)) {
+          expect(
+            (result.sessionEntry as Record<string, unknown>)[key],
+            testCase.name,
+          ).toBeUndefined();
+        }
+      }
     }
   });
 
@@ -3337,16 +3334,21 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
       expect(result.isNewSession, testCase.name).toBe(true);
       expect(result.resetTriggered, testCase.name).toBe(true);
       expect(result.sessionId, testCase.name).not.toBe(existingSessionId);
-      expect(result.sessionEntry.providerOverride, testCase.name).toBe(overrides.providerOverride);
-      expect(result.sessionEntry.modelOverride, testCase.name).toBe(overrides.modelOverride);
+      const expectedOverrides = testCase.body === "/new" ? overrides : undefined;
+      expect(result.sessionEntry.providerOverride, testCase.name).toBe(
+        expectedOverrides?.providerOverride,
+      );
+      expect(result.sessionEntry.modelOverride, testCase.name).toBe(
+        expectedOverrides?.modelOverride,
+      );
       expect(result.sessionEntry.authProfileOverride, testCase.name).toBe(
-        overrides.authProfileOverride,
+        expectedOverrides?.authProfileOverride,
       );
       expect(result.sessionEntry.authProfileOverrideSource, testCase.name).toBe(
-        overrides.authProfileOverrideSource,
+        expectedOverrides?.authProfileOverrideSource,
       );
       expect(result.sessionEntry.authProfileOverrideCompactionCount, testCase.name).toBe(
-        overrides.authProfileOverrideCompactionCount,
+        expectedOverrides?.authProfileOverrideCompactionCount,
       );
       expect(result.sessionEntry.cliSessionIds).toBeUndefined();
       expect(result.sessionEntry.cliSessionBindings).toBeUndefined();
@@ -3414,8 +3416,9 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
       expect(result.sessionEntry.authProfileOverride, testCase.name).toBeUndefined();
       expect(result.sessionEntry.authProfileOverrideSource, testCase.name).toBeUndefined();
       expect(result.sessionEntry.authProfileOverrideCompactionCount, testCase.name).toBeUndefined();
-      // Unrelated behavior overrides still carry across the reset.
-      expect(result.sessionEntry.verboseLevel, testCase.name).toBe(autoOverrides.verboseLevel);
+      expect(result.sessionEntry.verboseLevel, testCase.name).toBe(
+        testCase.body === "/new" ? autoOverrides.verboseLevel : undefined,
+      );
     }
   });
 
@@ -3474,7 +3477,9 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
         testCase.name,
       ).toBeUndefined();
       expect(result.sessionEntry.modelOverrideFallbackOriginModel, testCase.name).toBeUndefined();
-      expect(result.sessionEntry.verboseLevel, testCase.name).toBe(autoOverrides.verboseLevel);
+      expect(result.sessionEntry.verboseLevel, testCase.name).toBe(
+        testCase.body === "/new" ? autoOverrides.verboseLevel : undefined,
+      );
     }
   });
 
@@ -3618,17 +3623,19 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
       expect(result.sessionEntry.fallbackNoticeActiveModel, testCase.name).toBeUndefined();
       expect(result.sessionEntry.fallbackNoticeReason, testCase.name).toBeUndefined();
       expect(result.sessionEntry.systemPromptReport, testCase.name).toBeUndefined();
+      const expectedOverride = testCase.body === "/new" ? explicitUserOverride : undefined;
       expect(result.sessionEntry.providerOverride, testCase.name).toBe(
-        explicitUserOverride.providerOverride,
+        expectedOverride?.providerOverride,
       );
       expect(result.sessionEntry.modelOverride, testCase.name).toBe(
-        explicitUserOverride.modelOverride,
+        expectedOverride?.modelOverride,
       );
       expect(result.sessionEntry.modelOverrideSource, testCase.name).toBe(
-        explicitUserOverride.modelOverrideSource,
+        expectedOverride?.modelOverrideSource,
       );
-      // Unrelated behavior overrides still carry across the reset.
-      expect(result.sessionEntry.verboseLevel, testCase.name).toBe(runtimeModelCache.verboseLevel);
+      expect(result.sessionEntry.verboseLevel, testCase.name).toBe(
+        testCase.body === "/new" ? runtimeModelCache.verboseLevel : undefined,
+      );
 
       const stored = JSON.parse(await fs.readFile(storePath, "utf-8")) as Record<
         string,
@@ -3643,16 +3650,16 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
       expect(stored[sessionKey].fallbackNoticeReason, testCase.name).toBeUndefined();
       expect(stored[sessionKey].systemPromptReport, testCase.name).toBeUndefined();
       expect(stored[sessionKey].providerOverride, testCase.name).toBe(
-        explicitUserOverride.providerOverride,
+        expectedOverride?.providerOverride,
       );
-      expect(stored[sessionKey].modelOverride, testCase.name).toBe(
-        explicitUserOverride.modelOverride,
-      );
+      expect(stored[sessionKey].modelOverride, testCase.name).toBe(expectedOverride?.modelOverride);
       expect(stored[sessionKey].modelOverrideSource, testCase.name).toBe(
-        explicitUserOverride.modelOverrideSource,
+        expectedOverride?.modelOverrideSource,
       );
       expect(stored[sessionKey].contextTokens, testCase.name).toBeUndefined();
-      expect(stored[sessionKey].verboseLevel, testCase.name).toBe(runtimeModelCache.verboseLevel);
+      expect(stored[sessionKey].verboseLevel, testCase.name).toBe(
+        testCase.body === "/new" ? runtimeModelCache.verboseLevel : undefined,
+      );
     }
   });
 

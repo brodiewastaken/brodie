@@ -23,8 +23,9 @@ delivery, and live preview behavior.
 ```ts
 import {
   buildChannelInboundEventContext,
-  runChannelInboundEvent,
   dispatchChannelInboundReply,
+  formatEnvelopeTimestamp,
+  runChannelInboundEvent,
 } from "openclaw/plugin-sdk/channel-inbound";
 ```
 
@@ -37,10 +38,14 @@ import {
   record, dispatch, and finalize for one inbound platform event.
 - `dispatchChannelInboundReply(...)`: records and dispatches an already
   assembled inbound reply with a delivery adapter.
+- `formatEnvelopeTimestamp(...)`: formats plugin-owned prompt metadata with
+  the same timezone and timestamp policy as normal inbound envelopes.
 
 Bundled/native channels that already receive the injected plugin runtime
-object can call the same helpers under `runtime.channel.inbound.*` instead of
-importing this subpath directly:
+object can call the lifecycle and context helpers under
+`runtime.channel.inbound.*` instead of importing this subpath directly.
+Formatting helpers such as `formatEnvelopeTimestamp(...)` remain static SDK
+imports:
 
 ```ts
 await runtime.channel.inbound.run({

@@ -293,6 +293,7 @@ export function resolveWhatsAppResponsePrefix(params: {
 }
 
 export async function buildWhatsAppInboundContext(params: {
+  cfg?: ReturnType<LoadConfigFn>;
   bodyForAgent?: string;
   combinedBody: string;
   commandBody?: string;
@@ -342,6 +343,7 @@ export async function buildWhatsAppInboundContext(params: {
     { transcribed: (_entry, index) => params.mediaTranscribedIndexes?.includes(index) === true },
   );
   return buildChannelInboundEventContext({
+    cfg: params.cfg,
     channel: "whatsapp",
     finalize: finalizeInboundContext,
     supplemental: {
@@ -367,6 +369,10 @@ export async function buildWhatsAppInboundContext(params: {
       kind: conversationKind,
       id: conversationId,
       label: conversationId,
+      memberCount:
+        conversationKind === "group" && params.groupMemberRoster
+          ? params.groupMemberRoster.size
+          : undefined,
     },
     route: {
       agentId: params.route.agentId,

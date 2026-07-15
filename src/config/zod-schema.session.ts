@@ -229,6 +229,14 @@ export const CommandsSchema = z
     ownerDisplay: z.enum(["raw", "hash"]).optional().default("raw"),
     ownerDisplaySecret: z.string().optional().register(sensitive),
     allowFrom: ElevatedAllowFromSchema.optional(),
+    invocation: z
+      .object({
+        name: z.string().optional(),
+        unauthorizedEnvelope: z.string().optional(),
+        stopPhrases: z.array(z.string()).optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .optional()

@@ -3035,7 +3035,7 @@ describe("createTelegramBot", () => {
     }
   });
 
-  it("does not hydrate reply media denied by General forum topic visibility", async () => {
+  it("hydrates explicitly quoted reply media outside General forum topic visibility", async () => {
     onSpy.mockClear();
     replySpy.mockClear();
     getFileSpy.mockClear();
@@ -3141,10 +3141,10 @@ describe("createTelegramBot", () => {
       (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
     );
     const hiddenMessage = messages.find((message) => message.message_id === "102");
-    expect(hiddenMessage?.media_ref).toBe("telegram:file/hidden-photo-1");
-    expect(hiddenMessage?.media_path).toBeUndefined();
-    expect(getFileSpy).not.toHaveBeenCalled();
-    expect(mediaFetch).not.toHaveBeenCalled();
+    expect(hiddenMessage?.media_path).toMatch(/^media:\/\/inbound\//);
+    expect(hiddenMessage?.media_ref).toBeUndefined();
+    expect(getFileSpy).toHaveBeenCalledWith("hidden-photo-1");
+    expect(mediaFetch).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -3158,13 +3158,13 @@ describe("createTelegramBot", () => {
       expectHydrated: true,
     },
     {
-      name: "does not hydrate a sender removed from the refreshed runtime allowlist",
+      name: "hydrates a quote from a sender removed from the refreshed runtime allowlist",
       chatId: -1009,
       runtimeGroupAllowFrom: ["1"],
       startupGroupAllowFrom: ["1", "2"],
       optionGroupAllowFrom: undefined,
       useAccessGroup: false,
-      expectHydrated: false,
+      expectHydrated: true,
     },
   ])(
     "$name",

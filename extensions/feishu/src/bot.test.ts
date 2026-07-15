@@ -2132,7 +2132,7 @@ describe("handleFeishuMessage command authorization", () => {
     expect(mockDispatchReplyFromConfig).not.toHaveBeenCalled();
   });
 
-  it("drops quoted group context from senders outside the group sender allowlist in allowlist mode", async () => {
+  it("keeps quoted group context from senders outside the group sender allowlist", async () => {
     mockShouldComputeCommandAuthorized.mockReturnValue(false);
     mockGetMessageFeishu.mockResolvedValueOnce({
       messageId: "om_parent_blocked",
@@ -2181,7 +2181,7 @@ describe("handleFeishuMessage command authorization", () => {
       SupplementalContext?: { quote?: { body?: string } };
     }>(mockFinalizeInboundContext, 0, 0);
     expect(context.ReplyToId).toBe("om_parent_blocked");
-    expect(context.SupplementalContext?.quote?.body).toBeUndefined();
+    expect(context.SupplementalContext?.quote?.body).toBe("blocked quoted content");
   });
 
   it("keeps quoted group context from non-allowlisted senders in default all mode", async () => {

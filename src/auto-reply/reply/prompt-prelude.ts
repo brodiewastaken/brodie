@@ -26,6 +26,7 @@ export function buildReplyPromptBodies(params: {
   prefixedBody?: string;
   transcriptBody?: string;
   threadContextNote?: string;
+  transcriptThreadContextNote?: string;
   systemEventBlocks?: string[];
   inboundEventKind?: InboundEventKind;
 }): {
@@ -57,11 +58,14 @@ export function buildReplyPromptBodies(params: {
     ? [mediaNote, mediaReplyHint, prefixedBody].filter(Boolean).join("\n").trim()
     : prefixedBody;
   const transcriptBody = params.transcriptBody ?? params.effectiveBaseBody;
+  const replayableTranscriptBody = [params.transcriptThreadContextNote, transcriptBody]
+    .filter(Boolean)
+    .join("\n\n");
   const includeMediaTranscript = mediaNote && params.inboundEventKind !== "room_event";
-  const transcriptCommandBodyRaw = transcriptBody
+  const transcriptCommandBodyRaw = replayableTranscriptBody
     ? includeMediaTranscript
-      ? [mediaNote, transcriptBody].filter(Boolean).join("\n").trim()
-      : transcriptBody
+      ? [mediaNote, replayableTranscriptBody].filter(Boolean).join("\n").trim()
+      : replayableTranscriptBody
     : includeMediaTranscript
       ? mediaNote
       : "";
@@ -155,7 +159,7 @@ function resolvePerTurnDeliveryDirective(params: {
 }): string | undefined {
   if (params.inboundEventKind === "room_event") {
     return params.sourceReplyDeliveryMode === "message_tool_only"
-      ? "Treat this as observed room activity. Default: no reply; most room events need no response from you. Send a visible reply via message(action=send) only when you are directly addressed or have concrete value to add; your final text here stays private either way."
+      ? "Treat this as observed room activity. Default: no response; most room events need nothing from you. Reply via message(action=reply) only when directly addressed or you have concrete value to add; your final text stays private either way."
       : "Treat this as observed room activity. Default: no reply; most room events need no response from you. Reply only when you are directly addressed or have concrete value to add.";
   }
   if (
@@ -190,6 +194,19 @@ function buildResumableRoomContext(roomContext: string): string {
         !RESUMABLE_ROOM_CONTEXT_OMITTED_PREFIXES.some((prefix) => block.startsWith(prefix)),
     )
     .join("\n\n");
+}
+
+function resolveAuthoredResetTranscriptBody(params: ReplyPromptEnvelopeBaseParams): string {
+  return (
+    normalizeOptionalString(params.ctx.RawBody) ??
+    normalizeOptionalString(params.ctx.CommandTriggerBody) ??
+    normalizeOptionalString(params.ctx.CommandBody) ??
+    normalizeOptionalString(params.ctx.Body) ??
+    normalizeOptionalString(params.sessionCtx.RawBody) ??
+    normalizeOptionalString(params.sessionCtx.CommandBody) ??
+    normalizeOptionalString(params.sessionCtx.Body) ??
+    ""
+  );
 }
 
 /** Builds prompt envelope metadata shared by all body variants. */
@@ -232,7 +249,7 @@ export function buildReplyPromptEnvelopeBase(
   const transcriptBody = params.isHeartbeat
     ? HEARTBEAT_TRANSCRIPT_PROMPT
     : params.isBareSessionReset
-      ? softResetTail || `[OpenClaw session ${params.startupAction}]`
+      ? resolveAuthoredResetTranscriptBody(params)
       : isRoomEvent
         ? resolveRoomEventTranscriptBody(params)
         : params.hasUserBody
@@ -260,6 +277,7 @@ export function buildReplyPromptEnvelope(
   params: ReplyPromptEnvelopeBaseParams & {
     prefixedBody?: string;
     threadContextNote?: string;
+    transcriptThreadContextNote?: string;
     systemEventBlocks?: string[];
   },
 ): ReplyPromptEnvelope {
@@ -272,6 +290,7 @@ export function buildReplyPromptEnvelope(
     prefixedBody,
     transcriptBody: base.transcriptBody,
     threadContextNote: params.threadContextNote,
+    transcriptThreadContextNote: params.transcriptThreadContextNote,
     systemEventBlocks: params.systemEventBlocks,
     inboundEventKind: params.inboundEventKind,
   });

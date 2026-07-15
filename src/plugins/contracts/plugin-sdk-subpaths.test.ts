@@ -1025,6 +1025,7 @@ describe("plugin-sdk subpath exports", () => {
       "createChannelInboundDebouncer",
       "createInboundDebouncer",
       "dispatchInboundDirectDmWithRuntime",
+      "formatEnvelopeTimestamp",
       "formatInboundEnvelope",
       "formatInboundFromLabel",
       "formatLocationText",

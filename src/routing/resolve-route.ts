@@ -15,9 +15,8 @@ import { listBindings } from "./bindings.js";
 import { peerKindMatches } from "./peer-kind-match.js";
 import {
   buildAgentMainSessionKey,
-  buildAgentPeerSessionKey,
+  buildCanonicalConversationSessionKey,
   DEFAULT_ACCOUNT_ID,
-  DEFAULT_MAIN_KEY,
   normalizeAccountId,
   normalizeAgentId,
   sanitizeAgentId,
@@ -105,15 +104,16 @@ export function buildAgentSessionKey(params: {
 }): string {
   const channel = normalizeToken(params.channel) || "unknown";
   const peer = params.peer;
-  return buildAgentPeerSessionKey({
+  if (!peer) {
+    return buildAgentMainSessionKey({ agentId: params.agentId, mainKey: params.mainKey });
+  }
+  return buildCanonicalConversationSessionKey({
     agentId: params.agentId,
-    mainKey: params.mainKey ?? DEFAULT_MAIN_KEY,
     channel,
     accountId: params.accountId,
-    peerKind: peer?.kind ?? "direct",
-    peerId: peer ? normalizeId(peer.id) || "unknown" : null,
-    dmScope: params.dmScope,
-    identityLinks: params.identityLinks,
+    conversationKind:
+      peer.kind === "direct" ? "direct" : peer.kind === "channel" ? "channel" : "group",
+    conversationId: normalizeId(peer.id) || "unknown",
   });
 }
 
