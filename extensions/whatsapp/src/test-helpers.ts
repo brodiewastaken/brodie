@@ -464,6 +464,12 @@ vi.mock("./auto-reply/config.runtime.js", () => ({
   resolveThreadFlag: () => false,
 }));
 
+vi.mock("./scheduler-admission.js", () => ({
+  admitWhatsAppScheduledInbound: vi.fn(async () => ({
+    result: { accepted: false as const, reason: "disabled" as const },
+  })),
+}));
+
 vi.mock("./inbound/runtime-api.js", () => ({
   DisconnectReason: { loggedOut: 401 },
   isJidGroup: (jid: string) => typeof jid === "string" && jid.endsWith("@g.us"),
@@ -479,6 +485,8 @@ vi.mock("./inbound/runtime-api.js", () => ({
 
 vi.mock("./auto-reply/monitor/inbound-dispatch.runtime.js", () => ({
   createChannelMessageReplyPipeline: createChannelMessageReplyPipelineMock,
+  resolveAgentIdentity: () => undefined,
+  resolveAgentWorkspaceDir: () => undefined,
   dispatchReplyWithBufferedBlockDispatcher: createBufferedDispatchReplyMock(),
   finalizeInboundContext: <T>(ctx: T) => ctx,
   getAgentScopedMediaLocalRoots: () => [] as string[],
@@ -705,14 +713,14 @@ export function resetBaileysMocks() {
     implementation: useMultiFileAuthStateImpl,
   });
 
-  const fetchLatestBaileysVersion = vi.mocked(baileys.fetchLatestBaileysVersion);
-  const fetchLatestBaileysVersionImpl: typeof baileys.fetchLatestBaileysVersion = (...args) =>
+  const fetchLatestWaWebVersion = vi.mocked(baileys.fetchLatestWaWebVersion);
+  const fetchLatestWaWebVersionImpl: typeof baileys.fetchLatestWaWebVersion = (...args) =>
     (
-      recreated.mod.fetchLatestBaileysVersion as unknown as typeof baileys.fetchLatestBaileysVersion
+      recreated.mod.fetchLatestWaWebVersion as unknown as typeof baileys.fetchLatestWaWebVersion
     )(...args);
   resetMockExport({
-    current: fetchLatestBaileysVersion,
-    implementation: fetchLatestBaileysVersionImpl,
+    current: fetchLatestWaWebVersion,
+    implementation: fetchLatestWaWebVersionImpl,
   });
 
   const makeCacheableSignalKeyStore = vi.mocked(baileys.makeCacheableSignalKeyStore);

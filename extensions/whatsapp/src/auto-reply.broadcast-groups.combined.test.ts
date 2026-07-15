@@ -186,8 +186,8 @@ describe("broadcast groups", () => {
 
     expect(resolver).toHaveBeenCalledTimes(2);
     expect(seen).toEqual([
-      "agent:alfred:whatsapp:group:123@g.us:thread:whatsapp-account-work",
-      "agent:baerbel:whatsapp:group:123@g.us:thread:whatsapp-account-work",
+      "agent:alfred:conversation:whatsapp:work:group:123@g.us",
+      "agent:baerbel:conversation:whatsapp:work:group:123@g.us",
     ]);
     resetLoadConfigMock();
   });

@@ -80,6 +80,17 @@ export type SupplementalContextFacts = {
   untrustedGroupSystemPrompt?: string;
 };
 
+export type ResolvedGroupMemberContext = {
+  name?: string;
+  e164?: string;
+  lid?: string;
+  id?: string;
+  personFile?: string;
+  note?: string;
+  self?: boolean;
+  pinned?: "self" | "owner";
+};
+
 /** Raw inbound message context accepted from channels before finalization. */
 export type MsgContext = {
   Body?: string;
@@ -258,6 +269,7 @@ export type MsgContext = {
   /** Trusted provider role ids for the sender in this group turn. */
   MemberRoleIds?: string[];
   GroupMembers?: string;
+  ResolvedGroupMembers?: ResolvedGroupMemberContext[];
   GroupSystemPrompt?: string;
   /**
    * Canonical inbound supplemental facts for new channel code. `finalizeInboundContext`

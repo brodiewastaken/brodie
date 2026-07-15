@@ -300,6 +300,7 @@ function acceptedDeliveryResult() {
     ],
     receipt: testReceipt(["wa-sent-1"]),
     providerAccepted: true,
+    partialMediaFailures: [],
   };
 }
 
@@ -308,6 +309,7 @@ function unacceptedDeliveryResult() {
     results: [],
     receipt: testReceipt([]),
     providerAccepted: false,
+    partialMediaFailures: [],
   };
 }
 
@@ -393,10 +395,12 @@ describe("whatsapp inbound dispatch", () => {
       msg: makeMsg({
         payload: {
           body: "<media:audio>",
-          media: {
-            path: "/tmp/voice.ogg",
-            type: "audio/ogg; codecs=opus",
-          },
+          media: [
+            {
+              path: "/tmp/voice.ogg",
+              type: "audio/ogg; codecs=opus",
+            },
+          ],
         },
       }),
       rawBody: "<media:audio>",
@@ -417,16 +421,144 @@ describe("whatsapp inbound dispatch", () => {
     });
   });
 
+  it("projects native mention targets into the agent body without weakening command parsing", async () => {
+    const targetLid = "277038292303944@lid";
+    const selfLid = "216372600647751@lid";
+    const authoredBody = "@277038292303944 check with @216372600647751";
+    const ctx = await buildWhatsAppInboundContext({
+      combinedBody: authoredBody,
+      commandBody: "check with",
+      groupMemberRoster: new Map([["+15551234567", "Ada"]]),
+      msg: makeMsg({
+        admission: groupAdmission("123@g.us"),
+        payload: { body: authoredBody },
+        platform: {
+          selfJid: "15557654321@s.whatsapp.net",
+          selfLid,
+          selfE164: "+15557654321",
+        },
+        group: {
+          participants: ["+15551234567", "+15557654321"],
+          participantIdentities: [
+            {
+              id: targetLid,
+              lid: targetLid,
+              e164: "+15551234567",
+            },
+          ],
+          mentions: { jids: [targetLid, selfLid] },
+        },
+      }),
+      rawBody: authoredBody,
+      route: makeRoute({ sessionKey: "agent:main:whatsapp:group:123@g.us" }),
+      sender: { e164: "+15550001111", name: "Sender" },
+    });
+
+    expectRecordFields(requireRecord(ctx, "native mention context"), {
+      BodyForAgent:
+        "@Ada [+15551234567][277038292303944@lid] check with @main [+15557654321][216372600647751@lid]",
+      RawBody: authoredBody,
+      CommandBody: "check with",
+    });
+  });
+
+  it("projects native mention targets inside quoted bodies", async () => {
+    const targetLid = "277038292303944@lid";
+    const ctx = await buildWhatsAppInboundContext({
+      combinedBody: "what does this mean?",
+      commandBody: "what does this mean?",
+      groupMemberRoster: new Map([["+15551234567", "Ada"]]),
+      msg: makeMsg({
+        admission: groupAdmission("123@g.us"),
+        payload: { body: "what does this mean?" },
+        group: {
+          participants: ["+15551234567"],
+          participantIdentities: [{ id: targetLid, lid: targetLid, e164: "+15551234567" }],
+        },
+      }),
+      rawBody: "what does this mean?",
+      route: makeRoute({ sessionKey: "agent:main:whatsapp:group:123@g.us" }),
+      sender: { e164: "+15550001111", name: "Sender" },
+      visibleReplyTo: {
+        id: "quoted-1",
+        body: "@277038292303944 check",
+        mentionedJids: [targetLid],
+        sender: { name: "Quoted sender" },
+      },
+    });
+
+    expect(ctx.ReplyToBody).toBe("@Ada [+15551234567][277038292303944@lid] check");
+  });
+
+  it("exposes identity, roster, and quoted-media context extras", async () => {
+    const ctx = await buildWhatsAppInboundContext({
+      combinedBody: "hello",
+      msg: makeMsg({
+        payload: { body: "hello" },
+        platform: {
+          chatJid: "120363001111111111@g.us",
+          recipientJid: "+2000",
+          senderJid: "111@s.whatsapp.net",
+          senderE164: "+1000",
+          selfJid: "222@s.whatsapp.net",
+          selfLid: "222@lid",
+          selfE164: "+2000",
+        },
+        quote: {
+          context: {
+            id: "q1",
+            body: "quoted",
+            mediaPaths: ["/tmp/quoted.jpg"],
+            mediaTypes: ["image/jpeg"],
+          },
+        },
+        group: {
+          subject: "Test Group",
+          participants: ["+1000", "+2000"],
+        },
+        admission: groupAdmission("120363001111111111@g.us"),
+      }),
+      route: makeRoute({ sessionKey: "agent:main:whatsapp:group:g" }),
+      sender: {
+        e164: "+1000",
+        name: "Alice",
+      },
+    });
+
+    const record = requireRecord(ctx, "identity extras context");
+    expectRecordFields(record, {
+      SenderE164: "+1000",
+      SenderJid: "111@s.whatsapp.net",
+      SelfE164: "+2000",
+      SelfJid: "222@s.whatsapp.net",
+      SelfLid: "222@lid",
+      BotE164: "+2000",
+      ParticipantCount: 2,
+      ReplyToMediaPath: "/tmp/quoted.jpg",
+      ReplyToMediaUrl: "/tmp/quoted.jpg",
+      ReplyToMediaType: "image/jpeg",
+    });
+    expect(record.ReplyToMediaPaths).toEqual(["/tmp/quoted.jpg"]);
+    expect(record.ReplyToMediaTypes).toEqual(["image/jpeg"]);
+    // Roster resolution merges participants + sender + self; without a
+    // workspace it renders roster-only members (self display name = agent id).
+    expect(String(record.GroupMembers)).toContain("Alice");
+    expect(String(record.GroupMembers)).toContain("main");
+    expect(Array.isArray(record.ResolvedGroupMembers)).toBe(true);
+  });
+
   it("preserves remote-only inbound media URLs", async () => {
     const ctx = await buildWhatsAppInboundContext({
       combinedBody: "<image>",
       msg: makeMsg({
         payload: {
           body: "<image>",
-          media: {
-            url: "https://media.example/image.jpg",
-            type: "image/jpeg",
-          },
+          media: [
+            {
+              url: "https://media.example/image.jpg",
+              type: "image/jpeg",
+            },
+          ],
         },
       }),
       route: makeRoute(),
@@ -1595,7 +1727,7 @@ describe("whatsapp inbound dispatch", () => {
     expect(updateLastRoute).toHaveBeenCalledTimes(1);
   });
 
-  it("does not update main last route for isolated DM scope sessions", async () => {
+  it("updates the canonical isolated DM route instead of a sibling main session", async () => {
     const updateLastRoute = vi.fn();
 
     updateWhatsAppMainLastRoute({
@@ -1605,14 +1737,19 @@ describe("whatsapp inbound dispatch", () => {
       dmRouteTarget: "+3000",
       pinnedMainDmRecipient: null,
       route: makeRoute({
-        sessionKey: "agent:main:whatsapp:dm:+1000:peer:+3000",
+        sessionKey: "agent:main:conversation:whatsapp:default:direct:+3000",
         mainSessionKey: "agent:main:whatsapp:direct:+1000",
       }),
       updateLastRoute,
       warn: () => {},
     });
 
-    expect(updateLastRoute).not.toHaveBeenCalled();
+    expect(updateLastRoute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:conversation:whatsapp:default:direct:+3000",
+        to: "+3000",
+      }),
+    );
   });
 
   it("does not update main last route for non-owner sender when main DM scope is pinned", async () => {

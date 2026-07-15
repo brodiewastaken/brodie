@@ -7,7 +7,6 @@ import {
 import type {
   ChannelGroupPolicy,
   DmPolicy,
-  GroupPolicy,
   OpenClawConfig,
 } from "openclaw/plugin-sdk/config-contracts";
 import { resolveDefaultGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
@@ -16,13 +15,18 @@ import { getSelfIdentity, getSenderIdentity } from "./identity.js";
 import { requireWhatsAppInboundAdmission } from "./inbound/admission.js";
 import { resolveWhatsAppGroupConversationId } from "./inbound/group-conversation.js";
 import type { AdmittedWebInboundMessage } from "./inbound/types.js";
-import { resolveWhatsAppRuntimeGroupPolicy } from "./runtime-group-policy.js";
+import {
+  resolveWhatsAppRuntimeGroupPolicy,
+  toOpenWhatsAppGroupPolicy,
+  type OpenWhatsAppGroupPolicy,
+  type WhatsAppRuntimeGroupPolicy,
+} from "./runtime-group-policy.js";
 import { isSelfChatMode, normalizeE164 } from "./text-runtime.js";
 
 type ResolvedWhatsAppInboundPolicy = {
   account: ResolvedWhatsAppAccount;
   dmPolicy: DmPolicy;
-  groupPolicy: GroupPolicy;
+  groupPolicy: WhatsAppRuntimeGroupPolicy;
   configuredAllowFrom: string[];
   dmAllowFrom: string[];
   groupAllowFrom: string[];
@@ -53,7 +57,7 @@ function maybeSamePhoneDmAllowFrom(params: {
 }
 
 function buildResolvedWhatsAppGroupConfig(params: {
-  groupPolicy: GroupPolicy;
+  groupPolicy: OpenWhatsAppGroupPolicy;
   groups: ResolvedWhatsAppAccount["groups"];
 }): OpenClawConfig {
   return {
@@ -94,7 +98,7 @@ export function resolveWhatsAppInboundPolicy(params: {
     defaultGroupPolicy,
   });
   const resolvedGroupCfg = buildResolvedWhatsAppGroupConfig({
-    groupPolicy,
+    groupPolicy: toOpenWhatsAppGroupPolicy(groupPolicy),
     groups: account.groups,
   });
   const isSamePhone = (value?: string | null) =>
@@ -158,14 +162,25 @@ export async function resolveWhatsAppIngressAccess(params: {
       id: params.conversationId,
     },
     dmPolicy: params.policy.dmPolicy,
-    groupPolicy: params.policy.groupPolicy,
+    // Under duo, untrusted groups are already dropped by trusted-group
+    // enforcement before ingress; surviving (trusted) messages are evaluated
+    // as "open" so an empty groupAllowFrom cannot block a trusted room.
+    groupPolicy:
+      params.policy.groupPolicy === "duo"
+        ? "open"
+        : toOpenWhatsAppGroupPolicy(params.policy.groupPolicy),
     policy: {
       groupAllowFromFallbackToAllowFrom: false,
     },
     providerMissingFallbackApplied: params.policy.providerMissingFallbackApplied,
     allowFrom: dmAllowFrom,
     groupAllowFrom: params.policy.groupAllowFrom,
-    command: params.includeCommand === true ? {} : undefined,
+    command:
+      params.includeCommand === true
+        ? params.isGroup
+          ? { commandOwnerAllowFrom: params.policy.groupAllowFrom }
+          : {}
+        : undefined,
   });
 }
 
@@ -185,6 +200,11 @@ export async function resolveWhatsAppCommandAuthorized(params: {
       selfE164: self.e164 ?? null,
     });
   const isGroup = admission.conversation.kind === "group";
+  // Duo command auth: group commands require room trust before any
+  // sender-based command access is considered.
+  if (isGroup && policy.groupPolicy === "duo" && !admission.trustedGroup) {
+    return false;
+  }
   const sender = getSenderIdentity(params.msg, params.authDir);
   const dmSender = sender.e164 ?? admission.conversation.id;
   const groupSender = sender.e164 ?? "";

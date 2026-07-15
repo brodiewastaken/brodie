@@ -13,6 +13,8 @@ import { deliverInboundReplyWithMessageSendContext } from "openclaw/plugin-sdk/c
 import { buildInboundHistoryFromEntries } from "openclaw/plugin-sdk/reply-history";
 import type { FinalizedMsgContext } from "openclaw/plugin-sdk/reply-runtime";
 import { normalizeStringEntries } from "openclaw/plugin-sdk/string-coerce-runtime";
+import type { GifAutoConvertConfig } from "../../gif-transcode.js";
+import type { WhatsAppReplyContext } from "../../identity.js";
 import { requireWhatsAppInboundAdmission } from "../../inbound/admission.js";
 import type { AdmittedWebInboundMessage } from "../../inbound/types.js";
 import {
@@ -22,11 +24,13 @@ import {
 } from "../../outbound-media-contract.js";
 import type { WhatsAppReplyDeliveryResult } from "../deliver-reply.js";
 import { markWhatsAppVisibleDeliveryError } from "../util.js";
-import { formatGroupMembers } from "./group-members.js";
+import { resolveGroupMembers, type WhatsAppGroupRosterOptions } from "./group-members.js";
 import type { GroupHistoryEntry } from "./inbound-context.js";
 import {
   createChannelMessageReplyPipeline,
   dispatchReplyWithBufferedBlockDispatcher,
+  resolveAgentIdentity,
+  resolveAgentWorkspaceDir,
   finalizeInboundContext,
   getAgentScopedMediaLocalRoots,
   jidToE164,
@@ -34,7 +38,6 @@ import {
   resolveChannelMessageSourceReplyDeliveryMode,
   resolveChunkMode,
   resolveIdentityNamePrefix,
-  resolveInboundLastRouteSessionKey,
   resolveMarkdownTableMode,
   resolveSendableOutboundReplyParts,
   resolveTextChunkLimit,
@@ -46,6 +49,7 @@ import {
   type ReplyPayload,
   type resolveAgentRoute,
 } from "./inbound-dispatch.runtime.js";
+import { projectWhatsAppInboundMentions } from "./inbound-mentions.js";
 
 type ReplyLifecycleKind = "tool" | "block" | "final";
 type ChannelReplyOnModelSelected = NonNullable<
@@ -56,13 +60,7 @@ type WhatsAppDispatchPipeline = {
   responsePrefix?: string;
 } & Record<string, unknown>;
 
-type VisibleReplyTarget = {
-  id?: string;
-  body?: string;
-  sender?: {
-    label?: string | null;
-  } | null;
-};
+type VisibleReplyTarget = Pick<WhatsAppReplyContext, "id" | "body" | "mentionedJids" | "sender">;
 
 type ReplyThreadingContext = {
   implicitCurrentMessage?: "default" | "allow" | "deny";
@@ -295,6 +293,7 @@ export function resolveWhatsAppResponsePrefix(params: {
 export async function buildWhatsAppInboundContext(params: {
   cfg?: ReturnType<LoadConfigFn>;
   bodyForAgent?: string;
+  groupRoster?: WhatsAppGroupRosterOptions;
   combinedBody: string;
   commandBody?: string;
   commandAuthorized?: boolean;
@@ -330,19 +329,80 @@ export async function buildWhatsAppInboundContext(params: {
         })
       : undefined;
 
-  const media = toInboundMediaFacts(
-    params.msg.payload.media?.path || params.msg.payload.media?.url
-      ? [
-          {
-            path: params.msg.payload.media?.path,
-            url: params.msg.payload.media?.url ?? params.msg.payload.media?.path,
-            contentType: params.msg.payload.media?.type,
+  const selfIdentity = params.msg.platform.self;
+  const senderIdentity = params.msg.platform.sender;
+  const selfMemberIdentity = {
+    id: params.msg.platform.selfJid ?? selfIdentity?.jid ?? undefined,
+    lid: params.msg.platform.selfLid ?? selfIdentity?.lid ?? undefined,
+    e164: params.msg.platform.selfE164 ?? selfIdentity?.e164 ?? undefined,
+    self: true,
+  };
+  const rosterOptions: WhatsAppGroupRosterOptions = {
+    ...params.groupRoster,
+    selfDisplayName:
+      params.groupRoster?.selfDisplayName ??
+      (params.cfg
+        ? resolveAgentIdentity(params.cfg, params.route.agentId)?.name?.trim() ||
+          params.route.agentId
+        : params.route.agentId),
+  };
+  const workspaceDir =
+    params.cfg && conversationKind === "group"
+      ? resolveAgentWorkspaceDir(params.cfg, params.route.agentId)
+      : undefined;
+  // DMs get the self member only (no roster); groups merge participants,
+  // roster, sender, and self through shared-identity dedupe.
+  const groupMemberResolution =
+    conversationKind === "group"
+      ? await resolveGroupMembers({
+          participants: params.msg.group?.participantIdentities ?? params.msg.group?.participants,
+          roster: params.groupMemberRoster,
+          workspaceDir,
+          options: rosterOptions,
+          fallbackE164: params.sender.e164,
+          sender: {
+            id: params.msg.platform.senderJid ?? senderIdentity?.jid ?? undefined,
+            lid: senderIdentity?.lid ?? undefined,
+            e164: params.sender.e164 ?? senderIdentity?.e164 ?? undefined,
+            name: params.sender.name ?? senderIdentity?.name ?? undefined,
           },
-        ]
+          self: selfMemberIdentity,
+        })
+      : await resolveGroupMembers({
+          participants: undefined,
+          roster: undefined,
+          options: rosterOptions,
+          self: selfMemberIdentity,
+        });
+
+  const quotedMediaContext = params.msg.quote?.context;
+  const replyToMediaPaths = quotedMediaContext?.mediaPaths;
+  const replyToMediaTypes = quotedMediaContext?.mediaTypes;
+
+  const mediaItems = (params.msg.payload.media ?? []).filter((item) => item.path || item.url);
+  const media = toInboundMediaFacts(
+    mediaItems.length > 0
+      ? mediaItems.map((item) => ({
+          path: item.path,
+          url: item.url ?? item.path,
+          contentType: item.type,
+        }))
       : undefined,
     { transcribed: (_entry, index) => params.mediaTranscribedIndexes?.includes(index) === true },
   );
-  return buildChannelInboundEventContext({
+  const bodyForAgent = projectWhatsAppInboundMentions({
+    text: params.bodyForAgent ?? params.msg.payload.body,
+    mentionedJids: params.msg.group?.mentions?.jids,
+    members: groupMemberResolution.members,
+  });
+  const replyBodyForAgent = params.visibleReplyTo
+    ? projectWhatsAppInboundMentions({
+        text: params.visibleReplyTo.body,
+        mentionedJids: params.visibleReplyTo.mentionedJids,
+        members: groupMemberResolution.members,
+      })
+    : undefined;
+  const context = buildChannelInboundEventContext({
     cfg: params.cfg,
     channel: "whatsapp",
     finalize: finalizeInboundContext,
@@ -350,7 +410,7 @@ export async function buildWhatsAppInboundContext(params: {
       quote: params.visibleReplyTo
         ? {
             id: params.visibleReplyTo.id,
-            body: params.visibleReplyTo.body,
+            body: replyBodyForAgent,
             sender: params.visibleReplyTo.sender?.label ?? undefined,
           }
         : undefined,
@@ -385,7 +445,7 @@ export async function buildWhatsAppInboundContext(params: {
     },
     message: {
       body: params.combinedBody,
-      bodyForAgent: params.bodyForAgent ?? params.msg.payload.body,
+      bodyForAgent,
       inboundHistory,
       rawBody: params.rawBody ?? params.msg.payload.body,
       commandBody: params.commandBody ?? params.msg.payload.body,
@@ -408,12 +468,24 @@ export async function buildWhatsAppInboundContext(params: {
     extra: {
       Transcript: params.transcript,
       GroupSubject: params.msg.group?.subject,
-      GroupMembers: formatGroupMembers({
-        participants: params.msg.group?.participants,
-        roster: params.groupMemberRoster,
-        fallbackE164: params.sender.e164,
-      }),
+      GroupMembers: groupMemberResolution.rendered,
+      ResolvedGroupMembers:
+        groupMemberResolution.members.length > 0 ? groupMemberResolution.members : undefined,
+      ParticipantCount:
+        conversationKind === "group" ? params.msg.group?.participants?.length : undefined,
       SenderE164: params.sender.e164,
+      SenderJid: params.msg.platform.senderJid ?? senderIdentity?.jid,
+      SenderLid: senderIdentity?.lid,
+      SelfE164: params.msg.platform.selfE164 ?? selfIdentity?.e164 ?? undefined,
+      SelfJid: params.msg.platform.selfJid ?? selfIdentity?.jid ?? undefined,
+      SelfLid: params.msg.platform.selfLid ?? selfIdentity?.lid ?? undefined,
+      BotE164: params.msg.platform.selfE164 ?? selfIdentity?.e164 ?? undefined,
+      ReplyToMediaPath: replyToMediaPaths?.[0],
+      ReplyToMediaPaths: replyToMediaPaths,
+      ReplyToMediaUrl: replyToMediaPaths?.[0],
+      ReplyToMediaUrls: replyToMediaPaths,
+      ReplyToMediaType: replyToMediaTypes?.[0],
+      ReplyToMediaTypes: replyToMediaTypes,
       CommandSource:
         params.commandSource ??
         (params.commandTurn?.source === "native" || params.commandTurn?.source === "text"
@@ -424,6 +496,7 @@ export async function buildWhatsAppInboundContext(params: {
       ...(params.msg.payload.location ? toLocationContext(params.msg.payload.location) : {}),
     },
   });
+  return context;
 }
 
 function normalizeCommandTurnFromContext(value: unknown): CommandTurnContext | undefined {
@@ -502,25 +575,23 @@ export function updateWhatsAppMainLastRoute(params: {
   }) => void;
   warn: ReturnType<typeof getChildLogger>["warn"];
 }) {
-  const shouldUpdateMainLastRoute =
+  const chatType = typeof params.ctx.ChatType === "string" ? params.ctx.ChatType : undefined;
+  const isDirect = chatType !== "group" && chatType !== "channel";
+  if (!isDirect) {
+    return;
+  }
+  const routeTarget = params.dmRouteTarget;
+  const shouldUpdateLastRoute =
     !params.pinnedMainDmRecipient || params.pinnedMainDmRecipient === params.dmRouteTarget;
-  const inboundLastRouteSessionKey = resolveInboundLastRouteSessionKey({
-    route: params.route,
-    sessionKey: params.route.sessionKey,
-  });
 
-  if (
-    params.dmRouteTarget &&
-    inboundLastRouteSessionKey === params.route.mainSessionKey &&
-    shouldUpdateMainLastRoute
-  ) {
+  if (routeTarget && shouldUpdateLastRoute) {
     params.updateLastRoute({
       cfg: params.cfg,
       backgroundTasks: params.backgroundTasks,
       storeAgentId: params.route.agentId,
-      sessionKey: params.route.mainSessionKey,
+      sessionKey: params.route.sessionKey,
       channel: "whatsapp",
-      to: params.dmRouteTarget,
+      to: routeTarget,
       accountId: params.route.accountId,
       ctx: params.ctx,
       warn: params.warn,
@@ -528,11 +599,7 @@ export function updateWhatsAppMainLastRoute(params: {
     return;
   }
 
-  if (
-    params.dmRouteTarget &&
-    inboundLastRouteSessionKey === params.route.mainSessionKey &&
-    params.pinnedMainDmRecipient
-  ) {
+  if (params.dmRouteTarget && params.pinnedMainDmRecipient) {
     logVerbose(
       `Skipping main-session last route update for ${params.dmRouteTarget} (pinned owner ${params.pinnedMainDmRecipient})`,
     );
@@ -548,6 +615,8 @@ export async function dispatchWhatsAppBufferedReply(params: {
     normalizedReplyResult?: DeliverableWhatsAppOutboundPayload<ReplyPayload>;
     msg: AdmittedWebInboundMessage;
     mediaLocalRoots: readonly string[];
+    gifAutoConvert?: GifAutoConvertConfig;
+    failedMediaWarning?: string;
     maxMediaBytes: number;
     textLimit: number;
     chunkMode?: ReturnType<typeof resolveChunkMode>;
@@ -556,6 +625,8 @@ export async function dispatchWhatsAppBufferedReply(params: {
     skipLog?: boolean;
     tableMode?: ReturnType<typeof resolveMarkdownTableMode>;
   }) => Promise<WhatsAppReplyDeliveryResult>;
+  gifAutoConvert?: GifAutoConvertConfig;
+  failedMediaWarning?: string;
   groupHistories: Map<string, GroupHistoryEntry[]>;
   groupHistoryKey: string;
   maxMediaBytes: number;
@@ -637,6 +708,8 @@ export async function dispatchWhatsAppBufferedReply(params: {
       normalizedReplyResult: normalizedDeliveryPayload,
       msg: params.msg,
       mediaLocalRoots,
+      gifAutoConvert: params.gifAutoConvert,
+      failedMediaWarning: params.failedMediaWarning,
       maxMediaBytes: params.maxMediaBytes,
       textLimit,
       chunkMode,

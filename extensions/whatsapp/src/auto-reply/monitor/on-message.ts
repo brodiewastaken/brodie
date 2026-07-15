@@ -11,7 +11,6 @@ import { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import { buildGroupHistoryKey } from "openclaw/plugin-sdk/routing";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { resolveWhatsAppAccount } from "../../accounts.js";
-import { resolveWhatsAppGroupSessionRoute } from "../../group-session-key.js";
 import { getPrimaryIdentityId, getSenderIdentity } from "../../identity.js";
 import {
   requireAdmittedWhatsAppInboundMessage,
@@ -145,6 +144,7 @@ export function createWebOnMessageHandler(params: {
     const cfg = params.loadConfig?.() ?? params.cfg;
     const peerId = resolvePeerId(normalizedMsg);
     const msg = withDirectSenderPeer(normalizedMsg, peerId);
+    let dispatchMsg = msg;
     const admission = requireWhatsAppInboundAdmission(msg);
     if (admission.ingress.admission !== "dispatch" && admission.ingress.admission !== "observe") {
       return;
@@ -160,8 +160,7 @@ export function createWebOnMessageHandler(params: {
         id: peerId,
       },
     });
-    const baseConversationRoute =
-      conversationKind === "group" ? resolveWhatsAppGroupSessionRoute(baseRoute) : baseRoute;
+    const baseConversationRoute = baseRoute;
     const routeAccountId = baseConversationRoute.accountId ?? admission.accountId;
     const account = resolveWhatsAppAccount({
       cfg,
@@ -210,7 +209,7 @@ export function createWebOnMessageHandler(params: {
     // undefined = preflight was not attempted (non-audio message).
     let preflightAudioTranscript: string | null | undefined;
     const hasAudioBody =
-      msg.payload.media?.type?.startsWith("audio/") === true &&
+      msg.payload.media?.[0]?.type?.startsWith("audio/") === true &&
       msg.payload.body === "<media:audio>";
     const canRunEarlyAudioPreflight =
       conversationKind === "group" || canRunDirectEarlyAudioPreflight;
@@ -238,7 +237,11 @@ export function createWebOnMessageHandler(params: {
       }
     };
     const transcribeAudioOnce = async () => {
-      if (preflightAudioTranscript !== undefined || !hasAudioBody || !msg.payload.media?.path) {
+      if (
+        preflightAudioTranscript !== undefined ||
+        !hasAudioBody ||
+        !msg.payload.media?.[0]?.path
+      ) {
         return;
       }
       try {
@@ -248,8 +251,8 @@ export function createWebOnMessageHandler(params: {
         preflightAudioTranscript =
           (await transcribeFirstAudio({
             ctx: {
-              MediaPaths: [msg.payload.media?.path],
-              MediaTypes: msg.payload.media?.type ? [msg.payload.media?.type] : undefined,
+              MediaPaths: [msg.payload.media?.[0]?.path],
+              MediaTypes: msg.payload.media?.[0]?.type ? [msg.payload.media[0]?.type] : undefined,
               From: conversationId,
               To: msg.platform.recipientJid,
               Provider: "whatsapp",
@@ -270,7 +273,7 @@ export function createWebOnMessageHandler(params: {
         preflightAudioTranscript !== undefined ||
         !canRunEarlyAudioPreflight ||
         !hasAudioBody ||
-        !msg.payload.media?.path
+        !msg.payload.media?.[0]?.path
       ) {
         return;
       }
@@ -337,7 +340,7 @@ export function createWebOnMessageHandler(params: {
       let gating = await applyGroupGating({
         cfg,
         msg,
-        deferMissingMention: hasAudioBody && Boolean(msg.payload.media?.path),
+        deferMissingMention: hasAudioBody && Boolean(msg.payload.media?.[0]?.path),
         groupHistoryKey,
         agentId: route.agentId,
         sessionKey: route.sessionKey,
@@ -381,6 +384,16 @@ export function createWebOnMessageHandler(params: {
         await clearPreDispatchReaction();
         return;
       }
+      if ("commandBody" in gating && typeof gating.commandBody === "string") {
+        dispatchMsg = {
+          ...msg,
+          payload: {
+            ...msg.payload,
+            authoredBody: msg.payload.commandBody ?? msg.payload.body,
+            commandBody: gating.commandBody,
+          },
+        };
+      }
     }
 
     if (configuredRoute.bindingResolution) {
@@ -418,7 +431,7 @@ export function createWebOnMessageHandler(params: {
       !configuredRoute.bindingResolution &&
       (await maybeBroadcastMessage({
         cfg,
-        msg,
+        msg: dispatchMsg,
         peerId,
         route,
         groupHistoryKey,
@@ -440,7 +453,7 @@ export function createWebOnMessageHandler(params: {
 
     recordAcceptedConfiguredGroupRoute?.();
 
-    await processForRoute(cfg, msg, route, groupHistoryKey, {
+    await processForRoute(cfg, dispatchMsg, route, groupHistoryKey, {
       ...(preflightAudioTranscript !== undefined ? { preflightAudioTranscript } : {}),
       ...(ackAlreadySent ? { ackAlreadySent: true } : {}),
       ...(ackReaction ? { ackReaction } : {}),

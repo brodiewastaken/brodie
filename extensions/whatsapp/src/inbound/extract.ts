@@ -452,9 +452,11 @@ export function describeReplyContext(
     jid: senderJid,
     label: senderJid ? (jidToE164(senderJid) ?? senderJid) : "unknown sender",
   });
+  const mentionedJids = extractMentionedJids(quoted);
   return {
     id: contextInfo?.stanzaId || undefined,
     body,
+    ...(mentionedJids ? { mentionedJids } : {}),
     sender,
   };
 }

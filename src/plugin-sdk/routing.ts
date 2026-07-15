@@ -31,6 +31,11 @@ export {
 export { resolveAccountEntry } from "../routing/account-lookup.js";
 export { listBoundAccountIds, resolveDefaultAgentBoundAccountId } from "../routing/bindings.js";
 export {
+  resolveConversationRoute,
+  type ConversationRoute,
+  type ResolveConversationRouteInput,
+} from "../routing/conversation-route.js";
+export {
   formatSetExplicitDefaultInstruction,
   formatSetExplicitDefaultToConfiguredInstruction,
 } from "../routing/default-account-warnings.js";

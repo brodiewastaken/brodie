@@ -47,6 +47,7 @@ export type ActiveWebListener = {
     participant?: string,
   ) => Promise<WhatsAppSendResult>;
   sendComposingTo: (to: string) => Promise<void>;
+  sendPausedTo?: (to: string) => Promise<void>;
   close?: () => Promise<void>;
 };
 
@@ -79,21 +80,36 @@ export type WhatsAppInboundQuote = {
 export type WhatsAppInboundGroupContext = {
   subject?: string;
   participants?: string[];
+  /** Rich participant identities from group metadata for roster/mention resolution. */
+  participantIdentities?: Array<
+    | string
+    | {
+        id?: string | null;
+        lid?: string | null;
+        phoneNumber?: string | null;
+        e164?: string | null;
+      }
+  >;
   mentions?: {
     text?: string[];
     jids?: string[];
   };
 };
 
+export type WhatsAppInboundMediaItem = {
+  path?: string;
+  type?: string;
+  fileName?: string;
+  url?: string;
+};
+
 export type WhatsAppInboundPayload = {
   body: string;
+  /** Native authored text before mention stripping or generated media notices. */
+  authoredBody?: string;
   commandBody?: string;
-  media?: {
-    path?: string;
-    type?: string;
-    fileName?: string;
-    url?: string;
-  };
+  /** All media across a (possibly batched) message, in arrival order; a single attachment is a one-element list. */
+  media?: WhatsAppInboundMediaItem[];
   location?: NormalizedLocation;
   untrustedStructuredContext?: Array<{
     label: string;
@@ -124,6 +140,13 @@ export type WhatsAppInboundPlatform = {
   ) => Promise<WhatsAppSendResult>;
 };
 
+/**
+ * Deprecated flat view of the canonical nested message. Compat for shipped
+ * listenerFactory callbacks only; internal callers must use the nested
+ * `event/payload/platform/quote/group` contexts. Removal plan: delete this
+ * alias layer together with `LegacyFlatWebInboundMessage` once every consumer
+ * freezes its typed ingress envelope (no earlier external contract remains).
+ */
 export type DeprecatedWebInboundMessageFlatAliases = {
   /** @deprecated Use `event.id`. */
   id?: string;
@@ -186,13 +209,13 @@ export type DeprecatedWebInboundMessageFlatAliases = {
     payload: AnyMessageContent,
     options?: MiscMessageGenerationOptions,
   ) => Promise<WhatsAppSendResult>;
-  /** @deprecated Use `payload.media.path`. */
+  /** @deprecated Use `payload.media[0].path`. */
   mediaPath?: string;
-  /** @deprecated Use `payload.media.type`. */
+  /** @deprecated Use `payload.media[0].type`. */
   mediaType?: string;
-  /** @deprecated Use `payload.media.fileName`. */
+  /** @deprecated Use `payload.media[0].fileName`. */
   mediaFileName?: string;
-  /** @deprecated Use `payload.media.url`. */
+  /** @deprecated Use `payload.media[0].url`. */
   mediaUrl?: string;
   /** @deprecated Use `payload.untrustedStructuredContext`. */
   untrustedStructuredContext?: Array<{

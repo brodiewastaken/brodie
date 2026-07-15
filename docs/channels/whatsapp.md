@@ -129,9 +129,12 @@ A separate WhatsApp number is recommended (setup and metadata are optimized for 
 - Baileys socket timings are explicit under `web.whatsapp.*`: `keepAliveIntervalMs` (application ping interval), `connectTimeoutMs` (opening handshake timeout), `defaultQueryTimeoutMs` (Baileys query waits, plus OpenClaw's outbound send/presence and inbound read-receipt timeouts).
 - Outbound sends require an active WhatsApp listener for the target account; sends fail fast otherwise.
 - Group sends attach native mention metadata for `@+<digits>` and `@<digits>` tokens (in text and media captions) when the token matches current participant metadata, including LID-backed groups.
+- Accepted inbound native mentions remain visible to the agent as `@<display name> [<E.164>][<LID>]`. This uses the tagged participant's resolved identity, including the linked bot identity, while command parsing keeps its separate mention-stripped copy. Unresolved native mention tokens remain unchanged.
 - Status and broadcast chats (`@status`, `@broadcast`) are ignored.
-- Direct chats use DM session rules (`session.dmScope`; default `main` collapses DMs into the agent main session). Group sessions are isolated per JID (`agent:<agentId>:whatsapp:group:<jid>`).
-- WhatsApp Channels/Newsletters can be explicit outbound targets via their native `@newsletter` JID, using channel session metadata (`agent:<agentId>:whatsapp:channel:<jid>`) rather than DM semantics.
+- Direct chats, groups, and newsletters use the canonical conversation route. Channel, bot account, conversation kind, native conversation id, and thread identity each occur exactly once in the opaque session key.
+- Finalized inbound events enter the shared durable conversation scheduler before the native agent serializer. If durable admission declines, WhatsApp uses the already prepared native event without repeating trust, media, or metadata work.
+- Scheduled WhatsApp turns reach the model as one user-role item beginning with `[📋 QUEUE ENGINE]:`; the envelope already owns message time, sender, media descriptors, and delivery facts, so generic timestamp, media-note, and runtime-context prefixes are suppressed.
+- WhatsApp Channels/Newsletters can be explicit outbound targets via their native `@newsletter` JID and retain channel rather than DM semantics.
 - WhatsApp Web transport honors standard proxy environment variables on the gateway host (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, lowercase variants). Prefer host-level proxy config over per-channel settings.
 - With `messages.removeAckAfterReply` enabled, OpenClaw clears the ack reaction once a visible reply is delivered.
 
@@ -276,7 +279,9 @@ Scope the opt-in to one account under `channels.whatsapp.accounts.<id>.pluginHoo
     Group access has two layers:
 
     1. **Group membership allowlist** (`channels.whatsapp.groups`): if `groups` is omitted, all groups are eligible; if present, it acts as a group allowlist (`"*"` admits all).
-    2. **Group sender policy** (`channels.whatsapp.groupPolicy` + `groupAllowFrom`): `open` bypasses the sender allowlist, `allowlist` requires a `groupAllowFrom` (or `*`) match, `disabled` blocks all group inbound.
+    2. **Group sender policy** (`channels.whatsapp.groupPolicy` + `groupAllowFrom`): `open` bypasses the sender allowlist, `allowlist` requires a `groupAllowFrom` (or `*`) match, `disabled` blocks all group inbound, and `duo` admits only groups established in the trusted-group registry.
+
+    Trusted-group automation can also be enabled independently with `autoGroupWhitelist.enabled`. An owner add or owner message backfills trust, while non-owner re-adds and removal of the owner or bot revoke it. Actor identity must resolve through the shared LID, JID, and E.164 identity chain or the transition fails closed. Optional profile defaults apply only when trust is established, and explicit manual session settings win.
 
     If `groupAllowFrom` is unset, sender checks fall back to `allowFrom` when it has entries. Sender allowlists are evaluated before mention/reply activation.
 
@@ -350,7 +355,11 @@ When the linked self number is also present in `allowFrom`, self-chat safeguards
     [/Replying]
     ```
 
-    Reply metadata (`ReplyToId`, `ReplyToBody`, `ReplyToSender`, sender JID/E.164) is populated when available. If the quoted target is downloadable media, OpenClaw saves it through the normal inbound media store and exposes `MediaPath`/`MediaType` so the agent can inspect it directly instead of seeing only `<media:image>`.
+    Reply metadata (`ReplyToId`, `ReplyToBody`, `ReplyToSender`, sender LID/JID/E.164) is populated when available. If the quoted target has downloadable media, OpenClaw saves every attachment through the normal inbound media store and exposes aligned media arrays so the agent can inspect the native set instead of seeing only a placeholder.
+
+    Group context can include the complete resolved roster. The bot identity is marked, configured owner identity is pinned, workspace person-file references are attached when known, and unresolved members remain explicit rather than disappearing.
+
+    Native mentions in authored and explicitly quoted bodies are projected from each message's own structured mention metadata. Each tagged target, including self, is rendered as `@<display name> [<E.164>][<LID>]`; repeated targets remain repeated. A quoted mention does not activate mention gating for the current message. Numeric text without matching native mention metadata is never reinterpreted as a mention.
 
   </Accordion>
 
@@ -358,6 +367,8 @@ When the linked self number is also present in `allowFrom`, self-chat safeguards
     Media-only messages normalize to placeholders: `<media:image>`, `<media:video>`, `<media:audio>`, `<media:document>`, `<media:sticker>`.
 
     Authorized group voice notes are transcribed before mention gating when the body is only `<media:audio>`, so saying the bot mention in the voice note can trigger the reply. If the transcript still does not mention the bot, it stays in pending group history instead of the raw placeholder.
+
+    Native Live Photos pair their still image and motion component only when source evidence and the configured time window agree. `media.livePhotoFilter` defaults to filtering the motion component while always preserving the still image.
 
     Location bodies render as terse coordinate text. Location labels/comments and contact/vCard details render as fenced untrusted metadata, not inline prompt text.
 
@@ -400,7 +411,7 @@ When the linked self number is also present in `allowFrom`, self-chat safeguards
     - audio is sent as the Baileys `audio` payload with `ptt: true`, rendering as a push-to-talk voice note; `audioAsVoice` is preserved on reply payloads so TTS voice-note output stays on this path regardless of the provider's source format
     - native Ogg/Opus audio sends as `audio/ogg; codecs=opus`; anything else (including Microsoft Edge TTS MP3/WebM output) is transcoded with `ffmpeg` to 48 kHz mono Ogg/Opus before PTT delivery
     - `/tts latest` sends the latest assistant reply as one voice note and suppresses repeat sends for the same reply; `/tts chat on|off|default` controls auto-TTS for the current chat
-    - `gifPlayback: true` on video sends enables animated GIF playback
+    - GIF files are converted with `ffmpeg` to bounded WhatsApp-compatible MP4 playback by default; `gifAutoConvert.enabled`, `timeoutMs`, and `maxOutputBytes` control the conversion, and a conversion failure is a typed send failure rather than a representation fallback
     - `forceDocument`/`asDocument` routes outbound images, GIFs, and videos through the Baileys document payload to avoid WhatsApp's media compression, preserving the resolved filename and MIME type
     - captions apply to the first media item in a multi-media reply, except PTT voice notes: the audio sends first with no caption, then the caption sends as a separate text message (WhatsApp clients do not render voice-note captions consistently)
     - media source can be HTTP(S), `file://`, or a local path
@@ -411,7 +422,8 @@ When the linked self number is also present in `allowFrom`, self-chat safeguards
     - inbound save cap and outbound send cap: `channels.whatsapp.mediaMaxMb` (default `50`)
     - per-account override: `channels.whatsapp.accounts.<id>.mediaMaxMb`
     - images auto-optimize (resize/quality sweep) to fit limits unless `forceDocument`/`asDocument` requests document delivery
-    - on media send failure, the first-item fallback sends a text warning instead of dropping the response silently
+    - `media.failedMediaWarning` controls the text warning for failed media delivery
+    - bounded attachment batches preserve every successful native receipt and report rejected attachments as warnings without replaying successes
 
   </Accordion>
 </AccordionGroup>
@@ -674,14 +686,20 @@ Example:
 
 Primary reference: [Configuration reference - WhatsApp](/gateway/config-channels#whatsapp)
 
-| Area             | Fields                                                                                                         |
-| ---------------- | -------------------------------------------------------------------------------------------------------------- |
-| Access           | `dmPolicy`, `allowFrom`, `groupPolicy`, `groupAllowFrom`, `groups`                                             |
-| Delivery         | `textChunkLimit`, `chunkMode`, `mediaMaxMb`, `sendReadReceipts`, `ackReaction`, `reactionLevel`                |
-| Multi-account    | `accounts.<id>.enabled`, `accounts.<id>.authDir`, and other per-account overrides                              |
-| Operations       | `configWrites`, `debounceMs`, `web.enabled`, `web.heartbeatSeconds`, `web.reconnect.*`, `web.whatsapp.*`       |
-| Session behavior | `session.dmScope`, `historyLimit`, `dmHistoryLimit`, `dms.<id>.historyLimit`                                   |
-| Prompts          | `groups.<id>.systemPrompt`, `groups["*"].systemPrompt`, `direct.<id>.systemPrompt`, `direct["*"].systemPrompt` |
+| Area             | Fields                                                                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Access           | `dmPolicy`, `allowFrom`, `groupPolicy`, `groupAllowFrom`, `groups`                                                                               |
+| Trust and roster | `autoGroupWhitelist`, `groupRoster`, `contextVisibility`                                                                                         |
+| Delivery         | `textChunkLimit`, `chunkMode`, `mediaMaxMb`, `media`, `gifAutoConvert`, `sendListenerWaitMs`, `sendReadReceipts`, `ackReaction`, `reactionLevel` |
+| Diagnostics      | `diagnostics.unrecognizedPayloadCapture`, `diagnostics.captureRetentionHours`                                                                    |
+| Multi-account    | `accounts.<id>.enabled`, `accounts.<id>.authDir`, and other per-account overrides                                                                |
+| Operations       | `configWrites`, `debounceMs`, `web.enabled`, `web.heartbeatSeconds`, `web.reconnect.*`, `web.whatsapp.*`                                         |
+| Session behavior | `session.dmScope`, `historyLimit`, `dmHistoryLimit`, `dms.<id>.historyLimit`                                                                     |
+| Prompts          | `groups.<id>.systemPrompt`, `groups["*"].systemPrompt`, `direct.<id>.systemPrompt`, `direct["*"].systemPrompt`                                   |
+
+## v2026.7.1 absorption
+
+The v2026.7.1 channel already owned Baileys lifecycle, normalized inbound context, multi-account configuration, media storage, reply dispatch, and delivery confirmation. The residual implementation adds fail-closed trusted groups, one comparable identity chain, complete rosters and native event facts, durable scheduler admission, Live Photo pairing, bounded GIF conversion, listener handoff, private diagnostic capture, and exact ordered attachment outcomes. The former queue plugin, account-suffix session keys, and channel-specific typing bridge are obsolete on the shared canonical route and scheduler architecture and were not restored.
 
 ## Related
 

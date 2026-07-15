@@ -280,5 +280,12 @@ export function createWebSendApi(params: {
       }
       await params.sock.sendPresenceUpdate("composing", jid);
     },
+    sendPausedTo: async (to: string): Promise<void> => {
+      const jid = resolveOutboundJid(to);
+      if (isWhatsAppNewsletterJid(jid)) {
+        return;
+      }
+      await params.sock.sendPresenceUpdate("paused", jid);
+    },
   } as const;
 }

@@ -365,7 +365,7 @@ describe("deliverWebReply", () => {
     expect(replyText(msg)).toBe("Before\n\nAfter");
   });
 
-  it("keeps quote threading on every text chunk for a threaded reply", async () => {
+  it("quotes only the first text chunk of a threaded reply", async () => {
     const msg = makeMsg();
     cacheInboundMessageMeta("work", "15551234567@s.whatsapp.net", "reply-1", {
       participant: "111@s.whatsapp.net",
@@ -390,13 +390,9 @@ describe("deliverWebReply", () => {
       participant: "111@s.whatsapp.net",
       body: "quoted body",
     });
+    // At most one quote per delivery: subsequent chunks send unquoted.
     expect(mockCallArg(msg.platform.reply, 1, 0, "reply")).toBe("aaa");
-    expectQuotedOptions(mockCallArg(msg.platform.reply, 1, 1, "reply"), {
-      id: "reply-1",
-      fromMe: true,
-      participant: "111@s.whatsapp.net",
-      body: "quoted body",
-    });
+    expect(mockCallArg(msg.platform.reply, 1, 1, "reply")).toBeUndefined();
   });
 
   it.each(["connection closed", "operation timed out"])(
@@ -534,7 +530,7 @@ describe("deliverWebReply", () => {
     expect(msg.platform.reply).toHaveBeenCalledWith("    indented block", undefined);
   });
 
-  it("keeps quote threading on media and trailing text chunks for a threaded reply", async () => {
+  it("quotes the media part once and sends trailing text unquoted", async () => {
     const msg = makeMsg();
     mockLoadedImageMedia();
     cacheInboundMessageMeta("work", "15551234567@s.whatsapp.net", "reply-2", {
@@ -570,11 +566,43 @@ describe("deliverWebReply", () => {
       body: "quoted media body",
     });
     expect(mockCallArg(msg.platform.reply, 0, 0, "reply")).toBe("trail");
-    expectQuotedOptions(mockCallArg(msg.platform.reply, 0, 1, "reply"), {
-      id: "reply-2",
+    expect(mockCallArg(msg.platform.reply, 0, 1, "reply")).toBeUndefined();
+  });
+
+  it("caches self-quote metadata for outbound sends and renders fromMe quotes", async () => {
+    const msg = makeMsg();
+    msg.platform.selfLid = "999@lid";
+    msg.platform.selfJid = "333@s.whatsapp.net";
+    (
+      msg.platform.reply as unknown as { mockResolvedValueOnce: (v: unknown) => void }
+    ).mockResolvedValueOnce(createAcceptedWhatsAppSendResult("text", "own-msg-1"));
+
+    await deliverWebReply({
+      replyResult: { text: "first send" },
+      msg,
+      maxMediaBytes: 1024 * 1024,
+      textLimit: 200,
+      replyLogger,
+      skipLog: true,
+    });
+
+    // A later reply targeting our own message id quotes it fromMe with the
+    // LID-first self participant (phone-JID participants render "unknown
+    // sender" quotes in LID groups).
+    await deliverWebReply({
+      replyResult: { text: "quoting my own", replyToId: "own-msg-1" },
+      msg,
+      maxMediaBytes: 1024 * 1024,
+      textLimit: 200,
+      replyLogger,
+      skipLog: true,
+    });
+
+    expectQuotedOptions(mockCallArg(msg.platform.reply, 1, 1, "reply"), {
+      id: "own-msg-1",
       fromMe: true,
-      participant: "111@s.whatsapp.net",
-      body: "quoted media body",
+      participant: "999@lid",
+      body: "first send",
     });
   });
 
@@ -638,6 +666,8 @@ describe("deliverWebReply", () => {
       skipLog: true,
     });
 
+    // The caption chunk rode the failed media: the fallback re-sends it with
+    // the warning, and the remaining chunk still goes out afterwards.
     expect(replyText(msg, 0)).toContain("ALPHALINE");
     expect(replyText(msg, 0)).toContain("⚠️ Media failed");
     const allReplies = (
@@ -708,7 +738,7 @@ describe("deliverWebReply", () => {
     expect(replyText(msg)).not.toContain("boom");
   });
 
-  it("notifies user when a non-first media send fails instead of dropping silently", async () => {
+  it("records non-first media failures as partial failures on the delivery result", async () => {
     vi.clearAllMocks();
     const msg = makeMsg();
     // Two media items: first load succeeds and sends, second load succeeds but send fails.
@@ -734,7 +764,7 @@ describe("deliverWebReply", () => {
       msg.platform.sendMedia as unknown as { mockRejectedValueOnce: (v: unknown) => void }
     ).mockRejectedValueOnce(new Error("upload failed"));
 
-    await deliverWebReply({
+    const delivery = await deliverWebReply({
       replyResult: {
         text: "caption",
         mediaUrls: ["http://example.com/img1.jpg", "http://example.com/img2.jpg"],
@@ -746,10 +776,19 @@ describe("deliverWebReply", () => {
       skipLog: true,
     });
 
-    // First media succeeded — no text reply for it.
-    // Second media failed — user must be notified, not silently dropped.
+    expect(delivery.providerAccepted).toBe(true);
+    expect(delivery.partialMediaFailures).toHaveLength(1);
+    expect(delivery.partialMediaFailures[0]).toMatchObject({
+      mediaUrl: "http://example.com/img2.jpg",
+      index: 1,
+      errorText: expect.stringContaining("upload failed"),
+    });
+
+    // First media succeeded; the second failure is recorded on the delivery
+    // result AND surfaced as a warning bubble (interim until the message-tool
+    // executor renders partialMediaFailures).
     expect(msg.platform.reply).toHaveBeenCalledTimes(1);
-    expect(replyText(msg)).toContain("⚠️ Media unavailable");
+    expect(replyText(msg)).toContain("⚠️ Media failed");
     expect(replyText(msg)).not.toContain("upload failed");
   });
 

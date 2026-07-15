@@ -14,12 +14,14 @@ const hoisted = vi.hoisted(() => ({
   loadOutboundMediaFromUrl: vi.fn(),
   controllerListeners: new Map<string, ActiveWebListener>(),
   runFfmpeg: vi.fn(),
+  maybeTranscodeGifToMp4: vi.fn(),
 }));
 const loadWebMediaMock = vi.fn();
 let sendMessageWhatsApp: typeof import("./send.js").sendMessageWhatsApp;
 let sendPollWhatsApp: typeof import("./send.js").sendPollWhatsApp;
 let sendReactionWhatsApp: typeof import("./send.js").sendReactionWhatsApp;
 let sendTypingWhatsApp: typeof import("./send.js").sendTypingWhatsApp;
+let clearTypingWhatsApp: typeof import("./send.js").clearTypingWhatsApp;
 let resetLogger: typeof import("openclaw/plugin-sdk/runtime-env").resetLogger;
 let setLoggerOverride: typeof import("openclaw/plugin-sdk/runtime-env").setLoggerOverride;
 
@@ -54,6 +56,14 @@ vi.mock("./outbound-media.runtime.js", async () => {
   };
 });
 
+vi.mock("./gif-transcode.js", async () => {
+  const actual = await vi.importActual<typeof import("./gif-transcode.js")>("./gif-transcode.js");
+  return {
+    ...actual,
+    maybeTranscodeGifToMp4: hoisted.maybeTranscodeGifToMp4,
+  };
+});
+
 vi.mock("openclaw/plugin-sdk/media-runtime", async () => {
   const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/media-runtime")>(
     "openclaw/plugin-sdk/media-runtime",
@@ -81,13 +91,24 @@ describe("web outbound", () => {
   );
 
   beforeAll(async () => {
-    ({ sendMessageWhatsApp, sendPollWhatsApp, sendReactionWhatsApp, sendTypingWhatsApp } =
-      await import("./send.js"));
+    ({
+      clearTypingWhatsApp,
+      sendMessageWhatsApp,
+      sendPollWhatsApp,
+      sendReactionWhatsApp,
+      sendTypingWhatsApp,
+    } = await import("./send.js"));
     ({ resetLogger, setLoggerOverride } = await import("openclaw/plugin-sdk/runtime-env"));
   });
 
   beforeEach(() => {
     vi.clearAllMocks();
+    hoisted.maybeTranscodeGifToMp4
+      .mockReset()
+      .mockImplementation(async (params: { buffer: Buffer }) => ({
+        buffer: params.buffer,
+        converted: false,
+      }));
     hoisted.runFfmpeg.mockReset().mockImplementation(async (args: string[]) => {
       fsSync.writeFileSync(args.at(-1) ?? "", Buffer.from("opus-output"));
       return "";
@@ -324,6 +345,24 @@ describe("web outbound", () => {
     expect(sendComposingTo).not.toHaveBeenCalled();
   });
 
+  it("clears standalone typing through the active listener", async () => {
+    const assertSendReady = vi.fn(async () => undefined);
+    const sendPausedTo = vi.fn(async () => undefined);
+    hoisted.controllerListeners.set("default", {
+      assertSendReady,
+      sendComposingTo,
+      sendPausedTo,
+      sendMessage,
+      sendPoll,
+      sendReaction,
+    });
+
+    await clearTypingWhatsApp("+1555", { cfg: WHATSAPP_TEST_CFG });
+
+    expect(assertSendReady).toHaveBeenCalledWith("+1555");
+    expect(sendPausedTo).toHaveBeenCalledWith("+1555");
+  });
+
   it("throws a helpful error when no active listener exists", async () => {
     hoisted.controllerListeners.clear();
     await expect(
@@ -475,6 +514,100 @@ describe("web outbound", () => {
     expect(sendMessage).toHaveBeenLastCalledWith("+1555", "gif", buf, "video/mp4", {
       gifPlayback: true,
     });
+  });
+
+  it("auto-converts outbound GIF media to gifPlayback MP4", async () => {
+    const gifBuffer = Buffer.from("gif");
+    const mp4Buffer = Buffer.from("mp4");
+    loadWebMediaMock.mockResolvedValueOnce({
+      buffer: gifBuffer,
+      contentType: "image/gif",
+      kind: "image",
+      fileName: "anim.gif",
+    });
+    hoisted.maybeTranscodeGifToMp4.mockResolvedValueOnce({
+      buffer: mp4Buffer,
+      converted: true,
+    });
+
+    await sendMessageWhatsApp("+1555", "animated", {
+      verbose: false,
+      cfg: {
+        channels: {
+          whatsapp: {
+            gifAutoConvert: {
+              timeoutMs: 3000,
+            },
+          },
+        },
+      } as OpenClawConfig,
+      mediaUrl: "/tmp/anim.gif",
+    });
+
+    expect(hoisted.maybeTranscodeGifToMp4).toHaveBeenCalledWith({
+      buffer: gifBuffer,
+      contentType: "image/gif",
+      fileName: "anim.gif",
+      sourceLabel: "/tmp/anim.gif",
+      config: {
+        timeoutMs: 3000,
+      },
+    });
+    expect(sendMessage).toHaveBeenLastCalledWith("+1555", "animated", mp4Buffer, "video/mp4", {
+      gifPlayback: true,
+    });
+  });
+
+  it("fails the send with the typed error when GIF conversion fails", async () => {
+    const gifBuffer = Buffer.from("gif");
+    loadWebMediaMock.mockResolvedValueOnce({
+      buffer: gifBuffer,
+      contentType: "image/gif",
+      kind: "image",
+      fileName: "anim.gif",
+    });
+    const { GifTranscodeError } = await import("./gif-transcode.js");
+    hoisted.maybeTranscodeGifToMp4.mockRejectedValueOnce(
+      new GifTranscodeError("ffmpeg_missing", "GIF auto-convert requires ffmpeg"),
+    );
+
+    await expect(
+      sendMessageWhatsApp("+1555", "animated", {
+        verbose: false,
+        cfg: WHATSAPP_TEST_CFG,
+        mediaUrl: "/tmp/anim.gif",
+      }),
+    ).rejects.toMatchObject({ name: "GifTranscodeError", code: "ffmpeg_missing" });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("skips GIF conversion for forced document delivery", async () => {
+    const gifBuffer = Buffer.from("gif-bytes");
+    loadWebMediaMock.mockResolvedValueOnce({
+      buffer: gifBuffer,
+      contentType: "image/gif",
+      kind: "image",
+      fileName: "anim.gif",
+    });
+
+    await sendMessageWhatsApp("+1555", "the actual file", {
+      verbose: false,
+      cfg: WHATSAPP_TEST_CFG,
+      mediaUrl: "/tmp/anim.gif",
+      forceDocument: true,
+    });
+
+    expect(hoisted.maybeTranscodeGifToMp4).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenLastCalledWith(
+      "+1555",
+      "the actual file",
+      gifBuffer,
+      "image/gif",
+      {
+        asDocument: true,
+        fileName: "anim.gif",
+      },
+    );
   });
 
   it("sends prehydrated media without loading the original media URL again", async () => {

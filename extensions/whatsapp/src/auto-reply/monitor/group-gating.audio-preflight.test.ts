@@ -101,7 +101,7 @@ describe("applyGroupGating audio preflight mention text", () => {
 
     const result = await applyGroupGating(makeParams(msg, groupHistories));
 
-    expect(result).toEqual({ shouldProcess: true });
+    expect(result).toEqual({ shouldProcess: true, commandBody: "<media:audio>" });
     expect(msg.groupMention).toEqual({ wasMentioned: false, requireMention: false });
   });
 

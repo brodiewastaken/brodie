@@ -9,6 +9,7 @@ const {
   buildContextMock,
   isControlCommandMessageMock,
   dispatchBufferedReplyMock,
+  admitScheduledInboundMock,
   runMessageReceivedMock,
   shouldComputeCommandAuthorizedMock,
   trackBackgroundTaskMock,
@@ -20,9 +21,16 @@ const {
     queuedFinal: false,
     counts: { tool: 0, block: 0, final: 0 },
   })),
+  admitScheduledInboundMock: vi.fn(async () => ({
+    result: { accepted: false as const, reason: "disabled" as const },
+  })),
   runMessageReceivedMock: vi.fn(async () => undefined),
   shouldComputeCommandAuthorizedMock: vi.fn(() => false),
   trackBackgroundTaskMock: vi.fn(),
+}));
+
+vi.mock("../../scheduler-admission.js", () => ({
+  admitWhatsAppScheduledInbound: admitScheduledInboundMock,
 }));
 
 vi.mock("../../inbound-policy.js", async (importOriginal) => {
@@ -173,7 +181,9 @@ function makePolicy(account: ReturnType<typeof makeAccount>) {
 
 const GROUP_JID = "123@g.us";
 
-function makeBaseMsg(overrides: { body?: string; commandBody?: string } = {}) {
+function makeBaseMsg(
+  overrides: { body?: string; authoredBody?: string; commandBody?: string } = {},
+) {
   const body = overrides.body ?? "hi";
   return createTestWebInboundMessage({
     event: {
@@ -182,6 +192,7 @@ function makeBaseMsg(overrides: { body?: string; commandBody?: string } = {}) {
     },
     payload: {
       body,
+      authoredBody: overrides.authoredBody,
       commandBody: overrides.commandBody,
     },
     platform: {
@@ -269,6 +280,10 @@ describe("processMessage group system prompt wiring", () => {
   beforeEach(() => {
     buildContextMock.mockReset();
     dispatchBufferedReplyMock.mockClear();
+    admitScheduledInboundMock.mockReset();
+    admitScheduledInboundMock.mockResolvedValue({
+      result: { accepted: false as const, reason: "disabled" as const },
+    });
     isControlCommandMessageMock.mockReset();
     isControlCommandMessageMock.mockReturnValue(false);
     resolvePolicyMock.mockReset();
@@ -327,6 +342,55 @@ describe("processMessage group system prompt wiring", () => {
       },
       rawBody: "/status",
     });
+  });
+
+  it("keeps a mention-prefixed reset on the native command path", async () => {
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    isControlCommandMessageMock.mockReturnValue(true);
+    shouldComputeCommandAuthorizedMock.mockReturnValue(true);
+
+    await callProcessMessage({
+      msg: makeBaseMsg({
+        body: "@brodie /new",
+        authoredBody: "@brodie /new",
+        commandBody: "/new",
+      }),
+    });
+
+    expect(admitScheduledInboundMock).not.toHaveBeenCalled();
+    expect(dispatchBufferedReplyMock).toHaveBeenCalledTimes(1);
+    expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      commandBody: "/new",
+      rawBody: "@brodie /new",
+      commandAuthorized: true,
+      commandTurn: {
+        kind: "text-slash",
+        source: "text",
+        authorized: true,
+        body: "/new",
+      },
+    });
+  });
+
+  it("hands an accepted normal message to the scheduler without native dispatch", async () => {
+    resolvePolicyMock.mockReturnValue(makePolicy(makeAccount()));
+    buildContextMock.mockImplementationOnce(() => ({
+      Body: "hi",
+      RawBody: "hi",
+      CommandBody: "hi",
+      SessionKey: baseRoute.sessionKey,
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+    }));
+    admitScheduledInboundMock.mockResolvedValueOnce({
+      result: { accepted: true as const, receiptId: "receipt-1", durableAt: Date.now() },
+      event: { id: "event-1" },
+    } as never);
+
+    await expect(callProcessMessage()).resolves.toBe(false);
+
+    expect(admitScheduledInboundMock).toHaveBeenCalledTimes(1);
+    expect(dispatchBufferedReplyMock).not.toHaveBeenCalled();
   });
 
   it("keeps generated media notices out of command input", async () => {

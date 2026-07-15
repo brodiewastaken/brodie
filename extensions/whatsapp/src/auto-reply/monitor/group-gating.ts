@@ -149,7 +149,14 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     selfE164: self.e164 ?? null,
   });
   const conversationGroupPolicy = inboundPolicy.resolveConversationGroupPolicy(conversationId);
-  if (conversationGroupPolicy.allowlistEnabled && !conversationGroupPolicy.allowed) {
+  // Trusted groups (duo/auto-whitelist) bypass the registered-groups allowlist
+  // drop: duo maps to "allowlist" for core, which would otherwise drop the very
+  // room the owner just trusted.
+  if (
+    conversationGroupPolicy.allowlistEnabled &&
+    !conversationGroupPolicy.allowed &&
+    !admission.trustedGroup
+  ) {
     const accountId = inboundPolicy.account.accountId;
     const warnKey = `${accountId}:${conversationId}`;
     if (shouldWarnForGroupDrop(warnKey)) {
@@ -198,6 +205,7 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     mentionMsg.payload.body,
     mentionConfig.mentionRegexes,
     self.e164,
+    params.msg.group?.mentions?.jids,
   );
   const activationCommand = parseActivationCommand(commandBody);
   const owner = isOwnerSender(baseMentionConfig, params.msg, params.authDir);
@@ -227,7 +235,9 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     sessionKey: params.sessionKey,
     conversationId,
   });
-  const requireMention = activation !== "always";
+  // A duo room (exactly self + owner, trust automation active) feels like a
+  // DM: no mention needed. Consumes the admission fact computed at normalize.
+  const requireMention = activation !== "always" && !admission.duoRoom;
   const replyContext = getReplyContext(params.msg, params.authDir);
   const sharedNumberSelfChat = params.selfChatMode === true;
   // Detect reply-to-bot: compare JIDs, LIDs, and E.164 numbers.
@@ -273,5 +283,8 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     );
   }
 
-  return { shouldProcess: true };
+  return {
+    shouldProcess: true,
+    ...(params.mentionText === undefined ? { commandBody } : {}),
+  } as const;
 }

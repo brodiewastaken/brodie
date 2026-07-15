@@ -1,7 +1,7 @@
 // Whatsapp tests cover extract plugin behavior.
 import type { proto } from "baileys";
 import { describe, expect, it } from "vitest";
-import { extractMentionedJids, hasInboundUserContent } from "./extract.js";
+import { describeReplyContext, extractMentionedJids, hasInboundUserContent } from "./extract.js";
 
 describe("extractMentionedJids", () => {
   const botJid = "5511999999999@s.whatsapp.net";
@@ -100,6 +100,34 @@ describe("extractMentionedJids", () => {
       },
     };
     expect(extractMentionedJids(message)).toEqual([botJid]);
+  });
+});
+
+describe("describeReplyContext", () => {
+  it("keeps quoted-message mentions separate from current-message activation mentions", () => {
+    const quotedTarget = "277038292303944@lid";
+    const message: proto.IMessage = {
+      extendedTextMessage: {
+        text: "what does this mean?",
+        contextInfo: {
+          stanzaId: "quoted-1",
+          participant: "15550001111@s.whatsapp.net",
+          quotedMessage: {
+            extendedTextMessage: {
+              text: "@277038292303944 check",
+              contextInfo: { mentionedJid: [quotedTarget] },
+            },
+          },
+        },
+      },
+    };
+
+    expect(extractMentionedJids(message)).toBeUndefined();
+    expect(describeReplyContext(message)).toMatchObject({
+      id: "quoted-1",
+      body: "@277038292303944 check",
+      mentionedJids: [quotedTarget],
+    });
   });
 });
 

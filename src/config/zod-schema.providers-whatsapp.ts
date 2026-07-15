@@ -12,13 +12,13 @@ import {
   ContextVisibilityModeSchema,
   DmConfigSchema,
   DmPolicySchema,
-  GroupPolicySchema,
   MarkdownConfigSchema,
   MentionPatternsPolicySchema,
   ReplyToModeSchema,
 } from "./zod-schema.core.js";
 
 const ToolPolicyBySenderSchema = z.record(z.string(), ToolPolicySchema).optional();
+const WhatsAppGroupPolicySchema = z.enum(["open", "disabled", "allowlist", "duo"]);
 
 const WhatsAppGroupEntrySchema = z
   .object({
@@ -46,6 +46,70 @@ const WhatsAppAckReactionSchema = z
     emoji: z.string().optional(),
     direct: z.boolean().optional().default(true),
     group: z.enum(["always", "mentions", "never"]).optional().default("mentions"),
+  })
+  .strict()
+  .optional();
+
+const WhatsAppGifAutoConvertSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    maxOutputBytes: z.number().int().positive().optional(),
+  })
+  .strict()
+  .optional();
+
+const WhatsAppAutoGroupWhitelistSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    ownerE164: z.string().optional(),
+    profile: z
+      .object({
+        provider: z.string().optional(),
+        model: z.string().optional(),
+        thinkingLevel: z.string().optional(),
+        groupActivation: z.enum(["mention", "always"]).optional(),
+        setOnce: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
+const WhatsAppGroupRosterSchema = z
+  .object({
+    workspaceContacts: z
+      .object({
+        enabled: z.boolean().optional(),
+        peopleDir: z.string().optional(),
+        contactsFile: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    selfNote: z.string().optional(),
+    missingPersonFileNote: z.string().optional(),
+    owner: z
+      .object({ name: z.string().optional(), personFile: z.string().optional() })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
+const WhatsAppMediaSchema = z
+  .object({
+    livePhotoPairWindowMs: z.number().int().positive().optional(),
+    livePhotoFilter: z.boolean().optional(),
+    failedMediaWarning: z.string().optional(),
+  })
+  .strict()
+  .optional();
+
+const WhatsAppDiagnosticsSchema = z
+  .object({
+    unrecognizedPayloadCapture: z.boolean().optional(),
+    captureRetentionHours: z.number().int().positive().optional(),
   })
   .strict()
   .optional();
@@ -86,8 +150,8 @@ function buildWhatsAppCommonShape(params: { useDefaults: boolean }) {
     defaultTo: z.string().optional(),
     groupAllowFrom: z.array(z.string()).optional(),
     groupPolicy: params.useDefaults
-      ? GroupPolicySchema.optional().default("allowlist")
-      : GroupPolicySchema.optional(),
+      ? WhatsAppGroupPolicySchema.optional().default("allowlist")
+      : WhatsAppGroupPolicySchema.optional(),
     mentionPatterns: MentionPatternsPolicySchema.optional(),
     contextVisibility: ContextVisibilityModeSchema.optional(),
     historyLimit: z.number().int().min(0).optional(),
@@ -97,6 +161,7 @@ function buildWhatsAppCommonShape(params: { useDefaults: boolean }) {
     chunkMode: z.enum(["length", "newline"]).optional(),
     blockStreaming: z.boolean().optional(),
     blockStreamingCoalesce: BlockStreamingCoalesceSchema.optional(),
+    gifAutoConvert: WhatsAppGifAutoConvertSchema,
     groups: WhatsAppGroupsSchema,
     direct: WhatsAppDirectSchema,
     ackReaction: WhatsAppAckReactionSchema,
@@ -104,6 +169,11 @@ function buildWhatsAppCommonShape(params: { useDefaults: boolean }) {
     debounceMs: params.useDefaults
       ? z.number().int().nonnegative().optional().default(0)
       : z.number().int().nonnegative().optional(),
+    autoGroupWhitelist: WhatsAppAutoGroupWhitelistSchema,
+    groupRoster: WhatsAppGroupRosterSchema,
+    media: WhatsAppMediaSchema,
+    sendListenerWaitMs: z.number().int().nonnegative().optional(),
+    diagnostics: WhatsAppDiagnosticsSchema,
     replyToMode: ReplyToModeSchema.optional(),
     heartbeat: ChannelHeartbeatVisibilitySchema,
     healthMonitor: ChannelHealthMonitorSchema,

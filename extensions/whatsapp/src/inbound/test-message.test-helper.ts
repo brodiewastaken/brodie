@@ -63,6 +63,9 @@ export function createTestWhatsAppInboundAdmission(
   return {
     accountId,
     isSelfChat: overrides.isSelfChat ?? false,
+    trustedGroup: overrides.trustedGroup ?? false,
+    autoGroupWhitelistEnabled: overrides.autoGroupWhitelistEnabled ?? false,
+    duoRoom: overrides.duoRoom ?? false,
     account: {
       accountId,
       enabled: true,
@@ -163,10 +166,12 @@ export function createTestWebAudioInboundMessage(
   const { event, payload, platform, ...message } = overrides;
   const media = Object.hasOwn(payload ?? {}, "media")
     ? payload?.media
-    : {
-        type: "audio/ogg; codecs=opus",
-        path: "/tmp/voice.ogg",
-      };
+    : [
+        {
+          type: "audio/ogg; codecs=opus",
+          path: "/tmp/voice.ogg",
+        },
+      ];
   return createTestWebInboundMessage({
     event: {
       id: "msg-1",

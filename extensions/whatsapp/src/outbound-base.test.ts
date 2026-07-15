@@ -368,6 +368,55 @@ describe("createWhatsAppOutboundBase", () => {
     });
   });
 
+  it("preserves group quote metadata for a long-running reply", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-30T01:57:00Z"));
+      cacheInboundMessageMeta("default", "120363400000000000@g.us", "reply-long-run", {
+        participant: "15551234567@s.whatsapp.net",
+        body: "competing quotes",
+        fromMe: false,
+      });
+      await vi.advanceTimersByTimeAsync(19 * 60 * 1000);
+      const sendMessageWhatsApp = vi.fn(async () => ({
+        messageId: "msg-long-run",
+        toJid: "120363400000000000@g.us",
+      }));
+      const outbound = createWhatsAppOutboundBase({
+        chunker: (text) => [text],
+        sendMessageWhatsApp,
+        sendPollWhatsApp: vi.fn(),
+        shouldLogVerbose: () => false,
+        resolveTarget: ({ to }) => ({ ok: true as const, to: to ?? "" }),
+      });
+
+      await outbound.sendText!({
+        cfg: {} as never,
+        to: "120363400000000000@g.us",
+        text: "reply",
+        accountId: "default",
+        deps: { sendWhatsApp: sendMessageWhatsApp },
+        replyToId: "reply-long-run",
+      });
+
+      const options = sendMessageOptionsAt(
+        sendMessageWhatsApp,
+        0,
+        "120363400000000000@g.us",
+        "reply",
+      );
+      expect(options.quotedMessageKey).toEqual({
+        id: "reply-long-run",
+        remoteJid: "120363400000000000@g.us",
+        fromMe: false,
+        participant: "15551234567@s.whatsapp.net",
+        messageText: "competing quotes",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("falls back to the target JID when quote metadata only exists in a different conversation", async () => {
     cacheInboundMessageMeta("default", "120363400000000000@g.us", "reply-group", {
       participant: "5511976136970@s.whatsapp.net",

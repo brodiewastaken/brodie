@@ -565,6 +565,35 @@ describe("applyGroupGating", () => {
     expect(result.shouldProcess).toBe(true);
   });
 
+  it("carries the mention-stripped command body into authorized group dispatch", async () => {
+    const cfg = makeConfig({
+      channels: {
+        whatsapp: {
+          allowFrom: ["+111"],
+          groups: { "*": { requireMention: true } },
+        },
+      },
+    });
+
+    const nativeSelfLid = "27710527070277@lid";
+    const authoredBody = "@27710527070277  /new";
+    const msg = createGroupMessage({
+      id: "g-mentioned-new",
+      body: authoredBody,
+      mentionedJids: [nativeSelfLid],
+      selfJid: nativeSelfLid,
+      senderE164: "+111",
+      senderName: "Owner",
+    });
+    const { result } = await runGroupGating({
+      cfg,
+      msg,
+    });
+
+    expect(result).toMatchObject({ shouldProcess: true, commandBody: "/new" });
+    expect(msg.payload.body).toBe(authoredBody);
+  });
+
   it("does not treat group mention gating as self-chat under implicit self fallback", async () => {
     const cfg = makeConfig({
       channels: {

@@ -3,6 +3,12 @@ import type { GroupMetadata, WASocket, WAMessageKey, proto } from "baileys";
 import { info } from "openclaw/plugin-sdk/runtime-env";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import {
+  markActiveWebListenerReconnecting,
+  markActiveWebListenerTerminal,
+  setActiveWebListener,
+} from "./active-listener.js";
+import {
+  getRegisteredWhatsAppConnectionController,
   registerWhatsAppConnectionController,
   unregisterWhatsAppConnectionController,
 } from "./connection-controller-registry.js";
@@ -559,6 +565,9 @@ export class WhatsAppConnectionController {
       this.current = connection;
       connection.unregisterTransportActivity = this.attachTransportActivityListener(sock);
       registerWhatsAppConnectionController(this.accountId, this);
+      // Publish the ready phase and resume any outbound sends parked during
+      // the socket handoff.
+      setActiveWebListener(this.accountId, listener);
       this.startTimers(connection, {
         onHeartbeat: params.onHeartbeat,
         onWatchdogTimeout: params.onWatchdogTimeout,
@@ -712,6 +721,9 @@ export class WhatsAppConnectionController {
     if (!connection) {
       return;
     }
+    // CAS-guarded: a stale connection's teardown must not mask a newer
+    // listener that already took over the account.
+    markActiveWebListenerReconnecting(this.accountId, connection.listener);
     this.current = null;
 
     if (this.socketRef.current === connection.sock) {
@@ -742,9 +754,16 @@ export class WhatsAppConnectionController {
   }
 
   async shutdown(): Promise<void> {
+    const expectedListener = this.current?.listener ?? null;
     this.stopDisconnectRetries();
     await this.closeCurrentConnection();
     unregisterWhatsAppConnectionController(this.accountId, this);
+    // A stopping OLD controller must not mark a healthy successor's account
+    // terminal: skip when another controller already owns the registry slot,
+    // and CAS on our own last listener otherwise.
+    if (!getRegisteredWhatsAppConnectionController(this.accountId)) {
+      markActiveWebListenerTerminal(this.accountId, "stopped", expectedListener ?? undefined);
+    }
   }
 
   private startTimers(

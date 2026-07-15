@@ -104,8 +104,8 @@ vi.mock("./inbound-dispatch.js", () => ({
     BodyForAgent: params.bodyForAgent ?? params.msg.payload.body,
     CommandAuthorized: params.commandAuthorized,
     CommandBody: params.commandBody ?? params.msg.payload.body,
-    MediaPath: params.msg.payload.media?.path,
-    MediaType: params.msg.payload.media?.type,
+    MediaPath: params.msg.payload.media?.[0]?.path,
+    MediaType: params.msg.payload.media?.[0]?.type,
     MediaTranscribedIndexes: params.mediaTranscribedIndexes,
     RawBody: params.rawBody ?? params.msg.payload.body,
     Transcript: params.transcript,
@@ -143,11 +143,12 @@ function makeAudioMsg(overrides: AudioMessageOverrides = {}): WebInboundMsg {
     event,
     payload: {
       body: body ?? "<media:audio>",
-      media: {
-        type: resolvedMediaType,
-        path: resolvedMediaPath,
-        ...payload?.media,
-      },
+      media: payload?.media ?? [
+        {
+          type: resolvedMediaType,
+          path: resolvedMediaPath,
+        },
+      ],
       ...payload,
     },
     platform,

@@ -29,7 +29,7 @@ import {
 import { renderQrTerminal } from "./qr-terminal.js";
 import { getStatusCode } from "./session-errors.js";
 import {
-  fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   makeWASocket,
   useMultiFileAuthState,
@@ -188,7 +188,16 @@ export async function createWaSocket(
   const saveCreds = async () => {
     await writeCredsJsonAtomically(authDir, state.creds);
   };
-  const { version } = await fetchLatestBaileysVersion();
+  // A stale client revision makes WhatsApp reject the socket handshake. This
+  // lookup returns Baileys' bundled revision when live Web discovery is unavailable.
+  const versionResult = await fetchLatestWaWebVersion();
+  if (!versionResult.isLatest) {
+    sessionLogger.warn(
+      { error: String(versionResult.error) },
+      "WhatsApp Web revision lookup failed; using bundled Baileys revision",
+    );
+  }
+  const { version } = versionResult;
   const waWebSocketUrl = resolveWaWebSocketUrl(opts.waWebSocketUrl) ?? resolveEnvWaWebSocketUrl();
   const agent = await resolveEnvProxyAgent(sessionLogger);
   const fetchAgent = await resolveEnvFetchDispatcher(sessionLogger, agent);

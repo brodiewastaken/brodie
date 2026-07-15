@@ -330,7 +330,7 @@ describe("web inbound media saves with extension", () => {
     });
 
     const first = await waitForMessage(onMessage);
-    const mediaPath = requireMediaPath(first.payload.media?.path);
+    const mediaPath = requireMediaPath(first.payload.media?.[0]?.path);
     expect(path.extname(mediaPath)).toBe(".jpg");
     const stat = await fs.stat(mediaPath);
     expect(stat.size).toBeGreaterThan(0);
@@ -349,7 +349,7 @@ describe("web inbound media saves with extension", () => {
     });
 
     const second = await waitForMessage(onMessage);
-    expect(second.payload.media?.fileName).toBe(fileName);
+    expect(second.payload.media?.[0]?.fileName).toBe(fileName);
     expect(saveMediaStreamSpy).toHaveBeenCalled();
     const lastCall = latestSaveMediaStreamCall();
     expect(lastCall[4]).toBe(fileName);
@@ -396,7 +396,10 @@ describe("web inbound media saves with extension", () => {
 
     const inbound = await waitForMessage(onMessage);
     expect(inbound.quote?.body).toBe("<media:image>");
-    const mediaPath = requireMediaPath(inbound.payload.media?.path);
+    // Quoted media attaches to the reply context (ReplyToMedia extras), not
+    // the primary media slot.
+    expect(inbound.payload.media).toBeUndefined();
+    const mediaPath = requireMediaPath(inbound.quote?.context?.mediaPaths?.[0]);
     expect(path.extname(mediaPath)).toBe(".jpg");
     expect(saveMediaStreamSpy).toHaveBeenCalled();
     const lastCall = latestSaveMediaStreamCall();

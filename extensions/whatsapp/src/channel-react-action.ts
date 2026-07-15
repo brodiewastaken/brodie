@@ -216,6 +216,11 @@ export async function handleWhatsAppMessageAction(params: WhatsAppMessageActionP
   const emoji = readStringParam(params.params, "emoji", { allowEmpty: true });
   const remove = typeof params.params.remove === "boolean" ? params.params.remove : undefined;
   const explicitParticipant = readStringParam(params.params, "participant");
+  const reactionTarget =
+    readWhatsAppActionChatJid(params) ?? readStringParam(params.params, "to", { required: true });
+  if (explicitMessageId != null && isWhatsAppGroupJid(reactionTarget) && !explicitParticipant) {
+    readStringParam(params.params, "participant", { required: true });
+  }
   const inferredParticipant =
     explicitParticipant ||
     explicitMessageId != null ||
@@ -229,9 +234,7 @@ export async function handleWhatsAppMessageAction(params: WhatsAppMessageActionP
   return await handleWhatsAppAction(
     {
       action: "react",
-      chatJid:
-        readWhatsAppActionChatJid(params) ??
-        readStringParam(params.params, "to", { required: true }),
+      chatJid: reactionTarget,
       messageId,
       emoji,
       remove,

@@ -21,6 +21,7 @@ import {
 } from "openclaw/plugin-sdk/runtime-env";
 import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
 import { resolveWhatsAppAccount, resolveWhatsAppMediaMaxBytes } from "../accounts.js";
+import { markActiveWebListenerTerminal } from "../active-listener.js";
 import { WHATSAPP_AUTH_UNSTABLE_CODE, WhatsAppAuthUnstableError } from "../auth-store.js";
 import {
   WhatsAppConnectionController,
@@ -46,11 +47,17 @@ import {
 } from "../reconnect.js";
 import { formatError, getWebAuthAgeMs, readWebSelfId } from "../session.js";
 import { resolveWhatsAppSocketTiming } from "../socket-timing.js";
+import { openTrustedGroupsStore } from "../trusted-groups.js";
 import { getRuntimeConfig, getRuntimeConfigSourceSnapshot } from "./config.runtime.js";
 import { whatsappHeartbeatLog, whatsappLog } from "./loggers.js";
 import { buildMentionConfig } from "./mentions.js";
 import { createWebChannelStatusController } from "./monitor-state.js";
 import { createEchoTracker } from "./monitor/echo.js";
+import {
+  createTrustedGroupCallbacks,
+  isWhatsAppDuoRoomParticipants,
+  resolveAutoGroupWhitelist,
+} from "./monitor/group-trust.js";
 import { formatWhatsAppInboundListeningLog } from "./monitor/listener-log.js";
 import { createWebOnMessageHandler } from "./monitor/on-message.js";
 import type { WebMonitorTuning } from "./types.js";
@@ -202,6 +209,36 @@ export async function monitorWebChannel(
   const baileysGroupMetaCache: WhatsAppBaileysGroupMetadataCache = new Map();
   const echoTracker = createEchoTracker({ maxItems: 100, logVerbose });
 
+  const autoGroupWhitelist = resolveAutoGroupWhitelist(cfg, account);
+  const trustedGroups = autoGroupWhitelist
+    ? await openTrustedGroupsStore({ accountId: account.accountId })
+    : null;
+  if (trustedGroups?.policyReset) {
+    whatsappLog.info("Trusted WhatsApp group cache reset due to policy-version change.");
+  }
+  const trustedGroupCallbacks =
+    autoGroupWhitelist && trustedGroups
+      ? createTrustedGroupCallbacks({
+          cfg,
+          accountId: account.accountId,
+          autoGroupWhitelist,
+          trustedGroups,
+          log: whatsappLog,
+          formatError,
+        })
+      : undefined;
+  // Single duo-room definition: gated on trust automation being active and on
+  // the strict {self, owner} participant set. All consumers (debounce, mention
+  // bypass, command auth) read the admission fact this produces.
+  const isDuoRoom = autoGroupWhitelist
+    ? (params: { groupParticipants: string[]; selfE164: string | null }) =>
+        isWhatsAppDuoRoomParticipants({
+          participants: params.groupParticipants,
+          selfE164: params.selfE164,
+          ownerE164: autoGroupWhitelist.ownerE164,
+        })
+    : undefined;
+
   const sleep =
     tuning.sleep ??
     ((ms: number, signal?: AbortSignal) => sleepWithAbort(ms, signal ?? abortSignal));
@@ -263,7 +300,7 @@ export async function monitorWebChannel(
       });
       const shouldDebounce = (msg: WebInboundMessageInput) => {
         const normalized = normalizeWebInboundMessage(msg);
-        if (normalized.payload.media?.path || normalized.payload.media?.type) {
+        if (normalized.payload.media?.some((item) => item.path || item.type)) {
           return false;
         }
         if (normalized.payload.location) {
@@ -276,6 +313,12 @@ export async function monitorWebChannel(
           normalized.payload.commandBody ?? normalized.payload.body,
           cfg,
         );
+      };
+      // Duo rooms feel like a DM: no coalesce delay. Consumes the admission
+      // fact — never re-derives duo-ness from raw participant counts.
+      const resolveDebounceMs = (msg: WebInboundMessageInput) => {
+        const normalized = normalizeWebInboundMessage(msg);
+        return normalized.admission?.duoRoom ? 0 : inboundDebounceMs;
       };
 
       let connection;
@@ -314,6 +357,8 @@ export async function monitorWebChannel(
               accountId: account.accountId,
               authDir: account.authDir,
               mediaMaxMb: account.mediaMaxMb,
+              media: account.media,
+              diagnostics: account.diagnostics,
               selfChatMode: account.selfChatMode,
               sendReadReceipts: account.sendReadReceipts,
               socketTiming,
@@ -326,6 +371,11 @@ export async function monitorWebChannel(
                   }
                 : undefined,
               shouldDebounce,
+              resolveDebounceMs,
+              isTrustedGroup: trustedGroupCallbacks?.isTrustedGroup,
+              isDuoRoom,
+              onAutoTrustGroupCandidate: trustedGroupCallbacks?.onAutoTrustGroupCandidate,
+              onGroupParticipantsUpdate: trustedGroupCallbacks?.onGroupParticipantsUpdate,
               socketRef: controller.socketRef,
               shouldRetryDisconnect: () => !sigintStop && controller.shouldRetryDisconnect(),
               disconnectRetryPolicy: reconnectPolicy,
@@ -425,6 +475,12 @@ export async function monitorWebChannel(
               },
               "web reconnect: setup status error; max attempts reached",
             );
+            if (
+              setupDecision.healthState === "logged-out" ||
+              setupDecision.healthState === "conflict"
+            ) {
+              markActiveWebListenerTerminal(account.accountId, setupDecision.healthState);
+            }
             if (setupDecision.healthState === "logged-out") {
               runtime.error(
                 `WhatsApp session logged out during setup. Run \`${formatCliCommand("openclaw channels login --channel whatsapp")}\` to relink.`,
@@ -648,6 +704,9 @@ export async function monitorWebChannel(
           healthState: decision.healthState,
         });
 
+        if (decision.healthState === "logged-out" || decision.healthState === "conflict") {
+          markActiveWebListenerTerminal(account.accountId, decision.healthState);
+        }
         if (decision.healthState === "logged-out") {
           runtime.error(
             `WhatsApp session logged out. Run \`${formatCliCommand("openclaw channels login --channel whatsapp")}\` to relink.`,

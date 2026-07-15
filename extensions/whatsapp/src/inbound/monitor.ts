@@ -27,6 +27,7 @@ import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { maybeResolveWhatsAppApprovalReaction } from "../approval-reactions.js";
 import { readWebSelfIdentityForDecision, WhatsAppAuthUnstableError } from "../auth-store.js";
+import type { WhatsAppGroupParticipantsTrustUpdate } from "../auto-reply/monitor/group-trust.js";
 import { getRegisteredWhatsAppConnectionController } from "../connection-controller-registry.js";
 import { getPrimaryIdentityId, identitiesOverlap, resolveComparableIdentity } from "../identity.js";
 import { addWhatsAppImagePreviewFields } from "../image-preview.js";
@@ -85,7 +86,13 @@ import {
   hasInboundUserContent,
 } from "./extract.js";
 import { attachEmitterListener, closeInboundMonitorSocket } from "./lifecycle.js";
-import { downloadInboundMedia, downloadQuotedInboundMedia } from "./media.js";
+import {
+  downloadInboundMedia,
+  downloadQuotedInboundMedia,
+  inspectWhatsAppMediaMessage,
+  isWhatsAppLivePhotoVideoComponent,
+  type WhatsAppMediaMessageInspection,
+} from "./media.js";
 import {
   normalizeWebInboundMessage,
   withDeprecatedWebInboundMessageFlatAliases,
@@ -105,11 +112,17 @@ import type {
   WebInboundMessageInput,
   WebListenerCloseReason,
 } from "./types.js";
+import {
+  persistUnrecognizedInboundPayload,
+  sweepUnrecognizedPayloadCaptures,
+} from "./unrecognized-payload-capture.js";
 
 const LOGGED_OUT_STATUS = DisconnectReason?.loggedOut ?? 401;
 const RECONNECT_IN_PROGRESS_ERROR = "no active socket - reconnection in progress";
 const GROUP_META_TTL_MS = 5 * 60 * 1000;
 const BAILEYS_MESSAGE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_LIVE_PHOTO_PAIR_WINDOW_MS = 3_000;
+const DEFAULT_CAPTURE_RETENTION_HOURS = 48;
 const INBOUND_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
 const REPLY_SESSION_INIT_CONFLICT_MESSAGE_RE = /reply session initialization conflicted for \S+/u;
 export const WHATSAPP_GROUP_METADATA_CACHE_MAX_ENTRIES = 500;
@@ -343,6 +356,22 @@ type MonitorWebInboxOptions = {
   appendReplyWindow?: AppendReplyWindow;
   /** Optional debounce gating predicate. */
   shouldDebounce?: (msg: AdmittedWebInboundCallbackMessage) => boolean;
+  /** Optional per-message debounce override (e.g. duo rooms coalesce at 0ms). */
+  resolveDebounceMs?: (msg: AdmittedWebInboundCallbackMessage) => number | undefined;
+  /** Return whether a group JID is already trusted for this account. */
+  isTrustedGroup?: (params: { accountId: string; groupJid: string }) => Promise<boolean> | boolean;
+  /** Classify a group's participant set as a duo room ({self, owner} exactly). */
+  isDuoRoom?: (params: { groupParticipants: string[]; selfE164: string | null }) => boolean;
+  /** Allow the owner to backfill trust by sending a first accepted group message. */
+  onAutoTrustGroupCandidate?: (params: {
+    accountId: string;
+    groupJid: string;
+    senderE164?: string | null;
+  }) => Promise<boolean> | boolean;
+  /** Observe group participant changes for owner/bot trust promotion and revocation. */
+  onGroupParticipantsUpdate?: (
+    update: WhatsAppGroupParticipantsTrustUpdate,
+  ) => Promise<void> | void;
   /** Optional shared socket reference so reply closures can follow reconnects. */
   socketRef?: { current: WASocket | null };
   /** Whether send retries should wait for a reconnect. */
@@ -357,6 +386,16 @@ type MonitorWebInboxOptions = {
   };
   /** Abort in-flight reconnect waits when shutdown becomes terminal. */
   disconnectRetryAbortSignal?: AbortSignal;
+  /** Live-photo pairing and filtering settings (channels.whatsapp.media). */
+  media?: {
+    livePhotoPairWindowMs?: number;
+    livePhotoFilter?: boolean;
+  };
+  /** Diagnostic capture settings (channels.whatsapp.diagnostics). */
+  diagnostics?: {
+    unrecognizedPayloadCapture?: boolean;
+    captureRetentionHours?: number;
+  };
   /** Shared group metadata cache used only for inbound metadata fallback after fetch failures. */
   groupMetadataCache?: WhatsAppGroupMetadataCache;
   recentMessageKeys?: WhatsAppBaileysMessageCache;
@@ -366,11 +405,12 @@ type MonitorWebInboxOptions = {
 
 type AttachWebInboxToSocketOptions = Omit<
   MonitorWebInboxOptions,
-  "onMessage" | "shouldDebounce" | "socketTiming"
+  "onMessage" | "shouldDebounce" | "resolveDebounceMs" | "socketTiming"
 > & {
   socketTiming: Required<WhatsAppSocketTimingOptions>;
   onMessage: (msg: WebInboundMessageInput) => Promise<void>;
   shouldDebounce?: (msg: WebInboundMessageInput) => boolean;
+  resolveDebounceMs?: (msg: WebInboundMessageInput) => number | undefined;
 };
 
 export async function attachWebInboxToSocket(
@@ -494,6 +534,13 @@ export async function attachWebInboxToSocket(
   };
   const shouldDebounceInboundMessage = (msg: AdmittedWebInboundCallbackMessage): boolean =>
     options.shouldDebounce?.(msg) ?? true;
+  const resolveInboundMessageDebounceMs = (msg: AdmittedWebInboundCallbackMessage): number => {
+    const resolved = options.resolveDebounceMs?.(msg);
+    if (typeof resolved !== "number" || !Number.isFinite(resolved)) {
+      return inboundDebounceMs;
+    }
+    return Math.max(0, Math.trunc(resolved));
+  };
   const orderDebouncedInboundEntries = (entries: QueuedInboundMessage[]) =>
     entries.toSorted((a, b) => {
       const timestampDiff = (a.event.timestamp ?? 0) - (b.event.timestamp ?? 0);
@@ -546,6 +593,7 @@ export async function attachWebInboxToSocket(
     debounceMs: inboundDebounceMs,
     buildKey: (msg) => msg.debounceKey ?? buildInboundDebounceKey(msg),
     shouldDebounce: shouldDebounceInboundMessage,
+    resolveDebounceMs: resolveInboundMessageDebounceMs,
     onFlush: async (entries) => {
       let finishFlush!: () => void;
       const flushTask = new Promise<void>((resolve) => {
@@ -593,12 +641,17 @@ export async function attachWebInboxToSocket(
                   mentions: combinedMentions,
                 }
               : undefined;
+          // A batched flush must carry ALL media from all coalesced entries
+          // (arrival order): photo albums arrive as rapid singles, and keeping
+          // only the last entry's media silently drops the earlier photos.
+          const combinedMedia = orderedEntries.flatMap((entry) => entry.payload.media ?? []);
           const combinedMessage: QueuedInboundMessage = withDeprecatedWebInboundMessageFlatAliases({
             ...last,
             payload: {
               ...last.payload,
               body: combinedBody,
               commandBody: combinedCommandBody,
+              media: combinedMedia.length > 0 ? combinedMedia : undefined,
             },
             group: combinedGroup,
             event: {
@@ -965,6 +1018,9 @@ export async function attachWebInboxToSocket(
     senderE164: string | null;
     groupSubject?: string;
     groupParticipants?: string[];
+    groupMentionParticipants?: WhatsAppOutboundMentionParticipant[];
+    trustedGroup: boolean;
+    duoRoom: boolean;
     messageTimestampMs?: number;
     access: AcceptedInboundAccessControlResult;
   };
@@ -1025,10 +1081,45 @@ export async function attachWebInboxToSocket(
 
     let groupSubject: string | undefined;
     let groupParticipants: string[] | undefined;
+    let groupMentionParticipants: WhatsAppOutboundMentionParticipant[] | undefined;
+    // Trust facts are computed once here (after group metadata, before access
+    // control) and ride the admission envelope; consumers never re-derive them.
+    // A throwing trust check fails closed (trustedGroup = false).
+    let trustedGroup = false;
+    let duoRoom = false;
     if (group) {
       const meta = await getGroupMeta(remoteJid);
       groupSubject = meta.subject;
       groupParticipants = meta.participants;
+      groupMentionParticipants = meta.mentionParticipants;
+      // Single error boundary: the trust callbacks already fail closed
+      // internally; any escape here still yields trustedGroup = false.
+      try {
+        duoRoom =
+          options.isDuoRoom?.({
+            groupParticipants: groupParticipants ?? [],
+            selfE164: self.e164 ?? null,
+          }) === true;
+        trustedGroup = Boolean(
+          await options.isTrustedGroup?.({
+            accountId: options.accountId,
+            groupJid: remoteJid,
+          }),
+        );
+        if (!trustedGroup && options.onAutoTrustGroupCandidate) {
+          trustedGroup = await options.onAutoTrustGroupCandidate({
+            accountId: options.accountId,
+            groupJid: remoteJid,
+            senderE164,
+          });
+        }
+      } catch (err) {
+        logWhatsAppVerbose(
+          options.verbose,
+          `Failed checking trusted WhatsApp group ${remoteJid}: ${String(err)}`,
+        );
+        trustedGroup = false;
+      }
     }
     const messageTimestampSeconds = parseWhatsAppTimestampSeconds(msg.messageTimestamp);
     const messageTimestampMs =
@@ -1052,6 +1143,11 @@ export async function attachWebInboxToSocket(
         sendMessage: (jid: string, content: AnyMessageContent) => sendTrackedMessage(jid, content),
       },
       remoteJid,
+      trustedGroup,
+      autoGroupWhitelistEnabled: Boolean(
+        options.isTrustedGroup || options.onAutoTrustGroupCandidate,
+      ),
+      duoRoom,
     });
     if (!access.allowed) {
       return null;
@@ -1066,6 +1162,9 @@ export async function attachWebInboxToSocket(
       senderE164,
       groupSubject,
       groupParticipants,
+      groupMentionParticipants,
+      trustedGroup,
+      duoRoom,
       messageTimestampMs,
       access,
     };
@@ -1119,6 +1218,285 @@ export async function attachWebInboxToSocket(
       return;
     }
     await maybeMarkInboundAsRead(target);
+  };
+
+  const livePhotoFilterEnabled = options.media?.livePhotoFilter !== false;
+  const livePhotoPairWindowMs =
+    typeof options.media?.livePhotoPairWindowMs === "number" &&
+    options.media.livePhotoPairWindowMs > 0
+      ? Math.trunc(options.media.livePhotoPairWindowMs)
+      : DEFAULT_LIVE_PHOTO_PAIR_WINDOW_MS;
+  const unrecognizedPayloadCaptureEnabled =
+    options.diagnostics?.unrecognizedPayloadCapture === true;
+
+  type PendingBareVideoDurable = {
+    durableId?: string;
+    readReceipt?: WhatsAppReadReceiptTarget;
+    receiveOrder?: number;
+  };
+
+  type PendingBareVideoMessage = {
+    msg: WAMessage;
+    inbound: NormalizedInboundMessage;
+    enriched: EnrichedInboundMessage;
+    mediaProbe: WhatsAppMediaMessageInspection;
+    createdAtMs: number;
+    timeout: ReturnType<typeof setTimeout>;
+    durable: PendingBareVideoDurable;
+  };
+
+  const recentLivePhotoStillsByPairKey = new Map<
+    string,
+    { messageId?: string; observedAtMs: number }
+  >();
+  const pendingBareVideosByPairKey = new Map<string, PendingBareVideoMessage[]>();
+
+  const getLivePhotoPairKey = (inbound: NormalizedInboundMessage): string =>
+    [
+      options.accountId,
+      inbound.remoteJid,
+      inbound.participantJid ?? inbound.senderE164 ?? inbound.from,
+    ].join("|");
+
+  const isBareVideoPlaceholder = (enriched: EnrichedInboundMessage): boolean =>
+    enriched.body.trim() === "<media:video>" &&
+    !enriched.mediaPath &&
+    !enriched.mediaType &&
+    !enriched.mediaFileName;
+
+  const isDownloadedImage = (enriched: EnrichedInboundMessage): boolean =>
+    Boolean(enriched.mediaPath && enriched.mediaType?.startsWith("image/"));
+
+  const pruneRecentLivePhotoStills = (nowMs: number) => {
+    for (const [pairKey, still] of recentLivePhotoStillsByPairKey) {
+      if (nowMs - still.observedAtMs > livePhotoPairWindowMs) {
+        recentLivePhotoStillsByPairKey.delete(pairKey);
+      }
+    }
+  };
+
+  const removePendingBareVideo = (pairKey: string, pending: PendingBareVideoMessage) => {
+    const pendingForPair = pendingBareVideosByPairKey.get(pairKey);
+    if (!pendingForPair) {
+      return;
+    }
+    const next = pendingForPair.filter((entry) => entry !== pending);
+    if (next.length > 0) {
+      pendingBareVideosByPairKey.set(pairKey, next);
+    } else {
+      pendingBareVideosByPairKey.delete(pairKey);
+    }
+  };
+
+  const logLivePhotoFilterDecision = (
+    inbound: NormalizedInboundMessage,
+    enriched: EnrichedInboundMessage | null,
+    mediaProbe: WhatsAppMediaMessageInspection,
+    decision: string,
+    extra?: Record<string, unknown>,
+  ) => {
+    if (!options.verbose) {
+      return;
+    }
+    inboundLogger.info(
+      {
+        messageId: inbound.id,
+        chatId: inbound.remoteJid,
+        participant: inbound.participantJid,
+        body: enriched?.body ?? null,
+        hasDownloadedMedia: Boolean(enriched?.mediaPath || enriched?.mediaType),
+        mediaPath: enriched?.mediaPath ?? null,
+        mediaType: enriched?.mediaType ?? null,
+        rawKeys: mediaProbe.rawKeys,
+        normalizedKeys: mediaProbe.normalizedKeys,
+        chainContentKeys: mediaProbe.chainContentKeys,
+        finalContentKeys: mediaProbe.finalContentKeys,
+        hasVideo: mediaProbe.hasVideo,
+        hasImage: mediaProbe.hasImage,
+        livePhotoVideo: mediaProbe.livePhotoVideo,
+        motionPhotoOffsetPresent: mediaProbe.motionPhotoOffsetPresent,
+        motionPhotoOffsetMs: mediaProbe.motionPhotoOffsetMs ?? null,
+        videoMimetype: mediaProbe.videoMimetype ?? null,
+        imageMimetype: mediaProbe.imageMimetype ?? null,
+        decision,
+        ...extra,
+      },
+      "WhatsApp Live Photo video filter decision",
+    );
+  };
+
+  const completeDroppedInboundMessage = async (
+    inbound: NormalizedInboundMessage,
+    durable: PendingBareVideoDurable,
+  ) => {
+    await completeUndeliverableDurableInbound(
+      durable.durableId,
+      durable.readReceipt ? { readReceipt: durable.readReceipt } : undefined,
+    );
+    await maybeMarkNonSelfChatReadReceipt(inbound, durable.readReceipt);
+  };
+
+  const claimRecordAndEnqueueInboundMessage = async (
+    msg: WAMessage,
+    inbound: NormalizedInboundMessage,
+    enriched: EnrichedInboundMessage,
+    durable: PendingBareVideoDurable,
+  ) => {
+    // Dedupe claim happens AFTER the live-photo gate so a dropped component
+    // never poisons the dedupe key for a legit retry.
+    const dedupeKey = inbound.id ? `${options.accountId}:${inbound.remoteJid}:${inbound.id}` : "";
+    const dedupeClaim = dedupeKey ? await claimRecentInboundMessageDelivery(dedupeKey) : "claimed";
+    if (dedupeClaim !== "claimed") {
+      if (dedupeClaim === "duplicate") {
+        await completeDroppedInboundMessage(inbound, durable);
+      }
+      return;
+    }
+
+    recordAcceptedInboundActivity(options.accountId);
+    await enqueueInboundMessage(msg, inbound, enriched, durable);
+  };
+
+  const dropPendingBareVideosForImage = async (
+    pairKey: string,
+    imageInbound: NormalizedInboundMessage,
+    nowMs: number,
+  ) => {
+    // Detach and disarm every pending entry synchronously BEFORE the first
+    // await: a hold timer firing between loop awaits would both enqueue the
+    // video and complete it as dropped.
+    const pendingVideos = pendingBareVideosByPairKey.get(pairKey) ?? [];
+    for (const pending of pendingVideos) {
+      clearTimeout(pending.timeout);
+    }
+    pendingBareVideosByPairKey.delete(pairKey);
+    recentLivePhotoStillsByPairKey.set(pairKey, {
+      messageId: imageInbound.id,
+      observedAtMs: nowMs,
+    });
+    for (const pending of pendingVideos) {
+      logLivePhotoFilterDecision(
+        pending.inbound,
+        pending.enriched,
+        pending.mediaProbe,
+        "drop-pending-video-after-image",
+        {
+          pairKey,
+          pairedImageMessageId: imageInbound.id ?? null,
+          heldMs: nowMs - pending.createdAtMs,
+        },
+      );
+      await completeDroppedInboundMessage(pending.inbound, pending.durable);
+    }
+  };
+
+  // Returns true when the message was held or dropped as a live-photo motion
+  // component; false lets normal claim/enqueue proceed.
+  const handleLivePhotoMediaGate = async (
+    msg: WAMessage,
+    inbound: NormalizedInboundMessage,
+    enriched: EnrichedInboundMessage,
+    mediaProbe: WhatsAppMediaMessageInspection,
+    durable: PendingBareVideoDurable,
+  ): Promise<boolean> => {
+    if (!livePhotoFilterEnabled) {
+      return false;
+    }
+    const nowMs = Date.now();
+    pruneRecentLivePhotoStills(nowMs);
+    const pairKey = getLivePhotoPairKey(inbound);
+
+    if (isDownloadedImage(enriched)) {
+      await dropPendingBareVideosForImage(pairKey, inbound, nowMs);
+      return false;
+    }
+
+    // Motion-photo candidacy requires the offset field (any form, incl. the
+    // marker): a bare placeholder from a failed/oversized download is a real
+    // video and must keep normal delivery, not vanish behind an image pair.
+    if (!isBareVideoPlaceholder(enriched) || !mediaProbe.motionPhotoOffsetPresent) {
+      if (mediaProbe.hasVideo) {
+        logLivePhotoFilterDecision(inbound, enriched, mediaProbe, "pass-non-live-photo-video");
+      }
+      return false;
+    }
+
+    const recentStill = recentLivePhotoStillsByPairKey.get(pairKey);
+    if (recentStill && nowMs - recentStill.observedAtMs <= livePhotoPairWindowMs) {
+      logLivePhotoFilterDecision(inbound, enriched, mediaProbe, "drop-video-after-recent-image", {
+        pairKey,
+        pairedImageMessageId: recentStill.messageId ?? null,
+        ageMs: nowMs - recentStill.observedAtMs,
+      });
+      logWhatsAppVerbose(
+        options.verbose,
+        `Dropped paired WhatsApp Live Photo video component ${inbound.id ?? "(unknown)"} from ${inbound.remoteJid}`,
+      );
+      await completeDroppedInboundMessage(inbound, durable);
+      return true;
+    }
+
+    const pending: PendingBareVideoMessage = {
+      msg,
+      inbound,
+      enriched,
+      mediaProbe,
+      createdAtMs: nowMs,
+      durable,
+      timeout: setTimeout(() => {
+        removePendingBareVideo(pairKey, pending);
+        logLivePhotoFilterDecision(inbound, enriched, mediaProbe, "pass-video-after-pair-timeout", {
+          pairKey,
+          heldMs: Date.now() - nowMs,
+        });
+        void claimRecordAndEnqueueInboundMessage(msg, inbound, enriched, durable).catch(
+          (err: unknown) => {
+            inboundLogger.error({ error: String(err) }, "failed handling delayed video message");
+            inboundConsoleLog.error(`Failed handling delayed video message: ${String(err)}`);
+          },
+        );
+      }, livePhotoPairWindowMs),
+    };
+    pending.timeout.unref?.();
+    const pendingForPair = pendingBareVideosByPairKey.get(pairKey) ?? [];
+    pendingForPair.push(pending);
+    pendingBareVideosByPairKey.set(pairKey, pendingForPair);
+    logLivePhotoFilterDecision(inbound, enriched, mediaProbe, "hold-bare-video-for-image-pair", {
+      pairKey,
+      holdMs: livePhotoPairWindowMs,
+    });
+    return true;
+  };
+
+  // Drain-on-close releases (delivers) held videos rather than losing them.
+  const flushPendingBareVideos = async () => {
+    // Disarm all hold timers synchronously before the first await so a timer
+    // cannot race the drain loop into a double delivery.
+    const pendingEntries = Array.from(pendingBareVideosByPairKey.entries()).flatMap(
+      ([pairKey, pendingVideos]) => pendingVideos.map((pending) => ({ pairKey, pending })),
+    );
+    for (const { pending } of pendingEntries) {
+      clearTimeout(pending.timeout);
+    }
+    pendingBareVideosByPairKey.clear();
+    for (const { pairKey, pending } of pendingEntries) {
+      logLivePhotoFilterDecision(
+        pending.inbound,
+        pending.enriched,
+        pending.mediaProbe,
+        "pass-video-on-monitor-drain",
+        {
+          pairKey,
+          heldMs: Date.now() - pending.createdAtMs,
+        },
+      );
+      await claimRecordAndEnqueueInboundMessage(
+        pending.msg,
+        pending.inbound,
+        pending.enriched,
+        pending.durable,
+      );
+    }
   };
 
   const completeUndeliverableDurableInbound = async (
@@ -1186,6 +1564,31 @@ export async function attachWebInboxToSocket(
       return;
     }
 
+    const mediaProbe = inspectWhatsAppMediaMessage(msg.message as proto.IMessage | undefined);
+    if (mediaProbe.hasVideo || mediaProbe.livePhotoVideo) {
+      logLivePhotoFilterDecision(inbound, null, mediaProbe, "probe-before-enrich");
+    }
+    // Explicitly-marked motion components drop outright (never reach the
+    // agent); their durable entry completes and the read receipt still fires.
+    if (
+      livePhotoFilterEnabled &&
+      (mediaProbe.livePhotoVideo ||
+        isWhatsAppLivePhotoVideoComponent(msg.message as proto.IMessage | undefined))
+    ) {
+      logLivePhotoFilterDecision(inbound, null, mediaProbe, "drop-motion-photo-marker", {
+        reason: "motionPhotoPresentationOffsetMs",
+      });
+      logWhatsAppVerbose(
+        options.verbose,
+        `Dropped WhatsApp Live Photo video component ${inbound.id ?? "(unknown)"} from ${inbound.remoteJid}`,
+      );
+      await completeDroppedInboundMessage(inbound, {
+        durableId: stored?.id,
+        readReceipt: deliveryReadReceipt,
+      });
+      return;
+    }
+
     let durableId =
       stored?.id ??
       (inbound.id
@@ -1233,23 +1636,35 @@ export async function attachWebInboxToSocket(
 
     const enriched = await enrichInboundMessage(msg);
     if (!enriched) {
+      if (unrecognizedPayloadCaptureEnabled) {
+        await persistUnrecognizedInboundPayload({
+          accountId: options.accountId,
+          msg,
+          mediaProbe,
+          reason: "unrecognized-message-shape",
+        }).catch((err: unknown) => {
+          inboundLogger.warn(
+            { error: String(err), messageId: inbound.id, chatId: inbound.remoteJid },
+            "failed persisting unrecognized inbound WhatsApp payload",
+          );
+        });
+      }
       await completeUndeliverableDurableInbound(durableId, durableMetadata);
       await maybeMarkNonSelfChatReadReceipt(inbound, deliveryReadReceipt);
       return;
     }
 
-    const dedupeKey = inbound.id ? `${options.accountId}:${inbound.remoteJid}:${inbound.id}` : "";
-    const dedupeClaim = dedupeKey ? await claimRecentInboundMessageDelivery(dedupeKey) : "claimed";
-    if (dedupeClaim !== "claimed") {
-      if (dedupeClaim === "duplicate") {
-        await completeUndeliverableDurableInbound(durableId, durableMetadata);
-        await maybeMarkNonSelfChatReadReceipt(inbound, deliveryReadReceipt);
-      }
+    if (
+      await handleLivePhotoMediaGate(msg, inbound, enriched, mediaProbe, {
+        durableId,
+        readReceipt: deliveryReadReceipt,
+        receiveOrder,
+      })
+    ) {
       return;
     }
 
-    recordAcceptedInboundActivity(options.accountId);
-    await enqueueInboundMessage(msg, inbound, enriched, {
+    await claimRecordAndEnqueueInboundMessage(msg, inbound, enriched, {
       durableId,
       readReceipt: deliveryReadReceipt,
       receiveOrder,
@@ -1319,6 +1734,19 @@ export async function attachWebInboxToSocket(
       mediaType = inboundMedia.mimetype;
       mediaFileName = inboundMedia.fileName;
     };
+    // Quoted media attaches to the reply context (ReplyToMedia extras), never
+    // to the primary media slot; a failed quoted download is non-fatal and the
+    // context simply omits it.
+    const saveQuotedInboundMedia = (
+      inboundMedia: Awaited<ReturnType<typeof downloadQuotedInboundMedia>>,
+    ) => {
+      if (!inboundMedia || !replyContext) {
+        return;
+      }
+      replyContext.mediaPaths = [inboundMedia.saved.path];
+      replyContext.mediaTypes = inboundMedia.mimetype ? [inboundMedia.mimetype] : undefined;
+      replyContext.mediaFileName = inboundMedia.fileName;
+    };
     try {
       const inboundMedia = await downloadInboundMedia(msg as proto.IWebMessageInfo, sock, maxBytes);
       await saveInboundMedia(inboundMedia);
@@ -1330,13 +1758,13 @@ export async function attachWebInboxToSocket(
         notice: "[whatsapp attachment unavailable]",
       });
     }
-    if (!mediaPath && replyContext) {
+    if (replyContext) {
       try {
-        await saveInboundMedia(
+        saveQuotedInboundMedia(
           await downloadQuotedInboundMedia(msg as proto.IWebMessageInfo, sock, maxBytes),
         );
       } catch (err) {
-        logWhatsAppVerbose(options.verbose, `Quoted media download failed: ${String(err)}`);
+        logWhatsAppVerbose(options.verbose, `Inbound quoted media download failed: ${String(err)}`);
         body = formatInboundMediaUnavailableText({
           body,
           notice: "[whatsapp quoted attachment unavailable]",
@@ -1419,18 +1847,25 @@ export async function attachWebInboxToSocket(
     );
     const media =
       enriched.mediaPath || enriched.mediaType || enriched.mediaFileName
-        ? {
-            path: enriched.mediaPath,
-            type: enriched.mediaType,
-            fileName: enriched.mediaFileName,
-          }
+        ? [
+            {
+              path: enriched.mediaPath,
+              type: enriched.mediaType,
+              fileName: enriched.mediaFileName,
+            },
+          ]
         : undefined;
     const groupMentions = mentionedJids ? { jids: mentionedJids } : undefined;
     const group =
-      inbound.group && (inbound.groupSubject || inbound.groupParticipants?.length || groupMentions)
+      inbound.group &&
+      (inbound.groupSubject ||
+        inbound.groupParticipants?.length ||
+        inbound.groupMentionParticipants?.length ||
+        groupMentions)
         ? {
             subject: inbound.groupSubject,
             participants: inbound.groupParticipants,
+            participantIdentities: inbound.groupMentionParticipants,
             mentions: groupMentions,
           }
         : undefined;
@@ -1512,7 +1947,10 @@ export async function attachWebInboxToSocket(
     const debounceKey = buildInboundDebounceKey(inboundMessage);
     if (debounceKey) {
       inboundMessage.debounceKey = debounceKey;
-      if (inboundDebounceMs > 0 && shouldDebounceInboundMessage(inboundMessage)) {
+      if (
+        resolveInboundMessageDebounceMs(inboundMessage) > 0 &&
+        shouldDebounceInboundMessage(inboundMessage)
+      ) {
         pendingDebounceKeys.add(debounceKey);
         publishPendingWorkState();
       }
@@ -1607,6 +2045,9 @@ export async function attachWebInboxToSocket(
   const drainInboundBeforeSocketClose = async () => {
     groupMetadataCacheClosed = true;
     await waitForPendingMessageHandlers();
+    // Held bare videos flush through the normal claim/enqueue path so a close
+    // never loses a real (non-live-photo) video.
+    await flushPendingBareVideos();
     await drainDebouncedInboundMessages();
   };
   const drainInboundBeforeSocketCloseWithTimeout = async () => {
@@ -1670,7 +2111,6 @@ export async function attachWebInboxToSocket(
     "connection.update",
     handleConnectionUpdate as unknown as (...args: unknown[]) => void,
   );
-
   const isFullGroupMetadataUpdate = (update: Partial<GroupMetadata>): update is GroupMetadata =>
     typeof update.id === "string" &&
     typeof update.subject === "string" &&
@@ -1722,11 +2162,84 @@ export async function attachWebInboxToSocket(
     }
   }) as unknown as (...args: unknown[]) => void);
 
+  const handleGroupParticipantsTrustUpdate = async (update: {
+    id: string;
+    action?: unknown;
+    author?: unknown;
+    participants?: unknown;
+  }) => {
+    if (!options.onGroupParticipantsUpdate) {
+      return;
+    }
+    const groupJid = typeof update.id === "string" ? update.id : "";
+    if (!groupJid || !isGroupJid(groupJid)) {
+      return;
+    }
+    const participantJids = uniqueStrings(
+      (
+        (Array.isArray(update.participants) ? update.participants : []) as Array<
+          string | { id?: unknown }
+        >
+      )
+        .map((entry) => (typeof entry === "string" ? entry : entry.id))
+        .filter((entry): entry is string => typeof entry === "string" && entry.length > 0),
+    );
+    const participantE164 = uniqueStrings(
+      (await Promise.all(participantJids.map(async (jid) => await resolveInboundJid(jid)))).filter(
+        (entry): entry is string => typeof entry === "string" && entry.length > 0,
+      ),
+    );
+    const authorJid = typeof update.author === "string" ? update.author : undefined;
+    const authorE164 = authorJid ? ((await resolveInboundJid(authorJid)) ?? undefined) : undefined;
+    // The metadata caches were invalidated above; this fetch sees the
+    // post-update participant list the trust decision needs.
+    const meta = await getGroupMeta(groupJid);
+    await options.onGroupParticipantsUpdate({
+      accountId: options.accountId,
+      groupJid,
+      action: typeof update.action === "string" ? update.action : "",
+      authorJid,
+      authorE164,
+      participantJids,
+      participantE164,
+      groupSubject: meta.subject,
+      groupParticipants: meta.participants,
+      selfJid: self.jid ?? null,
+      selfE164: self.e164 ?? null,
+    });
+  };
   const detachGroupParticipantsUpdate = attachSockListener("group-participants.update", ((update: {
     id: string;
+    action?: unknown;
+    author?: unknown;
+    participants?: unknown;
   }) => {
     forgetFullGroupMetadata(update.id);
+    if (!options.onGroupParticipantsUpdate) {
+      return;
+    }
+    // Trust handler errors are logged and never fatal to the socket.
+    const task = handleGroupParticipantsTrustUpdate(update).catch((err: unknown) => {
+      inboundLogger.error({ error: String(err) }, "group-participants.update handler error");
+      inboundConsoleLog.error(`Group participants update handler error: ${String(err)}`);
+    });
+    pendingMessageHandlers.add(task);
+    void task.finally(() => {
+      pendingMessageHandlers.delete(task);
+    });
   }) as unknown as (...args: unknown[]) => void);
+
+  if (unrecognizedPayloadCaptureEnabled) {
+    const retentionHours =
+      typeof options.diagnostics?.captureRetentionHours === "number" &&
+      options.diagnostics.captureRetentionHours > 0
+        ? options.diagnostics.captureRetentionHours
+        : DEFAULT_CAPTURE_RETENTION_HOURS;
+    void sweepUnrecognizedPayloadCaptures({
+      accountId: options.accountId,
+      retentionHours,
+    }).catch(() => {});
+  }
 
   const replayTask = replayPendingDurableInboundMessages().catch((err: unknown) => {
     inboundLogger.error({ error: String(err) }, "failed replaying durable WhatsApp inbound");
@@ -1843,6 +2356,7 @@ export async function monitorWebInbox(options: MonitorWebInboxOptions) {
     throw err;
   }
   const shouldDebounce = options.shouldDebounce;
+  const resolveDebounceMs = options.resolveDebounceMs;
   const normalizeAdmittedWebInboundMessage = (
     msg: WebInboundMessageInput,
   ): AdmittedWebInboundCallbackMessage =>
@@ -1856,6 +2370,9 @@ export async function monitorWebInbox(options: MonitorWebInboxOptions) {
     },
     shouldDebounce: shouldDebounce
       ? (msg) => shouldDebounce(normalizeAdmittedWebInboundMessage(msg))
+      : undefined,
+    resolveDebounceMs: resolveDebounceMs
+      ? (msg) => resolveDebounceMs(normalizeAdmittedWebInboundMessage(msg))
       : undefined,
     socketTiming,
     sock,

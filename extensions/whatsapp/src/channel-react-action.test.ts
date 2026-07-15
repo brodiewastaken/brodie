@@ -510,8 +510,8 @@ describe("whatsapp react action messageId resolution", () => {
     expect(hoisted.handleWhatsAppAction).not.toHaveBeenCalled();
   });
 
-  it("does not infer participant when messageId is explicitly provided", async () => {
-    await handleWhatsAppMessageAction({
+  it("fails closed for an older group reaction without an explicit participant", async () => {
+    const err = await handleWhatsAppMessageAction({
       action: "react",
       params: { emoji: "👍", to: "12345@g.us", messageId: "older-msg-7" },
       cfg: baseCfg,
@@ -522,20 +522,10 @@ describe("whatsapp react action messageId resolution", () => {
         currentChannelProvider: "whatsapp",
         currentMessageId: "ctx-msg-42",
       },
-    });
-    expect(hoisted.handleWhatsAppAction).toHaveBeenCalledWith(
-      {
-        action: "react",
-        chatJid: "12345@g.us",
-        messageId: "older-msg-7",
-        emoji: "👍",
-        remove: undefined,
-        participant: undefined,
-        accountId: "default",
-        fromMe: undefined,
-      },
-      baseCfg,
-    );
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("participant");
+    expect(hoisted.handleWhatsAppAction).not.toHaveBeenCalled();
   });
 
   it("skips context fallback when source is another provider", async () => {

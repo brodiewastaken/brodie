@@ -154,6 +154,7 @@ function readLastSocketOptions(): {
   fetchAgent?: unknown;
   keepAliveIntervalMs?: number;
   printQRInTerminal?: boolean;
+  version?: readonly [number, number, number];
   waWebSocketUrl?: string | URL;
   logger?: { level?: string; trace?: unknown };
 } {
@@ -171,6 +172,7 @@ function readLastSocketOptions(): {
     fetchAgent?: unknown;
     keepAliveIntervalMs?: number;
     printQRInTerminal?: boolean;
+    version?: readonly [number, number, number];
     waWebSocketUrl?: string | URL;
     logger?: { level?: string; trace?: unknown };
   };
@@ -278,6 +280,30 @@ describe("web session", () => {
     expect(write.options.mode).toBe(0o600);
     expect(write.options.flag).toBe("wx");
     openMock.restore();
+  });
+
+  it("uses the current WhatsApp Web revision for the socket handshake", async () => {
+    vi.mocked(baileys.fetchLatestWaWebVersion).mockResolvedValueOnce({
+      version: [2, 3000, 1044006379],
+      isLatest: true,
+    });
+
+    await createWaSocket(false, false);
+
+    expect(readLastSocketOptions().version).toEqual([2, 3000, 1044006379]);
+    expect(baileys.fetchLatestWaWebVersion).toHaveBeenCalledOnce();
+  });
+
+  it("uses Baileys' bundled revision when WhatsApp Web discovery fails", async () => {
+    vi.mocked(baileys.fetchLatestWaWebVersion).mockResolvedValueOnce({
+      version: [2, 3000, 1035194821],
+      isLatest: false,
+      error: new Error("discovery failed"),
+    });
+
+    await createWaSocket(false, false);
+
+    expect(readLastSocketOptions().version).toEqual([2, 3000, 1035194821]);
   });
 
   it("prints compact terminal QR output when requested", async () => {
