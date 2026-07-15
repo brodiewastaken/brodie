@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it, expect, beforeEach } from "vitest";
 import { isCronRunSessionKey } from "../sessions/session-key-utils.js";
+import { beginSessionWorkAdmission } from "../sessions/session-lifecycle-admission.js";
 import type { Logger } from "./service/state.js";
 import { sweepCronRunSessions, resolveRetentionMs, resetReaperThrottle } from "./session-reaper.js";
 
@@ -164,6 +165,119 @@ describe("sweepCronRunSessions", () => {
       name.startsWith(`${runSessionId}.jsonl.deleted.`),
     );
     expect(archivedRunTranscripts.length).toBeGreaterThan(0);
+  });
+
+  it("preserves a transcript still referenced by the stable cron row", async () => {
+    const now = Date.now();
+    const sessionId = "shared-run";
+    const transcript = path.join(tmpDir, `${sessionId}.jsonl`);
+    fs.writeFileSync(transcript, '{"type":"session"}\n');
+    const entry = {
+      sessionId,
+      sessionFile: transcript,
+      updatedAt: now - 25 * 3_600_000,
+    };
+    fs.writeFileSync(
+      storePath,
+      JSON.stringify({
+        "agent:main:cron:job1": entry,
+        [`agent:main:cron:job1:run:${sessionId}`]: { ...entry },
+      }),
+    );
+
+    const result = await sweepCronRunSessions({
+      sessionStorePath: storePath,
+      nowMs: now,
+      log,
+      force: true,
+    });
+
+    expect(result.pruned).toBe(1);
+    expect(fs.existsSync(transcript)).toBe(true);
+    const updated = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    expect(updated["agent:main:cron:job1"]).toEqual(entry);
+    expect(updated[`agent:main:cron:job1:run:${sessionId}`]).toBeUndefined();
+  });
+
+  it("fails closed while an expired run generation still owns admitted work", async () => {
+    const now = Date.now();
+    const sessionKey = "agent:main:cron:job1:run:admitted-run";
+    const entry = {
+      sessionId: "admitted-run",
+      lifecycleRevision: "admitted-revision",
+      updatedAt: now - 25 * 3_600_000,
+    };
+    fs.writeFileSync(storePath, JSON.stringify({ [sessionKey]: entry }));
+    const lease = await beginSessionWorkAdmission({
+      scope: storePath,
+      identities: [sessionKey, entry.sessionId],
+      assertAllowed: () => {},
+    });
+
+    try {
+      const protectedResult = await sweepCronRunSessions({
+        sessionStorePath: storePath,
+        nowMs: now,
+        log,
+        force: true,
+      });
+      expect(protectedResult.pruned).toBe(0);
+      expect(JSON.parse(fs.readFileSync(storePath, "utf-8"))[sessionKey]).toEqual(entry);
+    } finally {
+      lease.release();
+    }
+
+    const releasedResult = await sweepCronRunSessions({
+      sessionStorePath: storePath,
+      nowMs: now,
+      log,
+      force: true,
+    });
+    expect(releasedResult.pruned).toBe(1);
+  });
+
+  it("closes admission racing selection before the removal transaction", async () => {
+    const now = Date.now();
+    const sessionKey = "agent:main:cron:job1:run:racing-run";
+    const entry = {
+      sessionId: "racing-run",
+      updatedAt: now - 25 * 3_600_000,
+    };
+    fs.writeFileSync(storePath, JSON.stringify({ [sessionKey]: entry }));
+    let releaseSelection: () => void = () => {};
+    const selectionBlocked = new Promise<void>((resolve) => {
+      releaseSelection = resolve;
+    });
+    let selected: () => void = () => {};
+    const selectionReached = new Promise<void>((resolve) => {
+      selected = resolve;
+    });
+
+    const sweep = sweepCronRunSessions({
+      sessionStorePath: storePath,
+      nowMs: now,
+      log,
+      force: true,
+      beforeLifecycleMutation: async () => {
+        selected();
+        await selectionBlocked;
+      },
+    });
+    await selectionReached;
+    const lease = await beginSessionWorkAdmission({
+      scope: storePath,
+      identities: [sessionKey, entry.sessionId],
+      assertAllowed: () => {},
+    });
+
+    try {
+      releaseSelection();
+      const result = await sweep;
+      expect(result.pruned).toBe(0);
+      expect(JSON.parse(fs.readFileSync(storePath, "utf-8"))[sessionKey]).toEqual(entry);
+    } finally {
+      lease.release();
+    }
   });
 
   it("does not archive external transcript paths for pruned runs", async () => {

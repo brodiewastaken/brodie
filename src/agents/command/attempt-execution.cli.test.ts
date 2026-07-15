@@ -143,7 +143,13 @@ async function readSessionMessages(sessionFile: string) {
     .filter((entry) => entry.type === "message")
     .map(
       (entry) =>
-        entry.message as { role?: string; content?: unknown; provider?: string; model?: string },
+        entry.message as {
+          role?: string;
+          content?: unknown;
+          provider?: string;
+          model?: string;
+          usage?: unknown;
+        },
     );
 }
 
@@ -1504,6 +1510,102 @@ describe("CLI attempt execution", () => {
 
     messages = await readSessionMessages(updatedFirst?.sessionFile ?? "");
     expect(messages).toHaveLength(1);
+  });
+
+  it("persists only final context usage on an embedded assistant gap-fill", async () => {
+    const sessionKey = "agent:main:subagent:embedded-gap-fill-context";
+    const sessionFile = path.join(tmpDir, "session-embedded-gap-fill-context.jsonl");
+    const sessionEntry: SessionEntry = {
+      sessionId: "session-embedded-gap-fill-context",
+      sessionFile,
+      updatedAt: Date.now(),
+    };
+    const sessionStore: Record<string, SessionEntry> = { [sessionKey]: sessionEntry };
+    await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2), "utf-8");
+    await appendSessionTranscriptMessage({
+      transcriptPath: sessionFile,
+      sessionId: sessionEntry.sessionId,
+      cwd: tmpDir,
+      config: {},
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "provider response" }],
+        api: "openai-responses",
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        usage: {
+          input: 676,
+          output: 178,
+          cacheRead: 98_816,
+          cacheWrite: 0,
+          totalTokens: 99_670,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      },
+    });
+
+    const result = makeCliResult("background result");
+    result.meta.executionTrace = {
+      winnerProvider: "openai",
+      winnerModel: "gpt-5.6-sol",
+      fallbackUsed: false,
+      runner: "embedded",
+    };
+    result.meta.agentMeta = {
+      sessionId: sessionEntry.sessionId,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      promptTokens: 99_492,
+      usage: {
+        input: 87_785,
+        output: 569,
+        cacheRead: 209_408,
+        total: 297_762,
+      },
+      lastCallUsage: {
+        input: 676,
+        output: 178,
+        cacheRead: 98_816,
+        total: 99_670,
+      },
+    };
+
+    await persistCliTurnTranscript({
+      body: "ignored for gap fill",
+      result,
+      sessionId: sessionEntry.sessionId,
+      sessionKey,
+      sessionEntry,
+      sessionStore,
+      storePath,
+      sessionAgentId: "main",
+      sessionCwd: tmpDir,
+      config: {},
+      embeddedAssistantGapFill: true,
+    });
+
+    const messages = await readSessionMessages(sessionFile);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.usage).toMatchObject({
+      input: 676,
+      output: 178,
+      cacheRead: 98_816,
+      totalTokens: 99_670,
+    });
+    expect(messages[1]?.usage).toMatchObject({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      contextUsage: {
+        state: "available",
+        promptTokens: 99_492,
+        totalTokens: 99_670,
+      },
+    });
   });
 
   it("embedded assistant gap-fill skips malformed transcript tail rows before deduping", async () => {

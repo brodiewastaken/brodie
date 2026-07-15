@@ -2311,6 +2311,18 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Tips
   - H2: Related
 
+## concepts/context-operational-state.md
+
+- Route: /concepts/context-operational-state
+- Headings:
+  - H1: Context and operational state
+  - H2: Typed queue identity and native images
+  - H2: External files
+  - H2: Workspace setup state
+  - H2: QMD collection identity
+  - H2: Generated-session archive
+  - H2: v2026.7.1 absorption
+
 ## concepts/context.md
 
 - Route: /concepts/context

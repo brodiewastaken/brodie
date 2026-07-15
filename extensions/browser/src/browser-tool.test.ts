@@ -698,7 +698,7 @@ describe("browser tool snapshot maxChars", () => {
     expect(browserClientMocks.browserSnapshot).not.toHaveBeenCalled();
   });
 
-  it("skips the default when maxChars is explicitly zero", async () => {
+  it("preserves an explicit zero maxChars override", async () => {
     const tool = createBrowserTool();
     await tool.execute?.("call-1", {
       action: "snapshot",
@@ -709,7 +709,7 @@ describe("browser tool snapshot maxChars", () => {
 
     expect(browserClientMocks.browserSnapshot).toHaveBeenCalled();
     const opts = lastMockCallArg<{ maxChars?: number }>(browserClientMocks.browserSnapshot, 1);
-    expect(Object.hasOwn(opts ?? {}, "maxChars")).toBe(false);
+    expect(opts.maxChars).toBe(0);
   });
 
   it("lists profiles", async () => {

@@ -13,6 +13,8 @@ export type MidTurnPrecheckRequest = {
   promptBudgetBeforeReserve: number;
   overflowTokens: number;
   toolResultReducibleChars: number;
+  /** Aggregate cap selected from measured precheck pressure for persisted recovery. */
+  toolResultAggregateMaxChars?: number;
   effectiveReserveTokens: number;
 };
 

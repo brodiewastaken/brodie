@@ -140,6 +140,7 @@ export async function assembleHarnessContextEngine(params: {
   citationsMode?: MemoryCitationsMode;
   modelId: string;
   prompt?: string;
+  runtimeContext?: ContextEngineRuntimeContext;
   runtimeSettings?: ContextEngineRuntimeSettings;
   contextEngineHostSupport?: ContextEngineHostSupport;
   harnessId?: string | null;
@@ -166,6 +167,7 @@ export async function assembleHarnessContextEngine(params: {
     model: params.modelId,
     runtimeSettings,
     ...(params.prompt !== undefined ? { prompt: params.prompt } : {}),
+    ...(params.runtimeContext ? { runtimeContext: params.runtimeContext } : {}),
   });
   return ensureAssembleResultShape(result, params.contextEngine.info.id);
 }

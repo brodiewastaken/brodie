@@ -92,6 +92,7 @@ export type ResolvedQmdLimitsConfig = {
 
 export type ResolvedQmdSessionConfig = {
   enabled: boolean;
+  name?: string;
   exportDir?: string;
   retentionDays?: number;
 };
@@ -308,11 +309,14 @@ function resolveSessionConfig(
   workspaceDir: string,
 ): ResolvedQmdSessionConfig {
   const enabled = Boolean(cfg?.enabled);
+  const nameRaw = cfg?.name?.trim();
+  const name = nameRaw ? sanitizeName(nameRaw) : undefined;
   const exportDirRaw = cfg?.exportDir?.trim();
   const exportDir = exportDirRaw ? resolvePath(exportDirRaw, workspaceDir) : undefined;
   const retentionDays = resolvePositiveIntegerConfig(cfg?.retentionDays);
   return {
     enabled,
+    name,
     exportDir,
     retentionDays,
   };
@@ -361,10 +365,15 @@ function resolveCustomPaths(
     }
     seenRoots.add(dedupeKey);
     const explicitName = entry.name?.trim();
-    const baseName =
-      explicitName && !isPathInsideRoot(collectionPath, workspaceDir)
-        ? explicitName
-        : scopeCollectionBase(explicitName || `custom-${index + 1}`, agentId);
+    // preserveName keeps the literal collection name for in-workspace paths: a
+    // rename is a brand-new qmd collection (full re-embed through the model
+    // provider) and external tooling addresses collections by name.
+    const keepExplicitName =
+      explicitName &&
+      (entry.preserveName === true || !isPathInsideRoot(collectionPath, workspaceDir));
+    const baseName = keepExplicitName
+      ? explicitName
+      : scopeCollectionBase(explicitName || `custom-${index + 1}`, agentId);
     const name = ensureUniqueName(baseName, existing);
     collections.push({
       name,

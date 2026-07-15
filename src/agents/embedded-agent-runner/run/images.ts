@@ -557,6 +557,13 @@ export async function detectAndLoadPromptImages(params: {
   workspaceOnly?: boolean;
   localRoots?: readonly string[];
   sandbox?: { root: string; bridge: SandboxFsBridge };
+  /**
+   * Prompt substrings that are descriptive metadata rather than image-load
+   * requests (e.g. queue-engine media descriptor path/uri fields). Detected
+   * refs whose raw or resolved value matches an entry are dropped so media the
+   * dispatcher already attaches natively is never loaded a second time.
+   */
+  excludeRefValues?: readonly string[];
 }): Promise<{
   /** Images for the current prompt (existingImages + detected in current prompt) */
   images: ImageContent[];
@@ -573,7 +580,16 @@ export async function detectAndLoadPromptImages(params: {
     };
   }
 
-  const allRefs = detectImageReferences(params.prompt);
+  const excludedRefValues =
+    params.excludeRefValues && params.excludeRefValues.length > 0
+      ? new Set(params.excludeRefValues.map((value) => normalizeRefForDedupe(value.trim())))
+      : undefined;
+  const allRefs = detectImageReferences(params.prompt).filter(
+    (ref) =>
+      !excludedRefValues ||
+      (!excludedRefValues.has(normalizeRefForDedupe(ref.raw)) &&
+        !excludedRefValues.has(normalizeRefForDedupe(ref.resolved))),
+  );
 
   if (allRefs.length === 0) {
     const sanitizedExistingImages = await sanitizeImagesWithLog(

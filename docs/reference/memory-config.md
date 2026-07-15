@@ -569,6 +569,11 @@ Built-in memory indexes live in each agent's OpenClaw SQLite database at
 
 Set `memory.backend = "qmd"` to enable. All QMD settings live under `memory.qmd`:
 
+QMD is authoritative when selected. If it cannot open or search, `memory_search`
+returns the QMD error and does not consult the builtin SQLite index. Run
+`openclaw memory status --json --agent <id>` to inspect that backend without
+starting an index sync, then retry the search after resolving the cause.
+
 | Key                      | Type      | Default  | Description                                                                           |
 | ------------------------ | --------- | -------- | ------------------------------------------------------------------------------------- |
 | `command`                | `string`  | `qmd`    | QMD executable path; set an absolute path when service `PATH` differs from your shell |
@@ -623,7 +628,7 @@ Requires `mcporter` installed and on PATH, plus a configured mcporter server tha
     | `limits.maxResults`       | `number` | `4`     | Max search results         |
     | `limits.maxSnippetChars`  | `number` | `450`   | Clamp snippet length       |
     | `limits.maxInjectedChars` | `number` | `2200`  | Clamp total injected chars |
-    | `limits.timeoutMs`        | `number` | `4000`  | Search timeout             |
+    | `limits.timeoutMs`        | `number` | `4000`  | QMD command timeout during QMD-backed search, including `memory_search`; setup, sync, and supplemental work keep the default tool deadline |
   </Accordion>
   <Accordion title="Scope">
     Controls which sessions can receive QMD search results. Same schema as [`session.sendPolicy`](/gateway/config-agents#session):

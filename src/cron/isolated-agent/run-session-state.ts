@@ -9,22 +9,27 @@ import { isSessionWorkAdmissionActive } from "../../sessions/session-lifecycle-a
 import type { SkillSnapshot } from "../../skills/types.js";
 import type { resolveCronSession } from "./session.js";
 
-type MutableSessionStore = Record<string, SessionEntry>;
-
 /** Mutable cron session entry updated by an isolated run before persistence. */
 export type MutableCronSessionEntry = SessionEntry;
 /** Resolved cron session plus its mutable backing store and active entry. */
 export type MutableCronSession = ReturnType<typeof resolveCronSession> & {
-  store: MutableSessionStore;
+  store: Record<string, SessionEntry>;
   sessionEntry: MutableCronSessionEntry;
 };
 /** Live provider/model/auth-profile selection reported by the running session. */
 export type CronLiveSelection = LiveSessionModelSelection;
 
-type UpdateSessionStore = (
-  storePath: string,
-  update: (store: MutableSessionStore) => void,
-) => Promise<void>;
+type ApplySessionEntryLifecycleMutation = (params: {
+  storePath: string;
+  skipMaintenance?: boolean;
+  upserts: Array<{
+    sessionKey: string;
+    buildEntry: (context: {
+      currentEntry?: SessionEntry;
+      sessionKey: string;
+    }) => SessionEntry | null | undefined;
+  }>;
+}) => Promise<unknown>;
 
 /** Persists the currently selected mutable cron session entry to the session store. */
 export type PersistCronSessionEntry = () => Promise<void>;
@@ -60,9 +65,8 @@ export function projectCronOwnershipFields(entry: SessionEntry): Partial<Session
 
 function toNonResumableCronSessionEntry(entry: SessionEntry): SessionEntry {
   const next = { ...entry } as Partial<SessionEntry>;
-  // If the transcript never materialized, do not persist stale resume handles
-  // that would make the next cron run believe a resumable CLI session exists.
-  delete next.sessionId;
+  // Keep the OpenClaw identity across metadata writes, but omit resume handles
+  // until the transcript exists so the next run cannot resume stale state.
   delete next.sessionFile;
   delete next.sessionStartedAt;
   delete next.lastInteractionAt;
@@ -77,13 +81,23 @@ export function createPersistCronSessionEntry(params: {
   isFastTestEnv: boolean;
   cronSession: MutableCronSession;
   agentSessionKey: string;
-  updateSessionStore: UpdateSessionStore;
+  runSessionKey?: string;
+  applySessionEntryLifecycleMutation: ApplySessionEntryLifecycleMutation;
 }): PersistCronSessionEntry {
   return async () => {
     if (params.isFastTestEnv) {
       return;
     }
     const liveEntry = params.cronSession.sessionEntry;
+    const runSessionKey = params.runSessionKey?.trim();
+    const persistsRunAlias = Boolean(runSessionKey && runSessionKey !== params.agentSessionKey);
+    if (persistsRunAlias && runSessionKey) {
+      const existingRunSessionKey = liveEntry.cronRunSessionKey?.trim();
+      if (existingRunSessionKey && existingRunSessionKey !== runSessionKey) {
+        throw new CronSessionLifecycleClaimError(runSessionKey);
+      }
+      liveEntry.cronRunSessionKey = runSessionKey;
+    }
     const persistedEntry =
       isCronSessionKey(params.agentSessionKey) &&
       liveEntry.sessionId &&
@@ -91,55 +105,81 @@ export function createPersistCronSessionEntry(params: {
         ? toNonResumableCronSessionEntry(liveEntry)
         : liveEntry;
     let committedEntry = persistedEntry;
+    let committedRunEntry: SessionEntry | undefined;
     let mergedLiveEntry = liveEntry;
-    await params.updateSessionStore(params.cronSession.storePath, (store) => {
-      const currentEntry = store[params.agentSessionKey];
-      const ownsCurrentRevision =
-        currentEntry?.lifecycleRevision === params.cronSession.lifecycleRevision;
-      const currentRevisionActive = Boolean(
-        currentEntry?.lifecycleRevision &&
-        isSessionWorkAdmissionActive(params.cronSession.storePath, [
-          resolveCronLifecycleRevisionIdentity(currentEntry.lifecycleRevision),
-        ]),
-      );
-      const initialEntryMatchesOwnershipFields =
-        currentEntry !== undefined &&
-        params.cronSession.initialSessionEntry !== undefined &&
-        isDeepStrictEqual(
-          projectCronOwnershipFields(currentEntry),
-          projectCronOwnershipFields(params.cronSession.initialSessionEntry),
-        );
-      const canClaimInitialRevision = params.cronSession.initialSessionEntry
-        ? !currentRevisionActive && initialEntryMatchesOwnershipFields
-        : currentEntry === undefined;
-      // Concurrent persistent runs can resolve the same initial row. Once one
-      // revision claims it, older owners must not reclaim it and delete newer state.
-      if (!ownsCurrentRevision && !canClaimInitialRevision) {
-        throw new CronSessionLifecycleClaimError(params.agentSessionKey);
-      }
-      if (
-        (ownsCurrentRevision || canClaimInitialRevision) &&
-        currentEntry &&
-        params.cronSession.initialSessionEntry
-      ) {
-        committedEntry = mergeSessionSnapshotChanges({
-          initial: params.cronSession.initialSessionEntry,
-          next: persistedEntry,
-          current: currentEntry,
-        });
-        mergedLiveEntry = mergeSessionSnapshotChanges({
-          initial: params.cronSession.initialSessionEntry,
-          next: liveEntry,
-          current: currentEntry,
-        });
-      }
-      store[params.agentSessionKey] = committedEntry;
+    await params.applySessionEntryLifecycleMutation({
+      storePath: params.cronSession.storePath,
+      skipMaintenance: true,
+      upserts: [
+        {
+          sessionKey: params.agentSessionKey,
+          buildEntry: ({ currentEntry }) => {
+            const ownsCurrentRevision =
+              currentEntry?.lifecycleRevision === params.cronSession.lifecycleRevision;
+            const currentRevisionActive = Boolean(
+              currentEntry?.lifecycleRevision &&
+              isSessionWorkAdmissionActive(params.cronSession.storePath, [
+                resolveCronLifecycleRevisionIdentity(currentEntry.lifecycleRevision),
+              ]),
+            );
+            const initialEntryMatchesOwnershipFields =
+              currentEntry !== undefined &&
+              params.cronSession.initialSessionEntry !== undefined &&
+              isDeepStrictEqual(
+                projectCronOwnershipFields(currentEntry),
+                projectCronOwnershipFields(params.cronSession.initialSessionEntry),
+              );
+            const canClaimInitialRevision = params.cronSession.initialSessionEntry
+              ? !currentRevisionActive && initialEntryMatchesOwnershipFields
+              : currentEntry === undefined;
+            // Once one revision claims a row, older owners cannot reclaim it.
+            if (!ownsCurrentRevision && !canClaimInitialRevision) {
+              throw new CronSessionLifecycleClaimError(params.agentSessionKey);
+            }
+            if (currentEntry && params.cronSession.initialSessionEntry) {
+              committedEntry = mergeSessionSnapshotChanges({
+                initial: params.cronSession.initialSessionEntry,
+                next: persistedEntry,
+                current: currentEntry,
+              });
+              mergedLiveEntry = mergeSessionSnapshotChanges({
+                initial: params.cronSession.initialSessionEntry,
+                next: liveEntry,
+                current: currentEntry,
+              });
+            }
+            return committedEntry;
+          },
+        },
+        ...(persistsRunAlias && runSessionKey
+          ? [
+              {
+                sessionKey: runSessionKey,
+                buildEntry: ({ currentEntry }: { currentEntry?: SessionEntry }) => {
+                  if (
+                    currentEntry &&
+                    (currentEntry.lifecycleRevision !== params.cronSession.lifecycleRevision ||
+                      currentEntry.archivedAt !== undefined ||
+                      currentEntry.cronArchiveReceipt !== undefined)
+                  ) {
+                    throw new CronSessionLifecycleClaimError(runSessionKey);
+                  }
+                  committedRunEntry = structuredClone(committedEntry);
+                  return committedRunEntry;
+                },
+              },
+            ]
+          : []),
+      ],
     });
-    // The storage projection may intentionally omit resume identity until its
-    // transcript exists. Keep that projection out of the active run object.
+    // The storage projection may omit resume handles until the transcript
+    // exists. Keep that projection out of the active run object.
     params.cronSession.sessionEntry = mergedLiveEntry;
     params.cronSession.initialSessionEntry = structuredClone(committedEntry);
     params.cronSession.store[params.agentSessionKey] = committedEntry;
+    if (runSessionKey && committedRunEntry) {
+      params.cronSession.store[runSessionKey] = committedRunEntry;
+    }
   };
 }
 

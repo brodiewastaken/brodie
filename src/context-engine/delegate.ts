@@ -66,6 +66,7 @@ export async function delegateCompactionToRuntime(
   return {
     ok: result.ok,
     compacted: result.compacted,
+    ...(result.exhausted === true ? { exhausted: true } : {}),
     reason: result.reason,
     result: result.result
       ? {

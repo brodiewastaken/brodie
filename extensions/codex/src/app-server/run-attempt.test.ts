@@ -2295,7 +2295,11 @@ describe("runCodexAppServerAttempt", () => {
     );
     const harness = createStartedThreadHarness();
     const params = createParams(sessionFile, workspaceDir);
-    params.contextTokenBudget = 300_000;
+    params.contextBudget = {
+      contextWindowTokens: 300_000,
+      effectiveReserveTokens: 0,
+      usablePromptTokenBudget: 300_000,
+    };
     params.prompt = `current prompt survives ${"p".repeat(80_000)}`;
 
     const run = runCodexAppServerAttempt(params);

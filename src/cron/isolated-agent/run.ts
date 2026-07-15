@@ -13,6 +13,7 @@ import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { CliDeps } from "../../cli/outbound-send-deps.js";
 import { resolveAgentModelPrimaryValue } from "../../config/model-input.js";
 import { resolveSessionWorkStartError } from "../../config/sessions/lifecycle.js";
+import { resolveStorePath } from "../../config/sessions/paths.js";
 import type { AgentDefaultsConfig } from "../../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
@@ -57,6 +58,7 @@ import {
   toolsAllowRequestsWebSearch,
 } from "../run-diagnostics.js";
 import { resolveCronAbortReasonText } from "../service/execution-errors.js";
+import { archiveCronSessionGeneration, isStableCronSessionKey } from "../session-lifecycle.js";
 import { resolveCronDeliverySessionKey } from "../session-target.js";
 import type {
   CronAgentExecutionPhaseUpdate,
@@ -617,6 +619,19 @@ async function prepareCronRunContext(params: {
     mainKey: input.cfg.session?.mainKey,
     cfg: input.cfg,
   });
+  const legacyArchivedEntry = loadCronSessionEntryLatest(
+    resolveStorePath(input.cfg.session?.store, { agentId }),
+    agentSessionKey,
+  );
+  if (legacyArchivedEntry?.archivedAt && isStableCronSessionKey(agentSessionKey)) {
+    await archiveCronSessionGeneration({
+      storePath: resolveStorePath(input.cfg.session?.store, { agentId }),
+      stableKey: agentSessionKey,
+      expectedSessionId: legacyArchivedEntry.sessionId,
+      expectedLifecycleRevision: legacyArchivedEntry.lifecycleRevision,
+      idempotencyId: `legacy:${legacyArchivedEntry.sessionId}`,
+    });
+  }
   const payloadHookExternalContentSource =
     input.job.payload.kind === "agentTurn" ? input.job.payload.externalContentSource : undefined;
   const hookExternalContentSource =
@@ -659,9 +674,10 @@ async function prepareCronRunContext(params: {
     isFastTestEnv: params.isFastTestEnv,
     cronSession,
     agentSessionKey,
-    updateSessionStore: async (storePath, update) => {
-      const { updateSessionStore } = await loadSessionStoreRuntime();
-      await updateSessionStore(storePath, update);
+    runSessionKey: input.job.deleteAfterRun === true ? undefined : runSessionKey,
+    applySessionEntryLifecycleMutation: async (mutation) => {
+      const { applySessionEntryLifecycleMutation } = await loadSessionStoreRuntime();
+      await applySessionEntryLifecycleMutation(mutation);
     },
   });
   const withRunSession: WithRunSession = (result) => ({

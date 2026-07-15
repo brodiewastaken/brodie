@@ -32,6 +32,8 @@ type BuildTrajectoryRunMetadataParams = {
   modelApi?: string | null;
   timeoutMs: number;
   fastMode?: boolean;
+  maxNativeImages?: number;
+  maxNativeImagesSource?: "model" | "global" | "default";
   thinkLevel?: string;
   reasoningLevel?: string;
   toolResultFormat?: string;
@@ -263,6 +265,8 @@ export function buildTrajectoryRunMetadata(
       name: params.modelId,
       api: params.modelApi,
       fastMode: params.fastMode ?? false,
+      maxNativeImages: params.maxNativeImages,
+      maxNativeImagesSource: params.maxNativeImagesSource,
       thinkLevel: params.thinkLevel,
       reasoningLevel: params.reasoningLevel ?? "off",
     },

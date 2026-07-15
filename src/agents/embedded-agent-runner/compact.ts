@@ -231,6 +231,7 @@ function prepareCompactionSessionAgent(params: {
   signal: AbortSignal;
   effectiveModel: ProviderRuntimeModel;
   resolvedApiKey?: string;
+  resolvedAuthMode?: string;
   authStorage: unknown;
   config?: OpenClawConfig;
   provider: string;
@@ -260,6 +261,7 @@ function prepareCompactionSessionAgent(params: {
     signal: params.signal,
     model: params.effectiveModel,
     resolvedApiKey: params.resolvedApiKey,
+    resolvedAuthMode: params.resolvedAuthMode,
     authProfileId: params.runtimePlan?.auth.forwardedAuthProfileId,
     authStorage: params.authStorage as never,
   });
@@ -1379,6 +1381,10 @@ async function compactEmbeddedAgentSessionDirectOnce(
             signal: runAbortController.signal,
             effectiveModel,
             resolvedApiKey: hasRuntimeAuthExchange ? undefined : apiKeyInfo?.apiKey,
+            // Runtime-exchange keeps the pre-exchange mode: the exchanged
+            // credential inherits the profile's auth class (mirrors
+            // run.ts resolveAttemptDispatchAuthMode / RuntimeAuthState).
+            resolvedAuthMode: apiKeyInfo?.mode,
             authStorage,
             config: params.config,
             provider,

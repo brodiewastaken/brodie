@@ -1328,10 +1328,14 @@ export const FIELD_HELP: Record<string, string> = {
     "Filters files under each indexed root using a glob pattern, with default `**/*.md`. Use narrower patterns to reduce noise and indexing cost when directories contain mixed file types.",
   "memory.qmd.paths.name":
     "Sets a stable collection name for an indexed path instead of deriving it from filesystem location. Use this when paths vary across machines but you want consistent collection identity.",
+  "memory.qmd.paths.preserveName":
+    "Keeps the configured QMD path name literal even when the path is inside the workspace. Enable this only when an existing remote collection must retain its exact identity.",
   "memory.qmd.sessions.enabled":
     "Indexes session transcripts into QMD so recall can include prior conversation content (experimental, default: false). Enable only when transcript memory is required and you accept larger index churn.",
   "memory.qmd.sessions.exportDir":
     "Overrides where sanitized session exports are written before QMD indexing. Use this when default state storage is constrained or when exports must land on a managed volume.",
+  "memory.qmd.sessions.name":
+    "Sets the exact QMD collection name for session exports. Use a stable name when remote indexing and queries already depend on that collection identity.",
   "memory.qmd.sessions.retentionDays":
     "Defines how long exported session files are kept before automatic pruning, in days (default: unlimited). Set a finite value for storage hygiene or compliance retention policies.",
   "memory.qmd.update.interval":

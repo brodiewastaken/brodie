@@ -626,6 +626,7 @@ function withDiagnosticTraceparentHeader(
   options: ModelCallStreamOptions,
   trace: DiagnosticTraceContext,
   state: ModelCallObservationState,
+  eventBase: ModelCallEventBase,
 ): ModelCallStreamOptions {
   const traceparent = formatDiagnosticTraceparent(trace);
   const originalOnPayload = options?.onPayload;
@@ -645,11 +646,27 @@ function withDiagnosticTraceparentHeader(
     return result;
   };
 
+  // Diagnostic trace context rides the stream options so provider transports
+  // (raw-byte capture) can correlate wire traffic with runtime model calls.
+  const existingTraceContext = isRecord(options?.traceContext) ? options.traceContext : {};
+  const traceContext = {
+    ...existingTraceContext,
+    runId: eventBase.runId,
+    ...(eventBase.sessionKey ? { sessionKey: eventBase.sessionKey } : {}),
+    ...(eventBase.sessionId ? { sessionId: eventBase.sessionId } : {}),
+    callId: eventBase.callId,
+    traceId: trace.traceId,
+    ...(trace.spanId ? { spanId: trace.spanId } : {}),
+    ...(traceparent ? { traceparent } : {}),
+  };
+  const baseOptions = {
+    ...options,
+    traceContext,
+    onPayload,
+  };
+
   if (!traceparent) {
-    return {
-      ...options,
-      onPayload,
-    };
+    return baseOptions;
   }
 
   const headers: Record<string, string> = {};
@@ -661,9 +678,8 @@ function withDiagnosticTraceparentHeader(
   }
   headers[TRACEPARENT_HEADER_NAME] = traceparent;
   return {
-    ...options,
+    ...baseOptions,
     headers,
-    onPayload,
   };
 }
 
@@ -867,7 +883,7 @@ export function wrapStreamFnWithDiagnosticModelCallEvents(
       modelContent,
       contentCapture: ctx.contentCapture,
     };
-    const propagatedOptions = withDiagnosticTraceparentHeader(options, trace, state);
+    const propagatedOptions = withDiagnosticTraceparentHeader(options, trace, state, eventBase);
 
     try {
       const result = streamFn(model, streamContext, propagatedOptions);

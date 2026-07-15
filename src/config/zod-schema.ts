@@ -222,6 +222,7 @@ const MemoryQmdPathSchema = z
     path: z.string(),
     name: z.string().optional(),
     pattern: z.string().optional(),
+    preserveName: z.boolean().optional(),
   })
   .strict();
 
@@ -229,6 +230,7 @@ const MemoryQmdSessionSchema = z
   .object({
     enabled: z.boolean().optional(),
     exportDir: z.string().optional(),
+    name: z.string().trim().min(1).optional(),
     retentionDays: z.number().int().nonnegative().optional(),
   })
   .strict();

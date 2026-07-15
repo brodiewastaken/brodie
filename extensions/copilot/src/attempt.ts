@@ -384,8 +384,8 @@ export async function runCopilotAttempt(
   const hookContextWindowFields = {
     ...(input.contextWindowInfo?.tokens
       ? { contextTokenBudget: input.contextWindowInfo.tokens }
-      : input.contextTokenBudget
-        ? { contextTokenBudget: input.contextTokenBudget }
+      : input.contextBudget?.contextWindowTokens
+        ? { contextTokenBudget: input.contextBudget.contextWindowTokens }
         : {}),
     ...(input.contextWindowInfo?.source
       ? { contextWindowSource: input.contextWindowInfo.source }

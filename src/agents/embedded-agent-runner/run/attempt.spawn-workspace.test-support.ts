@@ -550,6 +550,7 @@ vi.mock("../runs.js", () => ({
 vi.mock("./images.js", () => ({
   detectAndLoadPromptImages: (...args: unknown[]) =>
     (hoisted.detectAndLoadPromptImagesMock as (...args: unknown[]) => unknown)(...args),
+  modelSupportsImages: (model: { input?: string[] }) => model.input?.includes("image") ?? false,
 }));
 
 vi.mock("../../system-prompt-params.js", () => ({
@@ -1317,7 +1318,7 @@ export async function createContextEngineAttemptRunner(params: {
       thinkLevel: "off",
       disableTools: true,
       disableMessageTool: true,
-      contextTokenBudget: 2048,
+      contextWindowInfo: { tokens: 2048, source: "model" },
       contextEngine: {
         ...contextEngineRest,
         ingest:

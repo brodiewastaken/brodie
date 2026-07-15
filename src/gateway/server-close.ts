@@ -602,6 +602,11 @@ async function disposeAllBundleLspRuntimesOnDemand(): Promise<void> {
   await disposeAllBundleLspRuntimes();
 }
 
+async function closeActiveMemorySearchManagersOnDemand(): Promise<void> {
+  const { closeActiveMemorySearchManagers } = await import("../plugins/memory-runtime.js");
+  await closeActiveMemorySearchManagers();
+}
+
 async function stopGmailWatcherOnDemand(): Promise<void> {
   const { stopGmailWatcher } = await import("../hooks/gmail-watcher.js");
   await stopGmailWatcher();
@@ -678,6 +683,7 @@ export function createGatewayCloseHandler(
     postReadySidecars?: readonly GatewayPostReadySidecarHandle[];
     disposeSessionMcpRuntimes?: () => Promise<void>;
     disposeBundleLspRuntimes?: () => Promise<void>;
+    closeMemorySearchManagers?: () => Promise<void>;
     cron: { stop: () => void };
     heartbeatRunner: HeartbeatRunner;
     updateCheckStop?: (() => void) | null;
@@ -839,6 +845,13 @@ export function createGatewayCloseHandler(
           }
         });
       }
+      await measureCloseStep("memory-search-managers", () =>
+        shutdownStep(
+          "memory-search-managers",
+          params.closeMemorySearchManagers ?? closeActiveMemorySearchManagersOnDemand,
+          warnings,
+        ),
+      );
       if (params.pluginServices) {
         await measureCloseStep("plugin-services", () =>
           shutdownStep("plugin-services", () => params.pluginServices!.stop(), warnings),

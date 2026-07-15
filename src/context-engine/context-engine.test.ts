@@ -609,6 +609,28 @@ describe("Engine contract tests", () => {
     });
   });
 
+  it("delegateCompactionToRuntime preserves explicit compaction exhaustion", async () => {
+    compactEmbeddedAgentSessionDirectMock.mockResolvedValue({
+      ok: false,
+      compacted: false,
+      exhausted: true,
+      reason: "no eligible context to compact",
+    });
+
+    const result = await delegateCompactionToRuntime({
+      sessionId: "s-exhausted",
+      sessionFile: "/tmp/session.json",
+      tokenBudget: 230_000,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      compacted: false,
+      exhausted: true,
+      reason: "no eligible context to compact",
+    });
+  });
+
   it("delegateCompactionToRuntime reports the rotated successor as a typed session target", async () => {
     compactEmbeddedAgentSessionDirectMock.mockResolvedValue({
       ok: true,

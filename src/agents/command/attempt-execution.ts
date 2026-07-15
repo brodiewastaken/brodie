@@ -56,6 +56,7 @@ import { resolveAgentRunAbortLifecycleFields } from "../run-termination.js";
 import { buildAgentRuntimeAuthPlan } from "../runtime-plan/auth.js";
 import type { AgentMessage } from "../runtime/index.js";
 import { buildUsageWithNoCost } from "../stream-message-shared.js";
+import { deriveContextPromptTokens, type ContextUsage } from "../usage.js";
 import {
   buildClaudeCliFallbackContextPrelude,
   claudeCliSessionTranscriptHasContent,
@@ -116,6 +117,7 @@ type TranscriptUsage = {
   output?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  contextUsage?: ContextUsage;
   total?: number;
 };
 
@@ -302,8 +304,40 @@ function resolveTranscriptUsage(usage: PersistTextTurnTranscriptParams["assistan
     output: usage.output,
     cacheRead: usage.cacheRead,
     cacheWrite: usage.cacheWrite,
+    contextUsage: usage.contextUsage,
     totalTokens: usage.total,
   });
+}
+
+function resolveEmbeddedGapFillContextUsage(
+  agentMeta: EmbeddedAgentRunResult["meta"]["agentMeta"],
+): ContextUsage {
+  const lastCallUsage = agentMeta?.lastCallUsage;
+  if (!lastCallUsage || lastCallUsage.contextUsage?.state === "unavailable") {
+    return { state: "unavailable" };
+  }
+  if (lastCallUsage.contextUsage?.state === "available") {
+    return lastCallUsage.contextUsage;
+  }
+
+  const promptTokens = deriveContextPromptTokens({
+    lastCallUsage,
+    promptTokens: agentMeta?.promptTokens,
+  });
+  const totalTokens =
+    lastCallUsage.total ??
+    (promptTokens !== undefined && lastCallUsage.output !== undefined
+      ? promptTokens + lastCallUsage.output
+      : undefined);
+  if (
+    promptTokens === undefined ||
+    totalTokens === undefined ||
+    !Number.isFinite(totalTokens) ||
+    totalTokens < promptTokens
+  ) {
+    return { state: "unavailable" };
+  }
+  return { state: "available", promptTokens, totalTokens };
 }
 
 async function persistTextTurnTranscript(
@@ -453,6 +487,11 @@ export async function persistCliTurnTranscript(params: {
   const model = params.result.meta.agentMeta?.model?.trim() ?? "default";
   const gapFill = params.embeddedAssistantGapFill ?? false;
   const skipUserTurn = gapFill || params.skipUserTurn === true;
+  // Embedded runs already persisted each provider response with its billing usage.
+  // The synthetic visible-reply row must carry only the final context snapshot.
+  const transcriptUsage: TranscriptUsage | undefined = gapFill
+    ? { contextUsage: resolveEmbeddedGapFillContextUsage(params.result.meta.agentMeta) }
+    : params.result.meta.agentMeta?.usage;
 
   return await persistTextTurnTranscript({
     body: skipUserTurn ? "" : params.body,
@@ -473,7 +512,7 @@ export async function persistCliTurnTranscript(params: {
       api: "cli",
       provider,
       model,
-      usage: params.result.meta.agentMeta?.usage,
+      usage: transcriptUsage,
     },
   });
 }

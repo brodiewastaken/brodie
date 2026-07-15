@@ -47,6 +47,8 @@ export type SessionSendPolicyConfig = {
 export type MemoryQmdIndexPath = {
   path: string;
   name?: string;
+  /** Keep the literal `name` for in-workspace paths (renames force a full re-embed). */
+  preserveName?: boolean;
   pattern?: string;
 };
 
@@ -60,6 +62,8 @@ export type MemoryQmdMcporterConfig = {
 /** QMD session export config. */
 type MemoryQmdSessionConfig = {
   enabled?: boolean;
+  /** Session-transcript collection name override (default `sessions-<agentId>`). */
+  name?: string;
   exportDir?: string;
   retentionDays?: number;
 };

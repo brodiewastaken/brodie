@@ -1,5 +1,7 @@
 // User-turn transcript type contracts shared by runtime and queue option types.
 import type { AgentMessage } from "../../packages/agent-core/src/types.js";
+import type { HumanInboundBatch } from "../scheduler/human-inbound.js";
+import type { QueueBatchIdentity } from "../scheduler/queue-batch-identity.js";
 import type { InputProvenance } from "./input-provenance.js";
 
 export type UserTurnSessionEntry = {
@@ -26,6 +28,10 @@ export type UserTurnInput = {
   timestamp?: number;
   idempotencyKey?: string;
   senderIsOwner?: boolean;
+  /** Trusted queue identity persisted as internal message metadata. */
+  queueBatchIdentity?: QueueBatchIdentity;
+  /** Exact typed source batch used to build the model-visible inbound envelope. */
+  humanInboundBatch?: HumanInboundBatch;
   provenance?: InputProvenance;
   mediaOnlyText?: string;
   /** Durable participant attribution. Callers must opt in at the product boundary. */

@@ -1418,6 +1418,7 @@ export function sessionLikelyHasOversizedToolResults(params: {
   messages: AgentMessage[];
   contextWindowTokens: number;
   maxCharsOverride?: number;
+  aggregateMaxCharsOverride?: number;
 }): boolean {
   const estimate = estimateToolResultReductionPotential(params);
   return estimate.oversizedCount > 0 || estimate.aggregateReducibleChars > 0;

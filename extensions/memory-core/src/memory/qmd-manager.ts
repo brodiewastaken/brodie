@@ -11,6 +11,7 @@ import { withFileLock } from "openclaw/plugin-sdk/file-lock";
 import {
   createSubsystemLogger,
   isPathInside,
+  onSessionTranscriptUpdate,
   root,
   resolveAgentContextLimits,
   resolveMemorySearchSyncConfig,
@@ -68,9 +69,11 @@ import { asRecord } from "../dreaming-shared.js";
 import {
   attachQmdSessionArtifactHit,
   copyQmdSessionArtifactHit,
+  deleteQmdSessionArtifactMappings,
   refreshQmdSessionArtifactDocIds,
   replaceQmdSessionArtifactMappings,
   resolveQmdSessionArtifactIdentity,
+  upsertQmdSessionArtifactMappings,
   type QmdSessionArtifactMapping,
 } from "../qmd-session-artifacts.js";
 import { resolveQmdCollectionPatternFlags, type QmdCollectionPatternFlag } from "./qmd-compat.js";
@@ -84,6 +87,20 @@ import {
   type QmdRuntimeManagedCollection,
   type QmdRuntimeMultiCollectionProbeCacheContext,
 } from "./qmd-runtime-cache.js";
+import {
+  clearQmdSessionExportDirtyEntry,
+  markQmdSessionExportFullReconcileRequired,
+  queueQmdSessionExportDirtyEntry,
+  readQmdSessionExportBaseline,
+  readQmdSessionExportDirtyEntries,
+  writeQmdSessionExportBaseline,
+  type QmdSessionExportDirtyWork,
+} from "./qmd-session-export-state.js";
+import {
+  MEMORY_SEARCH_DEADLINE_CONTROL,
+  type MemorySearchDeadlineAction,
+  type MemorySearchDeadlineControlOptions,
+} from "./search-deadline.js";
 import {
   countChokidarWatchedEntries,
   type MemoryWatchPressureWarningState,
@@ -123,6 +140,7 @@ const MAX_QMD_OUTPUT_CHARS = 200_000;
 const NUL_MARKER_RE = /(?:\^@|\\0|\\x00|\\u0000|null\s*byte|nul\s*byte)/i;
 const QMD_EMBED_BACKOFF_BASE_MS = 60_000;
 const QMD_EMBED_BACKOFF_MAX_MS = 60 * 60 * 1000;
+const QMD_SESSION_FULL_RECONCILE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const QMD_EMBED_LOCK_MIN_WAIT_MS = 15 * 60 * 1000;
 const QMD_WRITE_LOCK_MIN_WAIT_MS = 5 * 60 * 1000;
 const QMD_EMBED_LOCK_RETRY_TEMPLATE = {
@@ -322,6 +340,19 @@ type SessionExporterConfig = {
   collectionName: string;
 };
 
+type QmdSessionExportMode = "dirty";
+type QmdRegularUpdateScope = "all" | "non-session" | "none";
+
+type QmdTargetedSessionMutation = {
+  deletePaths: string[];
+  upsertPaths: string[];
+};
+
+type QmdDirtySessionExportAcceptance = {
+  acknowledge: () => Promise<void>;
+  refreshMappings: () => void;
+};
+
 type ListedCollection = {
   path?: string;
   pattern?: string;
@@ -346,6 +377,19 @@ type QmdSearchRuntimeDebugContext = {
   multiCollectionProbe?: QmdMultiCollectionProbeDebug;
   searchPlan?: QmdSearchPlanDebug;
 };
+type QmdCommandPhaseReporter = (action: MemorySearchDeadlineAction) => void;
+
+async function runInQmdCommandPhase<T>(
+  report: QmdCommandPhaseReporter | undefined,
+  task: () => Promise<T>,
+): Promise<T> {
+  report?.("pause");
+  try {
+    return await task();
+  } finally {
+    report?.("resume");
+  }
+}
 
 type QmdManagerMode = "full" | "status" | "cli";
 type QmdManagerRuntimeConfig = {
@@ -364,8 +408,10 @@ type QmdMcporterSearchParams =
       limit: number;
       minScore: number;
       collection?: string;
+      collections?: string[];
       timeoutMs: number;
       signal?: AbortSignal;
+      reportCommandPhase?: QmdCommandPhaseReporter;
     }
   | {
       mcporter: ResolvedQmdMcporterConfig;
@@ -376,8 +422,10 @@ type QmdMcporterSearchParams =
       limit: number;
       minScore: number;
       collection?: string;
+      collections?: string[];
       timeoutMs: number;
       signal?: AbortSignal;
+      reportCommandPhase?: QmdCommandPhaseReporter;
     };
 type QmdMcporterAcrossCollectionsParams =
   | {
@@ -389,6 +437,7 @@ type QmdMcporterAcrossCollectionsParams =
       minScore: number;
       collectionNames: string[];
       signal?: AbortSignal;
+      reportCommandPhase?: QmdCommandPhaseReporter;
     }
   | {
       tool: BuiltinQmdMcpTool;
@@ -399,6 +448,7 @@ type QmdMcporterAcrossCollectionsParams =
       minScore: number;
       collectionNames: string[];
       signal?: AbortSignal;
+      reportCommandPhase?: QmdCommandPhaseReporter;
     };
 
 export class QmdMemoryManager implements MemorySearchManager {
@@ -450,6 +500,11 @@ export class QmdMemoryManager implements MemorySearchManager {
   >();
   private readonly maxQmdOutputChars = MAX_QMD_OUTPUT_CHARS;
   private readonly sessionExporter: SessionExporterConfig | null;
+  private sessionExportTimer: NodeJS.Timeout | null = null;
+  private sessionExportUnsubscribe: (() => void) | null = null;
+  private fullReconcileTimer: NodeJS.Timeout | null = null;
+  private fullSessionRepairRetryTimer: NodeJS.Timeout | null = null;
+  private readonly shutdownAbortController = new AbortController();
   private updateTimer: NodeJS.Timeout | null = null;
   private embedTimer: NodeJS.Timeout | null = null;
   private watcher: FSWatcher | null = null;
@@ -458,7 +513,11 @@ export class QmdMemoryManager implements MemorySearchManager {
   private readonly watchPressureWarning: MemoryWatchPressureWarningState = { shown: false };
   private pendingUpdate: Promise<void> | null = null;
   private queuedForcedUpdate: Promise<void> | null = null;
-  private queuedForcedRuns = 0;
+  private readonly queuedForcedUpdateRequests: Array<{
+    reason: string;
+    sessionExportMode?: QmdSessionExportMode;
+    regularUpdateScope?: QmdRegularUpdateScope;
+  }> = [];
   private dirty = false;
   private closed = false;
   private mode: QmdManagerMode = "full";
@@ -549,6 +608,9 @@ export class QmdMemoryManager implements MemorySearchManager {
     await fs.mkdir(path.dirname(this.indexPath), { recursive: true });
     if (this.sessionExporter) {
       await fs.mkdir(this.sessionExporter.dir, { recursive: true });
+      if (mode !== "cli") {
+        this.ensureSessionExportListener();
+      }
     }
 
     // QMD stores its ML models under $XDG_CACHE_HOME/qmd/models/.  Because we
@@ -577,8 +639,26 @@ export class QmdMemoryManager implements MemorySearchManager {
       `qmd manager initialized for agent "${this.agentId}" mode=full collections=${this.qmd.collections.length} durationMs=${Date.now() - startTime}`,
     );
 
+    const sessionBaseline = this.sessionExporter
+      ? await readQmdSessionExportBaseline({
+          workspaceDir: this.workspaceDir,
+          agentId: this.agentId,
+          collectionName: this.sessionExporter.collectionName,
+        })
+      : null;
+    const needsSessionBaseline =
+      this.sessionExporter !== null &&
+      (sessionBaseline === null || sessionBaseline.requiresFullReconcile);
     if (this.qmd.update.onBoot) {
-      const bootRun = this.runUpdate("boot", true);
+      // A fresh install needs one complete session export before incremental work
+      // can be trusted. Afterwards startup keeps the last good session index and
+      // drains only durable mutations while still refreshing non-session memory.
+      const bootRun = needsSessionBaseline
+        ? this.runUpdate("boot:baseline", true)
+        : this.runUpdate("boot", true, {
+            sessionExportMode: this.sessionExporter ? "dirty" : undefined,
+            regularUpdateScope: this.sessionExporter ? "non-session" : "all",
+          });
       if (this.qmd.update.waitForBootSync) {
         await bootRun.catch((err: unknown) => {
           log.warn(`qmd boot update failed: ${String(err)}`);
@@ -588,18 +668,39 @@ export class QmdMemoryManager implements MemorySearchManager {
           log.warn(`qmd boot update failed: ${String(err)}`);
         });
       }
+    } else if (needsSessionBaseline) {
+      void this.runUpdate("boot:baseline", true).catch((err: unknown) => {
+        log.warn(`qmd required session baseline failed: ${String(err)}`);
+      });
     }
     if (this.qmd.update.intervalMs > 0) {
       this.updateTimer = setInterval(() => {
-        void this.runUpdate("interval").catch((err: unknown) => {
+        void this.runUpdate("interval", undefined, {
+          sessionExportMode: this.sessionExporter ? "dirty" : undefined,
+          regularUpdateScope: this.sessionExporter ? "non-session" : "all",
+        }).catch((err: unknown) => {
           log.warn(`qmd update failed (${String(err)})`);
         });
       }, this.qmd.update.intervalMs);
     }
+    if (this.sessionExporter) {
+      const remainingMs = sessionBaseline
+        ? Math.max(
+            0,
+            sessionBaseline.lastFullReconcileAtMs +
+              QMD_SESSION_FULL_RECONCILE_INTERVAL_MS -
+              Date.now(),
+          )
+        : QMD_SESSION_FULL_RECONCILE_INTERVAL_MS;
+      this.scheduleSessionFullReconciliation(remainingMs);
+    }
     if (this.shouldScheduleEmbedTimer()) {
       const startPeriodicEmbedTimer = () => {
         this.embedTimer = setInterval(() => {
-          void this.runUpdate("embed-interval").catch((err: unknown) => {
+          void this.runUpdate("embed-interval", undefined, {
+            sessionExportMode: this.sessionExporter ? "dirty" : undefined,
+            regularUpdateScope: this.sessionExporter ? "non-session" : "all",
+          }).catch((err: unknown) => {
             log.warn(`qmd embed interval update failed (${String(err)})`);
           });
         }, this.qmd.update.embedIntervalMs);
@@ -611,7 +712,10 @@ export class QmdMemoryManager implements MemorySearchManager {
           if (this.closed) {
             return;
           }
-          void this.runUpdate("embed-interval")
+          void this.runUpdate("embed-interval", undefined, {
+            sessionExportMode: this.sessionExporter ? "dirty" : undefined,
+            regularUpdateScope: this.sessionExporter ? "non-session" : "all",
+          })
             .catch((err: unknown) => {
               log.warn(`qmd embed interval update failed (${String(err)})`);
             })
@@ -1529,13 +1633,14 @@ export class QmdMemoryManager implements MemorySearchManager {
        * timeout.
        */
       signal?: AbortSignal;
-    },
+    } & MemorySearchDeadlineControlOptions,
   ): Promise<MemorySearchResult[]> {
     if (!this.isScopeAllowed(opts?.sessionKey)) {
       this.logScopeDenied(opts?.sessionKey);
       return [];
     }
     const searchSignal = opts?.signal;
+    const reportCommandPhase = opts?.[MEMORY_SEARCH_DEADLINE_CONTROL];
     if (searchSignal?.aborted) {
       throw asAbortError(searchSignal);
     }
@@ -1581,6 +1686,7 @@ export class QmdMemoryManager implements MemorySearchManager {
                 minScore,
                 collectionNames,
                 signal: searchSignal,
+                reportCommandPhase,
               });
             }
             return await this.runQmdSearchViaMcporter({
@@ -1594,6 +1700,7 @@ export class QmdMemoryManager implements MemorySearchManager {
               collection: collectionNames[0],
               timeoutMs: this.qmd.limits.timeoutMs,
               signal: searchSignal,
+              reportCommandPhase,
             });
           }
           const tool = this.resolveQmdMcpTool(qmdSearchCommand);
@@ -1607,6 +1714,7 @@ export class QmdMemoryManager implements MemorySearchManager {
               minScore,
               collectionNames,
               signal: searchSignal,
+              reportCommandPhase,
             });
           }
           return await this.runQmdSearchViaMcporter({
@@ -1620,6 +1728,7 @@ export class QmdMemoryManager implements MemorySearchManager {
             collection: collectionNames[0],
             timeoutMs: this.qmd.limits.timeoutMs,
             signal: searchSignal,
+            reportCommandPhase,
           });
         }
         const collectionGroups = await this.resolveCollectionSearchGroups(
@@ -1641,11 +1750,12 @@ export class QmdMemoryManager implements MemorySearchManager {
             collectionGroups,
             qmdSearchCommand,
             searchSignal,
+            reportCommandPhase,
           );
         }
         const args = this.buildSearchArgs(qmdSearchCommand, trimmed, limit);
         args.push(...this.buildCollectionFilterArgs(collectionGroups[0] ?? collectionNames));
-        return await this.runQmdSearch(args, qmdSearchCommand, searchSignal);
+        return await this.runQmdSearch(args, qmdSearchCommand, searchSignal, reportCommandPhase);
       } catch (err) {
         if (allowMissingCollectionRepair && this.isMissingCollectionSearchError(err)) {
           throw err;
@@ -1682,13 +1792,14 @@ export class QmdMemoryManager implements MemorySearchManager {
                 collectionGroups,
                 "query",
                 searchSignal,
+                reportCommandPhase,
               );
             }
             const fallbackArgs = this.buildSearchArgs("query", trimmed, limit);
             fallbackArgs.push(
               ...this.buildCollectionFilterArgs(collectionGroups[0] ?? collectionNames),
             );
-            return await this.runQmdSearch(fallbackArgs, "query", searchSignal);
+            return await this.runQmdSearch(fallbackArgs, "query", searchSignal, reportCommandPhase);
           } catch (fallbackErr) {
             log.warn(`qmd query fallback failed: ${String(fallbackErr)}`);
             throw fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr));
@@ -1927,6 +2038,7 @@ export class QmdMemoryManager implements MemorySearchManager {
     }
     this.closed = true;
     this.resolveCloseSignal();
+    this.shutdownAbortController.abort(new Error(`qmd manager closed for agent "${this.agentId}"`));
     if (this.updateTimer) {
       clearInterval(this.updateTimer);
       this.updateTimer = null;
@@ -1939,11 +2051,25 @@ export class QmdMemoryManager implements MemorySearchManager {
       clearTimeout(this.watchTimer);
       this.watchTimer = null;
     }
+    if (this.sessionExportTimer) {
+      clearTimeout(this.sessionExportTimer);
+      this.sessionExportTimer = null;
+    }
+    if (this.fullReconcileTimer) {
+      clearInterval(this.fullReconcileTimer);
+      this.fullReconcileTimer = null;
+    }
+    if (this.fullSessionRepairRetryTimer) {
+      clearTimeout(this.fullSessionRepairRetryTimer);
+      this.fullSessionRepairRetryTimer = null;
+    }
     if (this.watcher) {
       await this.watcher.close().catch(() => undefined);
       this.watcher = null;
     }
-    this.queuedForcedRuns = 0;
+    this.sessionExportUnsubscribe?.();
+    this.sessionExportUnsubscribe = null;
+    this.queuedForcedUpdateRequests.splice(0);
     await this.pendingUpdate?.catch(() => undefined);
     await this.queuedForcedUpdate?.catch(() => undefined);
     if (this.db) {
@@ -1955,68 +2081,163 @@ export class QmdMemoryManager implements MemorySearchManager {
   private async runUpdate(
     reason: string,
     force?: boolean,
-    opts?: { fromForcedQueue?: boolean },
+    opts?: {
+      fromForcedQueue?: boolean;
+      sessionExportMode?: QmdSessionExportMode;
+      regularUpdateScope?: QmdRegularUpdateScope;
+    },
   ): Promise<void> {
     if (this.closed) {
       return;
     }
     if (this.pendingUpdate) {
       if (force) {
-        return this.enqueueForcedUpdate(reason);
+        return this.enqueueForcedUpdate(reason, opts?.sessionExportMode, opts?.regularUpdateScope);
       }
       return this.pendingUpdate;
     }
     if (this.queuedForcedUpdate && !opts?.fromForcedQueue) {
       if (force) {
-        return this.enqueueForcedUpdate(reason);
+        return this.enqueueForcedUpdate(reason, opts?.sessionExportMode, opts?.regularUpdateScope);
       }
       return this.queuedForcedUpdate;
     }
     if (this.shouldSkipUpdate(force)) {
       return;
     }
+    const isDirtySessionRun = this.sessionExporter !== null && opts?.sessionExportMode === "dirty";
+    const regularUpdateScope = opts?.regularUpdateScope ?? (isDirtySessionRun ? "none" : "all");
+    const isFullSessionRepair =
+      this.sessionExporter !== null && !isDirtySessionRun && regularUpdateScope === "all";
     const run = async () => {
       const startTime = Date.now();
       log.debug(
         `qmd sync started for agent "${this.agentId}" reason=${reason} force=${force === true}`,
       );
-      await this.withQmdUpdateQueue(async () => {
-        if (this.closed) {
-          return;
+      const fullBaselineBeforeRepair = isFullSessionRepair
+        ? await readQmdSessionExportBaseline({
+            workspaceDir: this.workspaceDir,
+            agentId: this.agentId,
+            collectionName: this.sessionExporter?.collectionName ?? "",
+          })
+        : null;
+      const fullBaselineAtStart = isFullSessionRepair
+        ? await markQmdSessionExportFullReconcileRequired({
+            workspaceDir: this.workspaceDir,
+            agentId: this.agentId,
+            collectionName: this.sessionExporter?.collectionName ?? "",
+            expectedGeneration: fullBaselineBeforeRepair?.generation ?? null,
+          })
+        : null;
+      const dirtyEntriesAtFullRepairStart = isFullSessionRepair
+        ? await readQmdSessionExportDirtyEntries({
+            workspaceDir: this.workspaceDir,
+            agentId: this.agentId,
+          })
+        : [];
+      if (isFullSessionRepair && !fullBaselineAtStart) {
+        throw new Error("qmd full session repair baseline changed before repair start");
+      }
+      let acceptDirtySessionExport: QmdDirtySessionExportAcceptance | null;
+      try {
+        acceptDirtySessionExport =
+          (await this.withQmdUpdateQueue(async () => {
+            if (this.closed) {
+              return null;
+            }
+            let dirtySessionAcceptance: QmdDirtySessionExportAcceptance | null = null;
+            if (isDirtySessionRun) {
+              dirtySessionAcceptance = await this.exportDirtySessions();
+            } else if (this.sessionExporter) {
+              await this.exportSessions();
+            }
+            if (regularUpdateScope !== "none") {
+              await this.runQmdUpdateWithRetry(reason, regularUpdateScope);
+            }
+            if (this.sessionExporter) {
+              this.refreshSessionArtifactDocIds();
+            }
+            this.dirty = false;
+            return dirtySessionAcceptance;
+          })) ?? null;
+      } catch (err) {
+        if (isFullSessionRepair) {
+          this.scheduleFullSessionRepairRetry();
         }
-        if (this.sessionExporter) {
-          await this.exportSessions();
-        }
-        await this.runQmdUpdateWithRetry(reason);
-        if (this.sessionExporter) {
-          this.refreshSessionArtifactDocIds();
-        }
-        this.dirty = false;
-      });
+        throw err;
+      }
+      if (acceptDirtySessionExport) {
+        // The update queue holds the per-store lock, so release it before taking
+        // the global-then-store embed locks. Acknowledgement stays behind this
+        // embed and the derived mapping refresh.
+        await this.runQmdTargetedSessionEmbed(acceptDirtySessionExport.refreshMappings);
+        await acceptDirtySessionExport.acknowledge();
+      }
       if (this.closed) {
         return;
       }
-      if (this.shouldRunEmbed(force)) {
-        try {
-          // Wait for embed capacity before taking the per-store write lock. The
-          // store lock should protect active qmd writes only, not time spent queued
-          // behind unrelated agents' embeds.
-          await this.withQmdEmbedQueue(() =>
-            this.withQmdGlobalEmbedLock(() =>
-              this.withQmdStoreWriteLock(async () => {
-                await this.runQmd(["embed"], {
-                  timeoutMs: this.qmd.update.embedTimeoutMs,
-                  discardOutput: true,
-                });
-              }),
-            ),
-          );
-          this.lastEmbedAt = Date.now();
-          this.embedBackoffUntil = null;
-          this.embedFailureCount = 0;
-        } catch (err) {
-          this.noteEmbedFailure(reason, err);
+      let fullSessionEmbedComplete = !isFullSessionRepair || !qmdUsesVectors(this.qmd.searchMode);
+      if (regularUpdateScope !== "none" && this.shouldRunEmbed(force)) {
+        const embedCommands = this.buildQmdEmbedCommands(regularUpdateScope);
+        if (embedCommands.length > 0) {
+          try {
+            // Wait for embed capacity before taking the per-store write lock. The
+            // store lock should protect active qmd writes only, not time spent queued
+            // behind unrelated agents' embeds.
+            await this.withQmdEmbedQueue(() =>
+              this.withQmdGlobalEmbedLock(() =>
+                this.withQmdStoreWriteLock(async () => {
+                  for (const args of embedCommands) {
+                    await this.runQmd(args, {
+                      timeoutMs: this.qmd.update.embedTimeoutMs,
+                      discardOutput: true,
+                    });
+                  }
+                }),
+              ),
+            );
+            this.lastEmbedAt = Date.now();
+            this.embedBackoffUntil = null;
+            this.embedFailureCount = 0;
+            if (isFullSessionRepair) {
+              fullSessionEmbedComplete = true;
+            }
+          } catch (err) {
+            this.noteEmbedFailure(reason, err);
+          }
         }
+      }
+      if (isFullSessionRepair && fullSessionEmbedComplete) {
+        const accepted = await writeQmdSessionExportBaseline({
+          workspaceDir: this.workspaceDir,
+          agentId: this.agentId,
+          collectionName: this.sessionExporter?.collectionName ?? "",
+          expectedGeneration: fullBaselineAtStart?.generation ?? null,
+        });
+        if (!accepted) {
+          this.scheduleFullSessionRepairRetry();
+        } else {
+          if (this.fullSessionRepairRetryTimer) {
+            clearTimeout(this.fullSessionRepairRetryTimer);
+            this.fullSessionRepairRetryTimer = null;
+          }
+          await Promise.all(
+            dirtyEntriesAtFullRepairStart.map(async (entry) => {
+              await clearQmdSessionExportDirtyEntry({
+                workspaceDir: this.workspaceDir,
+                clearItems: entry.clearItems,
+              });
+            }),
+          );
+        }
+      } else if (isFullSessionRepair) {
+        await markQmdSessionExportFullReconcileRequired({
+          workspaceDir: this.workspaceDir,
+          agentId: this.agentId,
+          collectionName: this.sessionExporter?.collectionName ?? "",
+          expectedGeneration: fullBaselineAtStart?.generation ?? null,
+        });
+        this.scheduleFullSessionRepairRetry();
       }
       if (this.closed) {
         return;
@@ -2031,6 +2252,80 @@ export class QmdMemoryManager implements MemorySearchManager {
       this.pendingUpdate = null;
     });
     await this.pendingUpdate;
+  }
+
+  private ensureSessionExportListener(): void {
+    if (!this.sessionExporter || this.sessionExportUnsubscribe) {
+      return;
+    }
+    this.sessionExportUnsubscribe = onSessionTranscriptUpdate((update) => {
+      const sessionFile = update.sessionFile.trim();
+      if (!this.isQmdSessionFileForAgent(sessionFile)) {
+        return;
+      }
+      void this.queueSessionExportUpdate(sessionFile).catch((err: unknown) => {
+        log.warn(`failed to queue qmd session export update: ${String(err)}`);
+      });
+    });
+  }
+
+  private isQmdSessionFileForAgent(sessionFile: string): boolean {
+    const identity = resolveSessionIdentityForTranscriptFile(sessionFile);
+    return identity?.agentId === this.agentId;
+  }
+
+  private async queueSessionExportUpdate(sessionFile: string): Promise<void> {
+    try {
+      await queueQmdSessionExportDirtyEntry({
+        workspaceDir: this.workspaceDir,
+        agentId: this.agentId,
+        sessionFile,
+        operation: "upsert",
+      });
+      const archivedSource = this.resolveArchivedSessionSource(sessionFile);
+      if (archivedSource) {
+        await queueQmdSessionExportDirtyEntry({
+          workspaceDir: this.workspaceDir,
+          agentId: this.agentId,
+          sessionFile: archivedSource,
+          operation: "delete",
+        });
+      }
+    } catch (err) {
+      await markQmdSessionExportFullReconcileRequired({
+        workspaceDir: this.workspaceDir,
+        agentId: this.agentId,
+        collectionName: this.sessionExporter?.collectionName ?? "",
+      });
+      void this.runUpdate("session-export-overflow", true).catch((repairErr: unknown) => {
+        log.warn(`qmd session export overflow repair failed: ${String(repairErr)}`);
+      });
+      throw err;
+    }
+    this.scheduleDirtySessionExport();
+  }
+
+  private scheduleDirtySessionExport(): void {
+    if (this.sessionExportTimer || this.closed) {
+      return;
+    }
+    // Coalesce transcript bursts before acquiring QMD's cross-process write queue.
+    // A one-second ceiling keeps live recall fresh even when normal corpus scans use
+    // a much longer debounce window.
+    const delayMs = Math.min(this.qmd.update.debounceMs, 1_000);
+    this.sessionExportTimer = setTimeout(() => {
+      this.sessionExportTimer = null;
+      void this.runUpdate("session-transcript", true, { sessionExportMode: "dirty" }).catch(
+        (err: unknown) => {
+          log.warn(`qmd session export update failed: ${String(err)}`);
+        },
+      );
+    }, delayMs);
+  }
+
+  private resolveArchivedSessionSource(sessionFile: string): string | null {
+    const match = sessionFile.match(/^(.*\.jsonl)\.(?:reset|deleted)\./);
+    return match?.[1] ? path.resolve(match[1]) : null;
   }
 
   private ensureWatcher(): void {
@@ -2145,12 +2440,15 @@ export class QmdMemoryManager implements MemorySearchManager {
     await this.sync({ reason: "search" });
   }
 
-  private async runQmdUpdateWithRetry(reason: string): Promise<void> {
+  private async runQmdUpdateWithRetry(
+    reason: string,
+    scope: Exclude<QmdRegularUpdateScope, "none"> = "all",
+  ): Promise<void> {
     const isBootRun = reason === "boot" || reason.startsWith("boot:");
     const maxAttempts = isBootRun ? 3 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        await this.runQmdUpdateOnce(reason);
+        await this.runQmdUpdateOnce(reason, scope);
         return;
       } catch (err) {
         if (attempt >= maxAttempts || !this.isRetryableUpdateError(err)) {
@@ -2167,9 +2465,16 @@ export class QmdMemoryManager implements MemorySearchManager {
     }
   }
 
-  private async runQmdUpdateOnce(reason: string): Promise<void> {
+  private async runQmdUpdateOnce(
+    reason: string,
+    scope: Exclude<QmdRegularUpdateScope, "none">,
+  ): Promise<void> {
+    const args = this.buildQmdUpdateArgs(scope);
+    if (!args) {
+      return;
+    }
     try {
-      await this.runQmd(["update"], {
+      await this.runQmd(args, {
         timeoutMs: this.qmd.update.updateTimeoutMs,
         discardOutput: true,
       });
@@ -2180,11 +2485,31 @@ export class QmdMemoryManager implements MemorySearchManager {
       ) {
         throw err;
       }
-      await this.runQmd(["update"], {
+      await this.runQmd(args, {
         timeoutMs: this.qmd.update.updateTimeoutMs,
         discardOutput: true,
       });
     }
+  }
+
+  private buildQmdUpdateArgs(scope: Exclude<QmdRegularUpdateScope, "none">): string[] | null {
+    if (scope === "all") {
+      return ["update"];
+    }
+    const collectionNames = this.listManagedCollectionNames(["memory"]);
+    return collectionNames.length > 0
+      ? ["update", ...this.buildCollectionFilterArgs(collectionNames)]
+      : null;
+  }
+
+  private buildQmdEmbedCommands(scope: Exclude<QmdRegularUpdateScope, "none">): string[][] {
+    if (scope === "all") {
+      return [["embed"]];
+    }
+    const collectionNames = this.listManagedCollectionNames(["memory"]);
+    return collectionNames.map((collectionName) =>
+      ["embed"].concat(this.buildCollectionFilterArgs([collectionName])),
+    );
   }
 
   private isRetryableUpdateError(err: unknown): boolean {
@@ -2222,6 +2547,35 @@ export class QmdMemoryManager implements MemorySearchManager {
     }
     const updateIntervalMs = this.qmd.update.intervalMs;
     return updateIntervalMs <= 0 || updateIntervalMs > embedIntervalMs;
+  }
+
+  private scheduleSessionFullReconciliation(delayMs: number): void {
+    const run = () => {
+      void this.runUpdate("session-reconcile", true)
+        .catch((err: unknown) => {
+          log.warn(`qmd session reconciliation failed (${String(err)})`);
+        })
+        .finally(() => {
+          if (!this.closed) {
+            this.fullReconcileTimer = setTimeout(run, QMD_SESSION_FULL_RECONCILE_INTERVAL_MS);
+          }
+        });
+    };
+    this.fullReconcileTimer = setTimeout(run, delayMs);
+  }
+
+  private scheduleFullSessionRepairRetry(): void {
+    if (this.fullSessionRepairRetryTimer || this.closed) {
+      return;
+    }
+    const retryAt = this.embedBackoffUntil ?? Date.now() + 1_000;
+    const delayMs = Math.max(0, retryAt - Date.now()) + 1;
+    this.fullSessionRepairRetryTimer = setTimeout(() => {
+      this.fullSessionRepairRetryTimer = null;
+      void this.runUpdate("session-repair-retry", true).catch((err: unknown) => {
+        log.warn(`qmd session repair retry failed: ${String(err)}`);
+      });
+    }, delayMs);
   }
 
   private resolveEmbedStartupJitterMs(): number {
@@ -2341,21 +2695,41 @@ export class QmdMemoryManager implements MemorySearchManager {
     );
   }
 
-  private enqueueForcedUpdate(reason: string): Promise<void> {
-    this.queuedForcedRuns += 1;
+  private enqueueForcedUpdate(
+    reason: string,
+    sessionExportMode?: QmdSessionExportMode,
+    regularUpdateScope?: QmdRegularUpdateScope,
+  ): Promise<void> {
+    const alreadyQueuedDirtyRun =
+      sessionExportMode === "dirty" &&
+      this.queuedForcedUpdateRequests.some(
+        (request) =>
+          request.sessionExportMode === "dirty" &&
+          request.regularUpdateScope === regularUpdateScope,
+      );
+    if (!alreadyQueuedDirtyRun) {
+      this.queuedForcedUpdateRequests.push({ reason, sessionExportMode, regularUpdateScope });
+    }
     if (!this.queuedForcedUpdate) {
-      this.queuedForcedUpdate = this.drainForcedUpdates(reason).finally(() => {
+      this.queuedForcedUpdate = this.drainForcedUpdates().finally(() => {
         this.queuedForcedUpdate = null;
       });
     }
     return this.queuedForcedUpdate;
   }
 
-  private async drainForcedUpdates(reason: string): Promise<void> {
+  private async drainForcedUpdates(): Promise<void> {
     await this.pendingUpdate?.catch(() => undefined);
-    while (!this.closed && this.queuedForcedRuns > 0) {
-      this.queuedForcedRuns -= 1;
-      await this.runUpdate(`${reason}:queued`, true, { fromForcedQueue: true });
+    while (!this.closed && this.queuedForcedUpdateRequests.length > 0) {
+      const request = this.queuedForcedUpdateRequests.shift();
+      if (!request) {
+        continue;
+      }
+      await this.runUpdate(`${request.reason}:queued`, true, {
+        fromForcedQueue: true,
+        sessionExportMode: request.sessionExportMode,
+        regularUpdateScope: request.regularUpdateScope,
+      });
     }
   }
 
@@ -2439,7 +2813,9 @@ export class QmdMemoryManager implements MemorySearchManager {
       maxOutputChars: this.maxQmdOutputChars,
       // Large `qmd update` runs can easily exceed the output cap; keep only stderr.
       discardStdout: opts?.discardOutput,
-      signal: opts?.signal,
+      signal: opts?.signal
+        ? AbortSignal.any([opts.signal, this.shutdownAbortController.signal])
+        : this.shutdownAbortController.signal,
     });
   }
 
@@ -2447,9 +2823,12 @@ export class QmdMemoryManager implements MemorySearchManager {
     args: string[],
     command: "query" | "search" | "vsearch",
     signal?: AbortSignal,
+    reportCommandPhase?: QmdCommandPhaseReporter,
   ): Promise<QmdQueryResult[]> {
     try {
-      const result = await this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs, signal });
+      const result = await runInQmdCommandPhase(reportCommandPhase, async () =>
+        this.runQmd(args, { timeoutMs: this.qmd.limits.timeoutMs, signal }),
+      );
       return parseQmdQueryJson(result.stdout, result.stderr);
     } catch (err) {
       const recovered = this.parseFailedQmdSearchJson(err, command);
@@ -2608,7 +2987,9 @@ export class QmdMemoryManager implements MemorySearchManager {
       cwd: this.workspaceDir,
       timeoutMs: opts?.timeoutMs,
       maxOutputChars: this.maxQmdOutputChars,
-      signal: opts?.signal,
+      signal: opts?.signal
+        ? AbortSignal.any([opts.signal, this.shutdownAbortController.signal])
+        : this.shutdownAbortController.signal,
     });
   }
 
@@ -2652,11 +3033,12 @@ export class QmdMemoryManager implements MemorySearchManager {
           limit: params.limit,
           minScore: params.minScore,
         };
-    if (params.collection) {
+    const collections = params.collections ?? (params.collection ? [params.collection] : []);
+    if (collections.length > 0) {
       if (useUnifiedQueryTool) {
-        callArgs.collections = [params.collection];
+        callArgs.collections = collections;
       } else {
-        callArgs.collection = params.collection;
+        callArgs.collection = collections[0];
       }
     }
     if (
@@ -2670,21 +3052,23 @@ export class QmdMemoryManager implements MemorySearchManager {
 
     let result: { stdout: string };
     try {
-      result = await this.runMcporter(
-        [
-          "call",
-          selector,
-          "--args",
-          JSON.stringify(callArgs),
-          "--output",
-          "json",
-          "--timeout",
-          String(Math.max(0, params.timeoutMs)),
-        ],
-        {
-          timeoutMs: resolveQmdMcporterSearchProcessTimeoutMs(params.timeoutMs),
-          signal: params.signal,
-        },
+      result = await runInQmdCommandPhase(params.reportCommandPhase, async () =>
+        this.runMcporter(
+          [
+            "call",
+            selector,
+            "--args",
+            JSON.stringify(callArgs),
+            "--output",
+            "json",
+            "--timeout",
+            String(Math.max(0, params.timeoutMs)),
+          ],
+          {
+            timeoutMs: resolveQmdMcporterSearchProcessTimeoutMs(params.timeoutMs),
+            signal: params.signal,
+          },
+        ),
       );
       // If we got here with the v2 "query" tool, confirm v2 for future calls.
       if (useUnifiedQueryTool && this.qmdMcpToolVersion === null) {
@@ -2703,6 +3087,19 @@ export class QmdMemoryManager implements MemorySearchManager {
       if (useUnifiedQueryTool && this.isQueryToolNotFoundError(err)) {
         this.markQmdV1Fallback();
         const v1Tool = this.resolveQmdMcpTool(params.searchCommand ?? "query");
+        if (collections.length > 1) {
+          return this.runMcporterAcrossCollections({
+            tool: v1Tool,
+            searchCommand: params.searchCommand,
+            explicitToolOverride: false,
+            query: params.query,
+            limit: params.limit,
+            minScore: params.minScore,
+            collectionNames: collections,
+            signal: params.signal,
+            reportCommandPhase: params.reportCommandPhase,
+          });
+        }
         return this.runQmdSearchViaMcporter({
           mcporter: params.mcporter,
           tool: v1Tool,
@@ -2711,9 +3108,10 @@ export class QmdMemoryManager implements MemorySearchManager {
           query: params.query,
           limit: params.limit,
           minScore: params.minScore,
-          collection: params.collection,
+          collection: collections[0],
           timeoutMs: params.timeoutMs,
           signal: params.signal,
+          reportCommandPhase: params.reportCommandPhase,
         });
       }
       throw err;
@@ -2925,6 +3323,161 @@ export class QmdMemoryManager implements MemorySearchManager {
     });
   }
 
+  private async exportDirtySessions(): Promise<QmdDirtySessionExportAcceptance | null> {
+    const sessionExporter = this.sessionExporter;
+    if (!sessionExporter) {
+      return null;
+    }
+    const dirtyEntries = await readQmdSessionExportDirtyEntries({
+      workspaceDir: this.workspaceDir,
+      agentId: this.agentId,
+    });
+    if (dirtyEntries.length === 0) {
+      return null;
+    }
+    const exportRoot = await root(sessionExporter.dir);
+    const exported: Array<{ entry: QmdSessionExportDirtyWork; artifactPath: string }> = [];
+    const mappings: QmdSessionArtifactMapping[] = [];
+    const deletedArtifactPaths: string[] = [];
+    const upsertPaths: string[] = [];
+    const cutoff = sessionExporter.retentionMs ? Date.now() - sessionExporter.retentionMs : null;
+    for (const dirtyEntry of dirtyEntries) {
+      const artifactPath = `${path.basename(dirtyEntry.sessionFile, ".jsonl")}.md`;
+      if (dirtyEntry.operation === "delete") {
+        await exportRoot.remove(artifactPath).catch(() => undefined);
+        deletedArtifactPaths.push(artifactPath);
+        exported.push({ entry: dirtyEntry, artifactPath });
+        continue;
+      }
+      const sessionEntry = await buildSessionEntry(dirtyEntry.sessionFile);
+      if (!sessionEntry) {
+        await exportRoot.remove(artifactPath).catch(() => undefined);
+        deletedArtifactPaths.push(artifactPath);
+        exported.push({ entry: dirtyEntry, artifactPath });
+        continue;
+      }
+      if (cutoff !== null && sessionEntry.mtimeMs < cutoff) {
+        await exportRoot.remove(artifactPath).catch(() => undefined);
+        deletedArtifactPaths.push(artifactPath);
+        exported.push({ entry: dirtyEntry, artifactPath });
+        continue;
+      }
+      const target = path.join(sessionExporter.dir, artifactPath);
+      await exportRoot.write(artifactPath, this.renderSessionMarkdown(sessionEntry), {
+        encoding: "utf-8",
+      });
+      const mapping = this.buildSessionArtifactMapping(
+        dirtyEntry.sessionFile,
+        artifactPath,
+        target,
+      );
+      if (mapping) {
+        mappings.push(mapping);
+      }
+      this.exportedSessionState.set(dirtyEntry.sessionFile, {
+        hash: sessionEntry.hash,
+        mtimeMs: sessionEntry.mtimeMs,
+        target,
+      });
+      upsertPaths.push(artifactPath);
+      exported.push({ entry: dirtyEntry, artifactPath });
+    }
+    const mutation = {
+      upsertPaths: [...new Set(upsertPaths)],
+      deletePaths: [...new Set(deletedArtifactPaths)],
+    };
+    if (mutation.upsertPaths.length === 0 && mutation.deletePaths.length === 0) {
+      return null;
+    }
+    log.info(
+      `qmd targeted session mutation agent=${this.agentId} upserts=${mutation.upsertPaths.length} deletes=${mutation.deletePaths.length}`,
+    );
+    await this.runQmdTargetedSessionUpdate(mutation);
+    return {
+      refreshMappings: () => {
+        if (mappings.length > 0) {
+          upsertQmdSessionArtifactMappings({ indexPath: this.indexPath, mappings });
+        }
+        if (deletedArtifactPaths.length > 0) {
+          deleteQmdSessionArtifactMappings({
+            collection: sessionExporter.collectionName,
+            indexPath: this.indexPath,
+            artifactPaths: deletedArtifactPaths,
+          });
+        }
+        for (const artifactPath of deletedArtifactPaths) {
+          for (const [sessionFile, state] of this.exportedSessionState) {
+            if (state.target === path.join(sessionExporter.dir, artifactPath)) {
+              this.exportedSessionState.delete(sessionFile);
+            }
+          }
+        }
+        this.refreshSessionArtifactDocIds();
+      },
+      acknowledge: async () => {
+        await Promise.all(
+          exported.map(async ({ entry }) => {
+            await clearQmdSessionExportDirtyEntry({
+              workspaceDir: this.workspaceDir,
+              clearItems: entry.clearItems,
+            });
+          }),
+        );
+      },
+    };
+  }
+
+  private async runQmdTargetedSessionUpdate(mutation: QmdTargetedSessionMutation): Promise<void> {
+    if (!this.sessionExporter) {
+      return;
+    }
+    const manifestDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-qmd-targeted-"));
+    const manifestPath = path.join(manifestDir, "session-mutation.json");
+    try {
+      // QMD's targeted update accepts a manifest file, so keep this CLI input
+      // ephemeral. Durable work remains in plugin SQLite, never a JSON sidecar.
+      await fs.writeFile(manifestPath, JSON.stringify(mutation), "utf-8");
+      await this.runQmd(
+        ["update", "--collection", this.sessionExporter.collectionName, "--manifest", manifestPath],
+        {
+          timeoutMs: this.qmd.update.updateTimeoutMs,
+          discardOutput: true,
+        },
+      );
+    } finally {
+      await fs.rm(manifestDir, { recursive: true, force: true });
+    }
+  }
+
+  private async runQmdTargetedSessionEmbed(refreshMappings: () => void): Promise<void> {
+    const sessionExporter = this.sessionExporter;
+    if (!sessionExporter) {
+      return;
+    }
+    const finalize = async () => {
+      if (qmdUsesVectors(this.qmd.searchMode)) {
+        await this.runQmd(
+          ["embed", ...this.buildCollectionFilterArgs([sessionExporter.collectionName])],
+          {
+            timeoutMs: this.qmd.update.embedTimeoutMs,
+            discardOutput: true,
+          },
+        );
+        this.lastEmbedAt = Date.now();
+        this.embedBackoffUntil = null;
+        this.embedFailureCount = 0;
+      }
+      refreshMappings();
+    };
+    if (!qmdUsesVectors(this.qmd.searchMode)) {
+      await this.withQmdStoreWriteLock(finalize);
+      return;
+    }
+    await this.withQmdEmbedQueue(() =>
+      this.withQmdGlobalEmbedLock(() => this.withQmdStoreWriteLock(finalize)),
+    );
+  }
+
   private buildSessionArtifactMapping(
     sessionFile: string,
     artifactPath: string,
@@ -2978,6 +3531,10 @@ export class QmdMemoryManager implements MemorySearchManager {
   }
 
   private pickSessionCollectionName(): string {
+    const explicitName = this.qmd.sessions.name?.trim();
+    if (explicitName) {
+      return explicitName;
+    }
     const existing = new Set(this.qmd.collections.map((collection) => collection.name));
     const base = `sessions-${this.sanitizeCollectionNameSegment(this.agentId)}`;
     if (!existing.has(base)) {
@@ -3641,7 +4198,7 @@ export class QmdMemoryManager implements MemorySearchManager {
     if (!(await this.supportsQmdMultiCollectionFilters(signal, debugContext))) {
       return collectionNames.map((collectionName) => [collectionName]);
     }
-    return this.groupCollectionNamesBySource(collectionNames);
+    return [collectionNames];
   }
 
   private async supportsQmdMultiCollectionFilters(
@@ -3726,6 +4283,7 @@ export class QmdMemoryManager implements MemorySearchManager {
     collectionGroups: string[][],
     command: "query" | "search" | "vsearch",
     signal?: AbortSignal,
+    reportCommandPhase?: QmdCommandPhaseReporter,
   ): Promise<QmdQueryResult[]> {
     log.debug(
       `qmd ${command} multi-source collection grouping active (${collectionGroups.length} groups)`,
@@ -3734,7 +4292,7 @@ export class QmdMemoryManager implements MemorySearchManager {
     for (const collectionNames of collectionGroups) {
       const args = this.buildSearchArgs(command, query, limit);
       args.push(...this.buildCollectionFilterArgs(collectionNames));
-      const parsed = await this.runQmdSearch(args, command, signal);
+      const parsed = await this.runQmdSearch(args, command, signal, reportCommandPhase);
       for (const entry of parsed) {
         const defaultCollection = collectionNames.length === 1 ? collectionNames[0] : undefined;
         const normalizedHints = this.normalizeDocHints({
@@ -3769,17 +4327,6 @@ export class QmdMemoryManager implements MemorySearchManager {
     return [...bestByResultKey.values()].toSorted((a, b) => (b.score ?? 0) - (a.score ?? 0));
   }
 
-  private groupCollectionNamesBySource(collectionNames: string[]): string[][] {
-    const groups = new Map<string, string[]>();
-    for (const collectionName of collectionNames) {
-      const source = this.collectionRoots.get(collectionName)?.kind ?? collectionName;
-      const group = groups.get(source) ?? [];
-      group.push(collectionName);
-      groups.set(source, group);
-    }
-    return [...groups.values()];
-  }
-
   private buildQmdResultKey(entry: QmdQueryResult): string | null {
     if (typeof entry.docid === "string" && entry.docid.trim().length > 0) {
       return `docid:${entry.docid}`;
@@ -3804,6 +4351,35 @@ export class QmdMemoryManager implements MemorySearchManager {
   private async runMcporterAcrossCollections(
     params: QmdMcporterAcrossCollectionsParams,
   ): Promise<QmdQueryResult[]> {
+    if (params.tool === "query" && this.qmdMcpToolVersion !== "v1") {
+      return params.explicitToolOverride
+        ? await this.runQmdSearchViaMcporter({
+            mcporter: this.qmd.mcporter,
+            tool: params.tool,
+            searchCommand: params.searchCommand,
+            explicitToolOverride: true,
+            query: params.query,
+            limit: params.limit,
+            minScore: params.minScore,
+            collections: params.collectionNames,
+            timeoutMs: this.qmd.limits.timeoutMs,
+            signal: params.signal,
+            reportCommandPhase: params.reportCommandPhase,
+          })
+        : await this.runQmdSearchViaMcporter({
+            mcporter: this.qmd.mcporter,
+            tool: params.tool,
+            searchCommand: params.searchCommand,
+            explicitToolOverride: false,
+            query: params.query,
+            limit: params.limit,
+            minScore: params.minScore,
+            collections: params.collectionNames,
+            timeoutMs: this.qmd.limits.timeoutMs,
+            signal: params.signal,
+            reportCommandPhase: params.reportCommandPhase,
+          });
+    }
     const bestByDocId = new Map<string, QmdQueryResult>();
     for (const collectionName of params.collectionNames) {
       const parsed = params.explicitToolOverride
@@ -3818,6 +4394,7 @@ export class QmdMemoryManager implements MemorySearchManager {
             collection: collectionName,
             timeoutMs: this.qmd.limits.timeoutMs,
             signal: params.signal,
+            reportCommandPhase: params.reportCommandPhase,
           })
         : await this.runQmdSearchViaMcporter({
             mcporter: this.qmd.mcporter,
@@ -3830,6 +4407,7 @@ export class QmdMemoryManager implements MemorySearchManager {
             collection: collectionName,
             timeoutMs: this.qmd.limits.timeoutMs,
             signal: params.signal,
+            reportCommandPhase: params.reportCommandPhase,
           });
       for (const entry of parsed) {
         if (typeof entry.docid !== "string" || !entry.docid.trim()) {

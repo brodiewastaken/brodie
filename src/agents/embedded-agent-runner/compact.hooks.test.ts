@@ -369,6 +369,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
       signal: new AbortController().signal,
       effectiveModel: { provider: "openai", id: "fake", api: "responses", input: [] } as never,
       resolvedApiKey: undefined,
+      resolvedAuthMode: "oauth",
       authStorage: { setRuntimeApiKey: vi.fn() },
       config: undefined,
       provider: "openai",
@@ -387,6 +388,9 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
     expect(streamArg.currentStreamFn).toBeTypeOf("function");
     expect(streamArg.sessionId).toBe("session-1");
     expect(streamArg.authProfileId).toBe("openai:profile-1");
+    // Compaction must carry the resolved auth mode: profile OAuth tokens
+    // without the sk-ant-oat shape otherwise fail only when compaction fires.
+    expect(streamArg.resolvedAuthMode).toBe("oauth");
     expect(applyExtraParamsToAgentMock).toHaveBeenCalledWith(
       expectRecordFields(mockCallArg(applyExtraParamsToAgentMock), { streamFn: resolvedStreamFn }),
       undefined,

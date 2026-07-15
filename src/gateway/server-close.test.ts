@@ -133,6 +133,7 @@ function createGatewayCloseTestDeps(
     getPendingReplyCount: vi.fn(() => 0),
     clients: new Set<GatewayCloseClient>(),
     configReloader: { stop: vi.fn(async () => undefined) },
+    closeMemorySearchManagers: vi.fn(async () => undefined),
     wss: {
       clients: new Set(),
       close: (cb: () => void) => cb(),
@@ -182,6 +183,7 @@ describe("createGatewayCloseHandler", () => {
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
     expect(deps.cron.stop).toHaveBeenCalledTimes(1);
     expect(deps.heartbeatRunner.stop).toHaveBeenCalledTimes(1);
+    expect(deps.closeMemorySearchManagers).toHaveBeenCalledTimes(1);
     expect(deps.chatRunState.clear).toHaveBeenCalledTimes(1);
   });
 

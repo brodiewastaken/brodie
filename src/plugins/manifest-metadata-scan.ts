@@ -9,10 +9,15 @@ import { parseJsonWithJson5Fallback } from "../utils/parse-json-compat.js";
 import { resolveBundledPluginsDir } from "./bundled-dir.js";
 import { readPersistedInstalledPluginIndexSync } from "./installed-plugin-index-store.js";
 
-type PluginManifestMetadataRecord = {
+export type PluginManifestMetadataRecord = {
   pluginDir: string;
   manifest: Record<string, unknown>;
   origin?: string;
+};
+
+export type PluginManifestMetadataSnapshot = {
+  key: string;
+  records: PluginManifestMetadataRecord[];
 };
 
 type CandidateDir = {
@@ -173,10 +178,10 @@ function uniqueCandidateDirs(candidates: CandidateDir[]): CandidateDir[] {
   );
 }
 
-/** Lists plugin manifest metadata from installed, bundled, and global plugin roots. */
-export function listOpenClawPluginManifestMetadata(
+/** Resolves manifest metadata plus the filesystem fingerprint that owns its cache lifetime. */
+export function resolveOpenClawPluginManifestMetadataSnapshot(
   env: NodeJS.ProcessEnv = process.env,
-): PluginManifestMetadataRecord[] {
+): PluginManifestMetadataSnapshot {
   const candidates: CandidateDir[] = [];
   let order = 0;
   candidates.push(...listPersistedIndexPluginDirs(env, order));
@@ -200,7 +205,7 @@ export function listOpenClawPluginManifestMetadata(
     ]),
   );
   if (manifestMetadataCache?.key === cacheKey) {
-    return manifestMetadataCache.records.slice();
+    return { key: cacheKey, records: manifestMetadataCache.records.slice() };
   }
 
   const byManifestId = new Map<string, CandidateDir>();
@@ -221,5 +226,12 @@ export function listOpenClawPluginManifestMetadata(
     records.push({ pluginDir: candidate.pluginDir, manifest, origin: candidate.origin });
   }
   manifestMetadataCache = { key: cacheKey, records };
-  return records;
+  return { key: cacheKey, records: records.slice() };
+}
+
+/** Lists plugin manifest metadata from installed, bundled, and global plugin roots. */
+export function listOpenClawPluginManifestMetadata(
+  env: NodeJS.ProcessEnv = process.env,
+): PluginManifestMetadataRecord[] {
+  return resolveOpenClawPluginManifestMetadataSnapshot(env).records;
 }

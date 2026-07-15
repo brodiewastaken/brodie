@@ -13,11 +13,13 @@ import type { ReasoningLevel, ThinkLevel, VerboseLevel } from "../../../auto-rep
 import type { ChatType } from "../../../channels/chat-type.js";
 import type { InboundEventKind } from "../../../channels/inbound-event/kind.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import type { ContextEngineExternalFile } from "../../../context-engine/external-files.js";
 import type { CoreConversationalAction } from "../../../infra/outbound/conversational-action.js";
 import type { ImageContent } from "../../../llm/types.js";
 import type { PromptImageOrderEntry } from "../../../media/prompt-image-order.js";
 import type { PluginHookChannelContext } from "../../../plugins/hook-types.js";
 import type { CommandQueueEnqueueFn } from "../../../process/command-queue.types.js";
+import type { QueueBatchIdentity } from "../../../scheduler/queue-batch-identity.js";
 import type { InputProvenance } from "../../../sessions/input-provenance.js";
 import type { UserTurnTranscriptRecorder } from "../../../sessions/user-turn-transcript.types.js";
 import type { SkillSnapshot } from "../../../skills/types.js";
@@ -32,6 +34,7 @@ import type {
 } from "../../embedded-agent-subscribe.shared-types.js";
 import type { FastModeAutoProgressState } from "../../fast-mode.js";
 import type { AgentInternalEvent } from "../../internal-events.js";
+import type { NativeImagePolicySource } from "../../native-image-policy.js";
 import type { AgentRunSessionTarget } from "../../run-session-target.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import type { SilentReplyPromptMode } from "../../system-prompt.types.js";
@@ -160,6 +163,16 @@ export type RunEmbeddedAgentParams = {
   transcriptPrompt?: string;
   currentInboundEventKind?: InboundEventKind;
   currentInboundContext?: CurrentInboundPromptContext;
+  /** Current-turn non-native media handed to the context engine at assemble. */
+  externalFiles?: ContextEngineExternalFile[];
+  /** Trusted queue identity carried outside prompt text into persisted message metadata. */
+  queueBatchIdentity?: QueueBatchIdentity;
+  /** Prompt substrings (media descriptor values) excluded from native prompt-image detection. */
+  promptImageRefExclusions?: string[];
+  /** Effective ceiling for native image blocks in one provider request. */
+  maxNativeImages?: number;
+  /** Configuration layer that supplied the native-image ceiling. */
+  maxNativeImagesSource?: NativeImagePolicySource;
   images?: ImageContent[];
   imageOrder?: PromptImageOrderEntry[];
   /** Optional client-provided tools (OpenResponses hosted tools). */

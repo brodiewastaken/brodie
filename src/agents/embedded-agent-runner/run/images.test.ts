@@ -570,6 +570,61 @@ describe("detectAndLoadPromptImages", () => {
     }
   });
 
+  it("excludes descriptor ref values from prompt image detection while loading user-typed refs", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-native-image-exclude-"));
+    const descriptorPath = path.join(stateDir, "queued-photo.jpg");
+    const typedPath = path.join(stateDir, "typed-photo.png");
+    const pngB64 = TINY_PNG_BASE64;
+    await fs.writeFile(descriptorPath, Buffer.from(pngB64, "base64"));
+    await fs.writeFile(typedPath, Buffer.from(pngB64, "base64"));
+
+    try {
+      const prompt = [
+        "Message Media:",
+        "```json",
+        `{ "kind": "image", "media_local_path": "${descriptorPath}" }`,
+        "```",
+        `also look at ${typedPath}`,
+      ].join("\n");
+      const result = await detectAndLoadPromptImages({
+        prompt,
+        workspaceDir: stateDir,
+        model: { input: ["text", "image"] },
+        workspaceOnly: true,
+        excludeRefValues: [descriptorPath],
+      });
+
+      expect(result.detectedRefs).toHaveLength(1);
+      expect(result.detectedRefs[0]?.resolved).toBe(typedPath);
+      expect(result.loadedCount).toBe(1);
+      expect(result.images).toHaveLength(1);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not scan an external-file GIF marker as a native prompt image", async () => {
+    const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-native-image-gif-exclude-"));
+    const gifPath = path.join(stateDir, "queued-animation.gif");
+    await fs.writeFile(gifPath, Buffer.from("GIF89a", "ascii"));
+
+    try {
+      const result = await detectAndLoadPromptImages({
+        prompt: `[OpenClaw External File: external_file_1 | path=${gifPath}]`,
+        workspaceDir: stateDir,
+        model: { input: ["text", "image"] },
+        workspaceOnly: true,
+        excludeRefValues: [gifPath],
+      });
+
+      expect(result.detectedRefs).toHaveLength(0);
+      expect(result.loadedCount).toBe(0);
+      expect(result.images).toHaveLength(0);
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps distinct inline attachments with identical bytes", async () => {
     const pngB64 = TINY_PNG_BASE64;
     const image = { type: "image" as const, data: pngB64, mimeType: "image/png" };

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 // Memory Core tests cover qmd manager plugin behavior.
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
@@ -30,6 +31,9 @@ const { withFileLockMock } = vi.hoisted(() => ({
   withFileLockMock: vi.fn(
     async <T>(_filePath: string, _options: unknown, fn: () => Promise<T>) => await fn(),
   ),
+}));
+const { listSessionTranscriptCorpusEntriesForAgentMock } = vi.hoisted(() => ({
+  listSessionTranscriptCorpusEntriesForAgentMock: vi.fn(),
 }));
 const MEMORY_EMBEDDING_PROVIDERS_KEY = Symbol.for("openclaw.memoryEmbeddingProviders");
 const MCPORTER_STATE_KEY = Symbol.for("openclaw.mcporterState");
@@ -96,9 +100,12 @@ function emitAndClose(child: MockChild, stream: "stdout" | "stderr", data: strin
   });
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 1_000,
+): Promise<void> {
   const startedAt = Date.now();
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() - startedAt > timeoutMs) {
       throw new Error("Timed out waiting for condition");
     }
@@ -196,7 +203,20 @@ vi.mock("openclaw/plugin-sdk/file-lock", async () => {
   };
 });
 
+vi.mock("openclaw/plugin-sdk/memory-core-host-engine-qmd", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-engine-qmd")>();
+  listSessionTranscriptCorpusEntriesForAgentMock.mockImplementation(
+    actual.listSessionTranscriptCorpusEntriesForAgent,
+  );
+  return {
+    ...actual,
+    listSessionTranscriptCorpusEntriesForAgent: listSessionTranscriptCorpusEntriesForAgentMock,
+  };
+});
+
 import { spawn as mockedSpawn } from "node:child_process";
+import { emitSessionTranscriptUpdate } from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import {
   type MemorySearchRuntimeDebug,
@@ -209,9 +229,26 @@ import {
   configureMemoryCoreDreamingState,
   configureMemoryCoreDreamingStateForTests,
   resetMemoryCoreDreamingStateForTests,
+  writeMemoryCoreWorkspaceEntry,
 } from "../dreaming-state.js";
 import { resolveQmdSessionArtifactIdentity } from "../qmd-session-artifacts.js";
 import { QmdMemoryManager, resolveQmdMcporterSearchProcessTimeoutMs } from "./qmd-manager.js";
+import {
+  clearQmdSessionExportDirtyEntry,
+  hasQmdSessionExportBaseline,
+  markQmdSessionExportFullReconcileRequired,
+  QMD_SESSION_EXPORT_BASELINE_NAMESPACE,
+  queueQmdSessionExportDirtyEntry,
+  readQmdSessionExportDirtyEntries,
+  readQmdSessionExportBaseline,
+  writeQmdSessionExportBaseline,
+} from "./qmd-session-export-state.js";
+import { MEMORY_SEARCH_DEADLINE_CONTROL } from "./search-deadline.js";
+
+type TargetedSessionMutation = {
+  deletePaths: string[];
+  upsertPaths: string[];
+};
 
 const spawnMock = mockedSpawn as unknown as Mock;
 const originalPath = process.env.PATH;
@@ -292,6 +329,14 @@ describe("QmdMemoryManager", () => {
     expect(mockMessages(mock).join("\n")).not.toContain(text);
   }
 
+  async function seedSessionExportBaseline(): Promise<void> {
+    await writeQmdSessionExportBaseline({
+      workspaceDir,
+      agentId,
+      collectionName: "sessions-main",
+    });
+  }
+
   it("caps mcporter search process timeout grace", () => {
     expect(resolveQmdMcporterSearchProcessTimeoutMs(1_000)).toBe(5_000);
     expect(resolveQmdMcporterSearchProcessTimeoutMs(10_000)).toBe(12_000);
@@ -311,6 +356,7 @@ describe("QmdMemoryManager", () => {
     expect(countQmdCommand((args) => args[0] === "collection" && args[1] === "list")).toBe(1);
 
     spawnMock.mockClear();
+    listSessionTranscriptCorpusEntriesForAgentMock.mockClear();
     const second = await createManager({ mode: "cli" });
     await second.manager.close();
 
@@ -418,7 +464,9 @@ describe("QmdMemoryManager", () => {
     const { manager } = await createManager();
     spawnMock.mockClear();
     let searchAttempts = 0;
+    const events: string[] = [];
     spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      events.push(`command:${args[0]}${args[1] ? `:${args[1]}` : ""}`);
       if (args[0] === "query" || args[0] === "search" || args[0] === "vsearch") {
         const child = createMockChild({ autoClose: false });
         searchAttempts += 1;
@@ -438,11 +486,38 @@ describe("QmdMemoryManager", () => {
       onDebug: (entry) => {
         debug.push(entry);
       },
+      [MEMORY_SEARCH_DEADLINE_CONTROL]: (action) => {
+        events.push(`phase:${action}`);
+      },
     });
 
     expect(searchAttempts).toBe(2);
     expect(countQmdCommand((args) => args[0] === "collection" && args[1] === "list")).toBe(1);
     expect(debug.at(-1)?.qmd?.collectionValidation?.cacheState).toBe("bypass-force");
+    expect(events.filter((event) => event.startsWith("phase:"))).toEqual([
+      "phase:pause",
+      "phase:resume",
+      "phase:pause",
+      "phase:resume",
+    ]);
+    const isSearchCommand = (event: string) =>
+      ["command:query:", "command:search:", "command:vsearch:"].some((prefix) =>
+        event.startsWith(prefix),
+      );
+    const firstSearch = events.findIndex(isSearchCommand);
+    const firstSearchEnd = events.indexOf("phase:resume");
+    const collectionRepair = events.findIndex(
+      (event, index) => index > firstSearchEnd && event.startsWith("command:collection:"),
+    );
+    const retryStart = events.indexOf("phase:pause", firstSearchEnd + 1);
+    const retrySearch = events.findIndex(
+      (event, index) => index > firstSearch && isSearchCommand(event),
+    );
+    expect(events.indexOf("phase:pause")).toBeLessThan(firstSearch);
+    expect(firstSearch).toBeLessThan(firstSearchEnd);
+    expect(firstSearchEnd).toBeLessThan(collectionRepair);
+    expect(collectionRepair).toBeLessThan(retryStart);
+    expect(retryStart).toBeLessThan(retrySearch);
   });
 
   it("reuses persisted qmd multi-collection support probe across managers", async () => {
@@ -493,7 +568,12 @@ describe("QmdMemoryManager", () => {
 
     expect(countQmdCommand((args) => args[0] === "--help")).toBe(0);
     expect(debug.at(-1)?.qmd?.multiCollectionProbe?.cacheState).toBe("hit");
-    expect(debug.at(-1)?.qmd?.searchPlan?.groupCount).toBe(2);
+    expect(debug.at(-1)?.qmd?.searchPlan?.groupCount).toBe(1);
+    const searchCalls = qmdCommandCalls().filter((args) =>
+      ["query", "search", "vsearch"].includes(args[0] ?? ""),
+    );
+    expect(searchCalls).toHaveLength(1);
+    expect(searchCalls[0]?.filter((token) => token === "-c")).toHaveLength(2);
   });
 
   it("reports multi-collection probe debug only when the probe runs", async () => {
@@ -749,6 +829,7 @@ describe("QmdMemoryManager", () => {
     // created lazily by manager code when needed.
     await fs.mkdir(workspaceDir, { recursive: true });
     setQmdStateDir(stateDir);
+    await configureMemoryCoreDreamingStateForTests();
     // Keep the default Windows path unresolved for most tests so spawn mocks can
     // match the logical package command. Tests that verify wrapper resolution
     // install explicit shim fixtures inline.
@@ -835,6 +916,1352 @@ describe("QmdMemoryManager", () => {
     expect(spawnMock.mock.calls.length).toBe(baselineCalls + 2);
 
     await manager.close();
+  });
+
+  it("drains persisted dirty session exports at boot without scanning the session corpus", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          searchMode: "query",
+          update: { interval: "0s", debounceMs: 0, onBoot: true, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const changedSession = path.join(sessionsDir, "changed.jsonl");
+    const untouchedSession = path.join(sessionsDir, "untouched.jsonl");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      changedSession,
+      '{"type":"message","message":{"role":"user","content":"changed session"}}\n',
+      "utf-8",
+    );
+    await fs.writeFile(
+      untouchedSession,
+      '{"type":"message","message":{"role":"user","content":"untouched session"}}\n',
+      "utf-8",
+    );
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: changedSession,
+      operation: "upsert",
+    });
+    listSessionTranscriptCorpusEntriesForAgentMock.mockClear();
+
+    const targetedUpdateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdTargetedSessionUpdate: (mutation: TargetedSessionMutation) => Promise<void>;
+        },
+        "runQmdTargetedSessionUpdate",
+      )
+      .mockResolvedValue(undefined);
+    try {
+      const { manager } = await createManager({ mode: "full" });
+      const exportDir = path.join(stateDir, "agents", agentId, "qmd", "sessions");
+
+      await expect(fs.readFile(path.join(exportDir, "changed.md"), "utf-8")).resolves.toContain(
+        "changed session",
+      );
+      await expectPathMissing(path.join(exportDir, "untouched.md"));
+      expect(listSessionTranscriptCorpusEntriesForAgentMock).not.toHaveBeenCalled();
+      expect(targetedUpdateSpy).toHaveBeenCalledWith({
+        upsertPaths: ["changed.md"],
+        deletePaths: [],
+      });
+      expect(qmdCommandCalls()).toContainEqual(["update", "-c", "workspace-main"]);
+      expect(qmdCommandCalls()).not.toContainEqual(["update"]);
+      expect(qmdCommandCalls()).toContainEqual(["embed", "-c", "sessions-main"]);
+      expectMockMessageContains(logInfoMock, "upserts=1 deletes=0");
+      const indexPath = (manager as unknown as { indexPath: string }).indexPath;
+      expect(
+        resolveQmdSessionArtifactIdentity({
+          artifactPath: "changed.md",
+          collection: "sessions-main",
+          indexPath,
+          searchPath: "qmd/sessions-main/changed.md",
+        }),
+      ).toEqual({
+        agentId,
+        archived: false,
+        memoryKey: formatSessionTranscriptMemoryHitKey({ agentId, sessionId: "changed" }),
+        sessionId: "changed",
+      });
+      await manager.close();
+    } finally {
+      targetedUpdateSpy.mockRestore();
+    }
+  });
+
+  it("atomically coalesces a session dirty set and preserves a newer generation during ack", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    const sessionFile = path.join(stateDir, "agents", agentId, "sessions", "coalesced.jsonl");
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile,
+      operation: "upsert",
+    });
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile,
+      operation: "delete",
+    });
+    const [snapshot] = await readQmdSessionExportDirtyEntries({ workspaceDir, agentId });
+    expect(snapshot).toMatchObject({ sessionFile, operation: "delete" });
+    expect(snapshot?.clearItems).toHaveLength(1);
+
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile,
+      operation: "upsert",
+    });
+    await clearQmdSessionExportDirtyEntry({
+      workspaceDir,
+      clearItems: snapshot?.clearItems ?? [],
+    });
+
+    await expect(
+      readQmdSessionExportDirtyEntries({ workspaceDir, agentId }),
+    ).resolves.toMatchObject([{ sessionFile, operation: "upsert" }]);
+  });
+
+  it("retains a queued dirty run's non-session update scope", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          searchMode: "query",
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "status" });
+    let releaseExport!: () => void;
+    const exportGate = new Promise<void>((resolve) => {
+      releaseExport = resolve;
+    });
+    const exportSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          exportDirtySessions: () => Promise<unknown>;
+        },
+        "exportDirtySessions",
+      )
+      .mockImplementationOnce(async () => {
+        await exportGate;
+        return null;
+      });
+    const updateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdUpdateWithRetry: (reason: string, scope: string) => Promise<void>;
+        },
+        "runQmdUpdateWithRetry",
+      )
+      .mockResolvedValue(undefined);
+    try {
+      const runUpdate = (
+        manager as unknown as {
+          runUpdate: (
+            reason: string,
+            force: boolean,
+            options: { sessionExportMode: "dirty"; regularUpdateScope: "none" | "non-session" },
+          ) => Promise<void>;
+        }
+      ).runUpdate.bind(manager);
+      const first = runUpdate("first", true, {
+        sessionExportMode: "dirty",
+        regularUpdateScope: "none",
+      });
+      await waitUntil(() => exportSpy.mock.calls.length === 1);
+      const queued = runUpdate("queued", true, {
+        sessionExportMode: "dirty",
+        regularUpdateScope: "non-session",
+      });
+      releaseExport();
+      await Promise.all([first, queued]);
+      expect(updateSpy).toHaveBeenCalledWith("queued:queued", "non-session");
+      await manager.close();
+    } finally {
+      exportSpy.mockRestore();
+      updateSpy.mockRestore();
+    }
+  });
+
+  it("embeds every non-session collection with one scoped qmd command each", async () => {
+    const otherWorkspaceDir = path.join(tmpRoot, "other-workspace");
+    await fs.mkdir(otherWorkspaceDir, { recursive: true });
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          searchMode: "query",
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          paths: [
+            { path: workspaceDir, pattern: "**/*.md", name: "workspace" },
+            { path: otherWorkspaceDir, pattern: "**/*.md", name: "other" },
+          ],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "status" });
+    await (
+      manager as unknown as {
+        runUpdate: (
+          reason: string,
+          force: boolean,
+          options: { regularUpdateScope: "non-session" },
+        ) => Promise<void>;
+      }
+    ).runUpdate("test-non-session-embed", true, { regularUpdateScope: "non-session" });
+    const embeds = qmdCommandCalls().filter((args) => args[0] === "embed");
+    expect(embeds).toEqual([
+      ["embed", "-c", "workspace-main"],
+      ["embed", "-c", "other"],
+    ]);
+    await manager.close();
+  });
+
+  it("recovers a new dirty session after every deterministic bucket has been drained", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const representatives = new Map<number, string>();
+    for (let candidate = 0; representatives.size < 4_096; candidate += 1) {
+      const sessionFile = path.join(sessionsDir, `bucket-${candidate}.jsonl`);
+      const item = `${agentId}\u0000${path.resolve(sessionFile)}`;
+      const bucket = crypto.createHash("sha256").update(item).digest().readUInt16BE(0) % 4_096;
+      representatives.set(bucket, sessionFile);
+    }
+    for (const sessionFile of representatives.values()) {
+      await queueQmdSessionExportDirtyEntry({
+        workspaceDir,
+        agentId,
+        sessionFile,
+        operation: "upsert",
+      });
+    }
+    const snapshot = await readQmdSessionExportDirtyEntries({ workspaceDir, agentId });
+    expect(snapshot).toHaveLength(4_096);
+    const overflowSession = path.join(sessionsDir, "overflow.jsonl");
+    await expect(
+      queueQmdSessionExportDirtyEntry({
+        workspaceDir,
+        agentId,
+        sessionFile: overflowSession,
+        operation: "upsert",
+      }),
+    ).rejects.toThrow("qmd dirty session export capacity exceeded");
+    await Promise.all(
+      snapshot.map(
+        async (entry) =>
+          await clearQmdSessionExportDirtyEntry({ workspaceDir, clearItems: entry.clearItems }),
+      ),
+    );
+
+    const nextSession = path.join(sessionsDir, "after-saturation.jsonl");
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: nextSession,
+      operation: "delete",
+    });
+    await expect(
+      readQmdSessionExportDirtyEntries({ workspaceDir, agentId }),
+    ).resolves.toMatchObject([{ sessionFile: nextSession, operation: "delete" }]);
+  });
+
+  it("allocates both colliding updates from a stale 15/16 bucket snapshot", async () => {
+    const { createPluginStateKeyedStoreForTests } =
+      await import("openclaw/plugin-sdk/plugin-state-test-runtime");
+    const staleSnapshotsReady = createDeferred<void>();
+    const releaseStaleSnapshots = createDeferred<void>();
+    let blockDirtyStoreLookups = false;
+    let blockedDirtyStoreLookups = 0;
+    configureMemoryCoreDreamingState((options) => {
+      const store = createPluginStateKeyedStoreForTests("memory-core", {
+        ...options,
+        env: process.env,
+      });
+      if (!options.namespace.startsWith("qmd-session-export-dirty-")) {
+        return store;
+      }
+      return {
+        ...store,
+        lookup: async (key: string) => {
+          const snapshot = await store.lookup(key);
+          if (!blockDirtyStoreLookups || blockedDirtyStoreLookups >= 2) {
+            return snapshot;
+          }
+          blockedDirtyStoreLookups += 1;
+          if (blockedDirtyStoreLookups === 2) {
+            staleSnapshotsReady.resolve();
+          }
+          await releaseStaleSnapshots.promise;
+          return snapshot;
+        },
+      };
+    });
+
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const collidingSessions: string[] = [];
+    let bucket: number | null = null;
+    for (let candidate = 0; collidingSessions.length < 17; candidate += 1) {
+      const sessionFile = path.join(sessionsDir, `collision-${candidate}.jsonl`);
+      const item = `${agentId}\u0000${path.resolve(sessionFile)}`;
+      const candidateBucket =
+        crypto.createHash("sha256").update(item).digest().readUInt16BE(0) % 256;
+      if (bucket === null) {
+        bucket = candidateBucket;
+      }
+      if (candidateBucket === bucket) {
+        collidingSessions.push(sessionFile);
+      }
+    }
+    for (const sessionFile of collidingSessions.slice(0, 15)) {
+      await queueQmdSessionExportDirtyEntry({
+        workspaceDir,
+        agentId,
+        sessionFile,
+        operation: "upsert",
+      });
+    }
+
+    blockDirtyStoreLookups = true;
+    const first = queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: collidingSessions[15] ?? "",
+      operation: "upsert",
+    });
+    const second = queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: collidingSessions[16] ?? "",
+      operation: "upsert",
+    });
+    await staleSnapshotsReady.promise;
+    releaseStaleSnapshots.resolve();
+    await Promise.all([first, second]);
+
+    const queued = await readQmdSessionExportDirtyEntries({ workspaceDir, agentId });
+    expect(queued).toHaveLength(17);
+    expect(queued.map((entry) => entry.sessionFile)).toEqual(
+      expect.arrayContaining(collidingSessions),
+    );
+  });
+
+  it("clears a successful full repair snapshot without dropping a newer generation", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          searchMode: "query",
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const firstSession = path.join(sessionsDir, "repair-snapshot.jsonl");
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: firstSession,
+      operation: "upsert",
+    });
+    await markQmdSessionExportFullReconcileRequired({
+      workspaceDir,
+      agentId,
+      collectionName: "sessions-main",
+    });
+
+    const { manager } = await createManager({ mode: "status" });
+    const enteredUpdate = createDeferred<void>();
+    const releaseUpdate = createDeferred<void>();
+    const updateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdUpdateWithRetry: () => Promise<void>;
+        },
+        "runQmdUpdateWithRetry",
+      )
+      .mockImplementationOnce(async () => {
+        enteredUpdate.resolve();
+        await releaseUpdate.promise;
+      });
+    try {
+      const repair = (
+        manager as unknown as { runUpdate: (reason: string, force: boolean) => Promise<void> }
+      ).runUpdate("test-overflow-repair", true);
+      await enteredUpdate.promise;
+      await queueQmdSessionExportDirtyEntry({
+        workspaceDir,
+        agentId,
+        sessionFile: firstSession,
+        operation: "delete",
+      });
+      releaseUpdate.resolve();
+      await repair;
+
+      await expect(
+        readQmdSessionExportDirtyEntries({ workspaceDir, agentId }),
+      ).resolves.toMatchObject([{ sessionFile: firstSession, operation: "delete" }]);
+      const laterSession = path.join(sessionsDir, "after-overflow-repair.jsonl");
+      await queueQmdSessionExportDirtyEntry({
+        workspaceDir,
+        agentId,
+        sessionFile: laterSession,
+        operation: "upsert",
+      });
+      await expect(
+        readQmdSessionExportDirtyEntries({ workspaceDir, agentId }),
+      ).resolves.toMatchObject([
+        { sessionFile: firstSession, operation: "delete" },
+        { sessionFile: laterSession, operation: "upsert" },
+      ]);
+      await manager.close();
+    } finally {
+      updateSpy.mockRestore();
+    }
+  });
+
+  it("marks a full reconciliation obligation when durable dirty queue writes overflow", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          searchMode: "query",
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { createPluginStateKeyedStoreForTests } =
+      await import("openclaw/plugin-sdk/plugin-state-test-runtime");
+    configureMemoryCoreDreamingState((options) => {
+      const store = createPluginStateKeyedStoreForTests("memory-core", {
+        ...options,
+        env: process.env,
+      });
+      if (options.namespace.startsWith("qmd-session-export-dirty-")) {
+        return {
+          ...store,
+          update: async () => {
+            throw new Error("dirty queue full");
+          },
+        };
+      }
+      return store;
+    });
+    const { manager } = await createManager({ mode: "status" });
+    const repairSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runUpdate: (reason: string, force: boolean) => Promise<void>;
+        },
+        "runUpdate",
+      )
+      .mockResolvedValue(undefined);
+    const sessionFile = path.join(stateDir, "agents", agentId, "sessions", "overflow.jsonl");
+    try {
+      await expect(
+        (
+          manager as unknown as {
+            queueSessionExportUpdate: (sessionFile: string) => Promise<void>;
+          }
+        ).queueSessionExportUpdate(sessionFile),
+      ).rejects.toThrow("dirty queue full");
+      await expect(
+        readQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" }),
+      ).resolves.toMatchObject({ requiresFullReconcile: true });
+      expect(repairSpy).toHaveBeenCalledWith("session-export-overflow", true);
+    } finally {
+      repairSpy.mockRestore();
+      await manager.close();
+    }
+  });
+
+  it("establishes a first-install full baseline, then restarts with dirty-only sessions", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: true, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const firstSession = path.join(sessionsDir, "baseline.jsonl");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      firstSession,
+      '{"type":"message","message":{"role":"user","content":"baseline"}}\n',
+    );
+
+    const first = await createManager({ mode: "full" });
+    await expect(
+      fs.readFile(
+        path.join(stateDir, "agents", agentId, "qmd", "sessions", "baseline.md"),
+        "utf-8",
+      ),
+    ).resolves.toContain("baseline");
+    expect(
+      await hasQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" }),
+    ).toBe(true);
+    await first.manager.close();
+
+    const laterSession = path.join(sessionsDir, "restart-untouched.jsonl");
+    await fs.writeFile(
+      laterSession,
+      '{"type":"message","message":{"role":"user","content":"later"}}\n',
+    );
+    spawnMock.mockClear();
+    const second = await createManager({ mode: "full" });
+    await expectPathMissing(
+      path.join(stateDir, "agents", agentId, "qmd", "sessions", "restart-untouched.md"),
+    );
+    expect(qmdCommandCalls()).toContainEqual(["update", "-c", "workspace-main"]);
+    expect(qmdCommandCalls()).not.toContainEqual(["update"]);
+    await second.manager.close();
+  });
+
+  it("runs an overdue durable session reconciliation immediately after restart", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const staleAt = Date.now() - 24 * 60 * 60 * 1000;
+    await writeQmdSessionExportBaseline({
+      workspaceDir,
+      agentId,
+      collectionName: "sessions-main",
+      lastFullReconcileAtMs: staleAt,
+    });
+    const missedSession = path.join(stateDir, "agents", agentId, "sessions", "missed.jsonl");
+    await fs.mkdir(path.dirname(missedSession), { recursive: true });
+    await fs.writeFile(
+      missedSession,
+      '{"type":"message","message":{"role":"user","content":"daily repair"}}\n',
+    );
+    const { manager } = await createManager({ mode: "full" });
+    await waitUntil(async () => {
+      const baseline = await readQmdSessionExportBaseline({
+        workspaceDir,
+        agentId,
+        collectionName: "sessions-main",
+      });
+      return Boolean(
+        baseline && !baseline.requiresFullReconcile && baseline.lastFullReconcileAtMs > staleAt,
+      );
+    });
+    expect(qmdCommandCalls()).toContainEqual(["update"]);
+    await expect(
+      fs.readFile(path.join(stateDir, "agents", agentId, "qmd", "sessions", "missed.md"), "utf-8"),
+    ).resolves.toContain("daily repair");
+    await expect(
+      readQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" }),
+    ).resolves.toMatchObject({ requiresFullReconcile: false });
+    expect(
+      (
+        await readQmdSessionExportBaseline({
+          workspaceDir,
+          agentId,
+          collectionName: "sessions-main",
+        })
+      )?.lastFullReconcileAtMs,
+    ).toBeGreaterThan(staleAt);
+    await manager.close();
+  });
+
+  it("establishes a missing session baseline even when onBoot is disabled", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "full" });
+    await waitUntil(
+      async () =>
+        await hasQmdSessionExportBaseline({
+          workspaceDir,
+          agentId,
+          collectionName: "sessions-main",
+        }),
+    );
+    await manager.close();
+  });
+
+  it("replaces an incompatible session baseline during full repair", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    await writeMemoryCoreWorkspaceEntry({
+      namespace: QMD_SESSION_EXPORT_BASELINE_NAMESPACE,
+      workspaceDir,
+      key: `qmd-session-export-baseline:${agentId}`,
+      value: {
+        version: 1,
+        generation: "old-format-generation",
+        formatVersion: 0,
+        collectionName: "sessions-old",
+        lastFullReconcileAtMs: Date.now(),
+        requiresFullReconcile: false,
+      },
+    });
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "full" });
+    await waitUntil(async () => {
+      const baseline = await readQmdSessionExportBaseline({
+        workspaceDir,
+        agentId,
+        collectionName: "sessions-main",
+      });
+      return Boolean(baseline && baseline.formatVersion === 1 && !baseline.requiresFullReconcile);
+    });
+    await manager.close();
+  });
+
+  it("repairs a persisted full-reconcile requirement even when onBoot is disabled", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await writeQmdSessionExportBaseline({
+      workspaceDir,
+      agentId,
+      collectionName: "sessions-main",
+      requiresFullReconcile: true,
+    });
+    const { manager } = await createManager({ mode: "full" });
+    await waitUntil(async () => {
+      const baseline = await readQmdSessionExportBaseline({
+        workspaceDir,
+        agentId,
+        collectionName: "sessions-main",
+      });
+      return baseline?.requiresFullReconcile === false;
+    });
+    await manager.close();
+  });
+
+  it("does not clear a newer repair marker with an older full-scan baseline completion", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    await writeQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" });
+    const snapshot = await readQmdSessionExportBaseline({
+      workspaceDir,
+      agentId,
+      collectionName: "sessions-main",
+    });
+    expect(snapshot).not.toBeNull();
+    await markQmdSessionExportFullReconcileRequired({
+      workspaceDir,
+      agentId,
+      collectionName: "sessions-main",
+    });
+    await expect(
+      writeQmdSessionExportBaseline({
+        workspaceDir,
+        agentId,
+        collectionName: "sessions-main",
+        expectedGeneration: snapshot?.generation ?? null,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      readQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" }),
+    ).resolves.toMatchObject({ requiresFullReconcile: true });
+  });
+
+  it("persists the full-repair obligation before mutating the session index", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    await writeQmdSessionExportBaseline({
+      workspaceDir,
+      agentId,
+      collectionName: "sessions-main",
+    });
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "status" });
+    const enteredUpdate = createDeferred<void>();
+    const releaseUpdate = createDeferred<void>();
+    const updateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdUpdateWithRetry: () => Promise<void>;
+        },
+        "runQmdUpdateWithRetry",
+      )
+      .mockImplementationOnce(async () => {
+        enteredUpdate.resolve();
+        await releaseUpdate.promise;
+      });
+    try {
+      const repair = (
+        manager as unknown as { runUpdate: (reason: string, force: boolean) => Promise<void> }
+      ).runUpdate("test-repair-in-progress", true);
+      await enteredUpdate.promise;
+      await expect(
+        readQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" }),
+      ).resolves.toMatchObject({ requiresFullReconcile: true });
+      releaseUpdate.resolve();
+      await repair;
+      await expect(
+        readQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" }),
+      ).resolves.toMatchObject({ requiresFullReconcile: false });
+      await manager.close();
+    } finally {
+      updateSpy.mockRestore();
+    }
+  });
+
+  it("retries a transient full-session embed at backoff expiry before advancing the baseline", async () => {
+    vi.useFakeTimers();
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          searchMode: "query",
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "status" });
+    const updateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdUpdateWithRetry: () => Promise<void>;
+        },
+        "runQmdUpdateWithRetry",
+      )
+      .mockResolvedValue(undefined);
+    const runQmdSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmd: (args: string[]) => Promise<{ stderr: string; stdout: string }>;
+        },
+        "runQmd",
+      )
+      .mockRejectedValueOnce(new Error("transient embed failure"))
+      .mockResolvedValue({ stdout: "", stderr: "" });
+    try {
+      await (
+        manager as unknown as { runUpdate: (reason: string, force: boolean) => Promise<void> }
+      ).runUpdate("test-full-repair", true);
+      await expect(
+        readQmdSessionExportBaseline({
+          workspaceDir,
+          agentId,
+          collectionName: "sessions-main",
+        }),
+      ).resolves.toMatchObject({ requiresFullReconcile: true });
+      await vi.advanceTimersByTimeAsync(61_000);
+      await waitUntil(async () => {
+        const baseline = await readQmdSessionExportBaseline({
+          workspaceDir,
+          agentId,
+          collectionName: "sessions-main",
+        });
+        return Boolean(baseline && !baseline.requiresFullReconcile);
+      });
+      expect(runQmdSpy).toHaveBeenCalledTimes(2);
+      expect(updateSpy).toHaveBeenCalledTimes(2);
+      await manager.close();
+    } finally {
+      updateSpy.mockRestore();
+      runQmdSpy.mockRestore();
+    }
+  });
+
+  it("retries a transient full-session update without waiting for daily reconciliation", async () => {
+    vi.useFakeTimers();
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "status" });
+    const updateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdUpdateWithRetry: () => Promise<void>;
+        },
+        "runQmdUpdateWithRetry",
+      )
+      .mockRejectedValueOnce(new Error("transient update failure"))
+      .mockResolvedValue(undefined);
+    try {
+      await expect(
+        (
+          manager as unknown as { runUpdate: (reason: string, force: boolean) => Promise<void> }
+        ).runUpdate("test-full-update-failure", true),
+      ).rejects.toThrow("transient update failure");
+      await expect(
+        readQmdSessionExportBaseline({ workspaceDir, agentId, collectionName: "sessions-main" }),
+      ).resolves.toMatchObject({ requiresFullReconcile: true });
+      await vi.advanceTimersByTimeAsync(1_001);
+      await waitUntil(async () => {
+        const baseline = await readQmdSessionExportBaseline({
+          workspaceDir,
+          agentId,
+          collectionName: "sessions-main",
+        });
+        return baseline?.requiresFullReconcile === false;
+      });
+      expect(updateSpy).toHaveBeenCalledTimes(2);
+      await manager.close();
+    } finally {
+      updateSpy.mockRestore();
+    }
+  });
+
+  it("retains failed targeted session export work across a manager restart", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: true, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const changedSession = path.join(sessionsDir, "retry.jsonl");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      changedSession,
+      '{"type":"message","message":{"role":"user","content":"retry me"}}\n',
+      "utf-8",
+    );
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: changedSession,
+      operation: "upsert",
+    });
+
+    const targetedUpdateSpy = vi.spyOn(
+      QmdMemoryManager.prototype as unknown as {
+        runQmdTargetedSessionUpdate: (mutation: TargetedSessionMutation) => Promise<void>;
+      },
+      "runQmdTargetedSessionUpdate",
+    );
+    try {
+      targetedUpdateSpy.mockRejectedValueOnce(new Error("targeted qmd failed"));
+      const first = await createManager({ mode: "full" });
+      await first.manager.close();
+      expect(await readQmdSessionExportDirtyEntries({ workspaceDir, agentId })).toMatchObject([
+        { sessionFile: changedSession, operation: "upsert" },
+      ]);
+
+      targetedUpdateSpy.mockResolvedValueOnce(undefined);
+      const second = await createManager({ mode: "full" });
+      await expect(
+        fs.readFile(path.join(stateDir, "agents", agentId, "qmd", "sessions", "retry.md"), "utf-8"),
+      ).resolves.toContain("retry me");
+      expect(await readQmdSessionExportDirtyEntries({ workspaceDir, agentId })).toEqual([]);
+      await second.manager.close();
+    } finally {
+      targetedUpdateSpy.mockRestore();
+    }
+  });
+
+  it("does not acknowledge a targeted session generation when its session embed fails", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: true, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionFile = path.join(stateDir, "agents", agentId, "sessions", "embed-failure.jsonl");
+    await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+    await fs.writeFile(
+      sessionFile,
+      '{"type":"message","message":{"role":"user","content":"pending"}}\n',
+    );
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile,
+      operation: "upsert",
+    });
+    const embedSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdTargetedSessionEmbed: (refreshMappings: () => void) => Promise<void>;
+        },
+        "runQmdTargetedSessionEmbed",
+      )
+      .mockRejectedValueOnce(new Error("session embed failed"));
+    try {
+      const { manager } = await createManager({ mode: "full" });
+      await expect(
+        readQmdSessionExportDirtyEntries({ workspaceDir, agentId }),
+      ).resolves.toMatchObject([{ sessionFile, operation: "upsert" }]);
+      await manager.close();
+    } finally {
+      embedSpy.mockRestore();
+    }
+  });
+
+  it("removes the targeted artifact mapping when a session tombstone is accepted", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: true, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const sessionFile = path.join(sessionsDir, "removed.jsonl");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      sessionFile,
+      '{"type":"message","message":{"role":"user","content":"remove me"}}\n',
+      "utf-8",
+    );
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile,
+      operation: "upsert",
+    });
+    const targetedUpdateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdTargetedSessionUpdate: (mutation: TargetedSessionMutation) => Promise<void>;
+        },
+        "runQmdTargetedSessionUpdate",
+      )
+      .mockResolvedValue(undefined);
+    try {
+      const first = await createManager({ mode: "full" });
+      const indexPath = (first.manager as unknown as { indexPath: string }).indexPath;
+      expect(
+        resolveQmdSessionArtifactIdentity({
+          artifactPath: "removed.md",
+          collection: "sessions-main",
+          indexPath,
+          searchPath: "qmd/sessions-main/removed.md",
+        }),
+      ).not.toBeNull();
+      await first.manager.close();
+
+      await fs.rm(sessionFile);
+      await queueQmdSessionExportDirtyEntry({
+        workspaceDir,
+        agentId,
+        sessionFile,
+        operation: "delete",
+      });
+      const second = await createManager({ mode: "full" });
+      expect(
+        resolveQmdSessionArtifactIdentity({
+          artifactPath: "removed.md",
+          collection: "sessions-main",
+          indexPath,
+          searchPath: "qmd/sessions-main/removed.md",
+        }),
+      ).toBeNull();
+      await expectPathMissing(
+        path.join(stateDir, "agents", agentId, "qmd", "sessions", "removed.md"),
+      );
+      await second.manager.close();
+    } finally {
+      targetedUpdateSpy.mockRestore();
+    }
+  });
+
+  it("keeps a newer dirty generation queued when an older targeted mutation completes", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: true, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const changedSession = path.join(sessionsDir, "generation.jsonl");
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      changedSession,
+      '{"type":"message","message":{"role":"user","content":"first generation"}}\n',
+      "utf-8",
+    );
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: changedSession,
+      operation: "upsert",
+    });
+
+    const targetedUpdateSpy = vi.spyOn(
+      QmdMemoryManager.prototype as unknown as {
+        runQmdTargetedSessionUpdate: (mutation: TargetedSessionMutation) => Promise<void>;
+      },
+      "runQmdTargetedSessionUpdate",
+    );
+    try {
+      targetedUpdateSpy.mockImplementationOnce(async () => {
+        await fs.writeFile(
+          changedSession,
+          '{"type":"message","message":{"role":"user","content":"second generation"}}\n',
+          "utf-8",
+        );
+        await queueQmdSessionExportDirtyEntry({
+          workspaceDir,
+          agentId,
+          sessionFile: changedSession,
+          operation: "upsert",
+        });
+      });
+      const first = await createManager({ mode: "full" });
+      await first.manager.close();
+
+      expect(await readQmdSessionExportDirtyEntries({ workspaceDir, agentId })).toMatchObject([
+        { sessionFile: changedSession, operation: "upsert" },
+      ]);
+
+      targetedUpdateSpy.mockResolvedValueOnce(undefined);
+      const second = await createManager({ mode: "full" });
+      await expect(
+        fs.readFile(
+          path.join(stateDir, "agents", agentId, "qmd", "sessions", "generation.md"),
+          "utf-8",
+        ),
+      ).resolves.toContain("second generation");
+      expect(await readQmdSessionExportDirtyEntries({ workspaceDir, agentId })).toEqual([]);
+      await second.manager.close();
+    } finally {
+      targetedUpdateSpy.mockRestore();
+    }
+  });
+
+  it("passes archive upserts and source tombstones to the targeted QMD mutation", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: true, waitForBootSync: true },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const currentSession = path.join(sessionsDir, "archived.jsonl");
+    const archivedSession = `${currentSession}.reset.2026-08-28T12-00-00.000Z`;
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      archivedSession,
+      '{"type":"message","message":{"role":"user","content":"kept archive"}}\n',
+      "utf-8",
+    );
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: archivedSession,
+      operation: "upsert",
+    });
+    await queueQmdSessionExportDirtyEntry({
+      workspaceDir,
+      agentId,
+      sessionFile: currentSession,
+      operation: "delete",
+    });
+
+    const targetedUpdateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdTargetedSessionUpdate: (mutation: TargetedSessionMutation) => Promise<void>;
+        },
+        "runQmdTargetedSessionUpdate",
+      )
+      .mockResolvedValue(undefined);
+    try {
+      const { manager } = await createManager({ mode: "full" });
+      const exportDir = path.join(stateDir, "agents", agentId, "qmd", "sessions");
+      const archivedArtifact = "archived.jsonl.reset.2026-08-28T12-00-00.000Z.md";
+
+      await expect(fs.readFile(path.join(exportDir, archivedArtifact), "utf-8")).resolves.toContain(
+        "kept archive",
+      );
+      await expectPathMissing(path.join(exportDir, "archived.md"));
+      expect(targetedUpdateSpy).toHaveBeenCalledWith({
+        upsertPaths: [archivedArtifact],
+        deletePaths: ["archived.md"],
+      });
+      const indexPath = (manager as unknown as { indexPath: string }).indexPath;
+      expect(
+        resolveQmdSessionArtifactIdentity({
+          artifactPath: archivedArtifact,
+          collection: "sessions-main",
+          indexPath,
+          searchPath: `qmd/sessions-main/${archivedArtifact}`,
+        }),
+      ).toEqual({
+        agentId,
+        archived: true,
+        memoryKey: formatSessionTranscriptMemoryHitKey({ agentId, sessionId: "archived" }),
+        sessionId: "archived",
+      });
+      await manager.close();
+    } finally {
+      targetedUpdateSpy.mockRestore();
+    }
+  });
+
+  it("invokes QMD's targeted session mutation grammar with an ephemeral manifest", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const { manager } = await createManager({ mode: "status" });
+    let manifestPath = "";
+    const runQmdSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmd: (args: string[]) => Promise<{ stderr: string; stdout: string }>;
+        },
+        "runQmd",
+      )
+      .mockImplementation(async (args) => {
+        expect(args.slice(0, 4)).toEqual(["update", "--collection", "sessions-main", "--manifest"]);
+        manifestPath = args[4] ?? "";
+        await expect(fs.readFile(manifestPath, "utf-8")).resolves.toBe(
+          JSON.stringify({ upsertPaths: ["archived.md"], deletePaths: ["current.md"] }),
+        );
+        return { stdout: "", stderr: "" };
+      });
+    try {
+      await (
+        manager as unknown as {
+          runQmdTargetedSessionUpdate: (mutation: TargetedSessionMutation) => Promise<void>;
+        }
+      ).runQmdTargetedSessionUpdate({
+        upsertPaths: ["archived.md"],
+        deletePaths: ["current.md"],
+      });
+
+      expect(runQmdSpy).toHaveBeenCalledTimes(1);
+      await expectPathMissing(manifestPath);
+      await manager.close();
+    } finally {
+      runQmdSpy.mockRestore();
+    }
+  });
+
+  it("queues archive events as targeted upserts and source tombstones", async () => {
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    const sessionsDir = path.join(stateDir, "agents", agentId, "sessions");
+    const currentSession = path.join(sessionsDir, "event-archive.jsonl");
+    const archivedSession = `${currentSession}.deleted.2026-08-28T12-00-00.000Z`;
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      archivedSession,
+      '{"type":"message","message":{"role":"user","content":"event archive"}}\n',
+      "utf-8",
+    );
+    await seedSessionExportBaseline();
+    const targetedUpdateSpy = vi
+      .spyOn(
+        QmdMemoryManager.prototype as unknown as {
+          runQmdTargetedSessionUpdate: (mutation: TargetedSessionMutation) => Promise<void>;
+        },
+        "runQmdTargetedSessionUpdate",
+      )
+      .mockResolvedValue(undefined);
+    try {
+      const { manager } = await createManager({ mode: "full" });
+      emitSessionTranscriptUpdate({ sessionFile: archivedSession });
+      await waitUntil(() => targetedUpdateSpy.mock.calls.length === 1);
+
+      expect(targetedUpdateSpy).toHaveBeenCalledWith({
+        upsertPaths: ["event-archive.jsonl.deleted.2026-08-28T12-00-00.000Z.md"],
+        deletePaths: ["event-archive.md"],
+      });
+      expect(await readQmdSessionExportDirtyEntries({ workspaceDir, agentId })).toEqual([]);
+      await manager.close();
+    } finally {
+      targetedUpdateSpy.mockRestore();
+    }
+  });
+
+  it("unsubscribes session export and cancels dirty and reconciliation timers on close", async () => {
+    vi.useFakeTimers();
+    await configureMemoryCoreDreamingStateForTests();
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 1_000, onBoot: false },
+          sessions: { enabled: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+    await seedSessionExportBaseline();
+    const sessionFile = path.join(stateDir, "agents", agentId, "sessions", "closed.jsonl");
+    await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+    await fs.writeFile(
+      sessionFile,
+      '{"type":"message","message":{"role":"user","content":"must stay queued nowhere"}}\n',
+    );
+    const { manager } = await createManager({ mode: "full" });
+    spawnMock.mockClear();
+
+    emitSessionTranscriptUpdate({ sessionFile });
+    await waitUntil(
+      async () => (await readQmdSessionExportDirtyEntries({ workspaceDir, agentId })).length === 1,
+    );
+    await manager.close();
+    emitSessionTranscriptUpdate({ sessionFile });
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000 + 1_000);
+
+    await expect(
+      readQmdSessionExportDirtyEntries({ workspaceDir, agentId }),
+    ).resolves.toMatchObject([{ sessionFile, operation: "upsert" }]);
+    expect(qmdCommandCalls()).toEqual([]);
   });
 
   it("runs a qmd sync once for the first search in a fresh session", async () => {
@@ -1168,6 +2595,41 @@ describe("QmdMemoryManager", () => {
       })
     )();
     await manager?.close();
+  });
+
+  it("aborts the in-flight boot update when the manager closes", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 60_000, onBoot: true },
+          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+        },
+      },
+    } as OpenClawConfig;
+
+    let updateChildKill: ReturnType<typeof vi.fn> | undefined;
+    spawnMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[0] === "update") {
+        const child = createMockChild({ autoClose: false });
+        const kill = vi.fn(() => {
+          queueMicrotask(() => child.emit("close", null));
+        });
+        Object.assign(child, { kill });
+        updateChildKill = kill;
+        return child;
+      }
+      return createMockChild();
+    });
+
+    const { manager } = await createManager({ mode: "full" });
+    await waitUntil(() => updateChildKill !== undefined);
+
+    await manager.close();
+
+    expect(updateChildKill).toHaveBeenCalledWith("SIGKILL");
   });
 
   it("skips qmd command side effects in status mode initialization", async () => {
@@ -3711,7 +5173,7 @@ describe("QmdMemoryManager", () => {
     await manager.close();
   });
 
-  it("keeps mixed-source qmd queries in separate source groups", async () => {
+  it("combines mixed-source qmd queries when collection unions are supported", async () => {
     cfg = {
       ...cfg,
       memory: {
@@ -3754,8 +5216,17 @@ describe("QmdMemoryManager", () => {
       .map((call: unknown[]) => call[1] as string[])
       .filter((args: string[]) => args[0] === "search");
     expect(searchCalls).toEqual([
-      ["search", "test", "--json", "-n", String(maxResults), "-c", "workspace-main"],
-      ["search", "test", "--json", "-n", String(maxResults), "-c", "sessions-main"],
+      [
+        "search",
+        "test",
+        "--json",
+        "-n",
+        String(maxResults),
+        "-c",
+        "workspace-main",
+        "-c",
+        "sessions-main",
+      ],
     ]);
     await manager.close();
   });
@@ -3996,9 +5467,11 @@ describe("QmdMemoryManager", () => {
       },
     } as OpenClawConfig;
 
+    const commandPhases: string[] = [];
     spawnMock.mockImplementation((cmd: string, args: string[]) => {
       const child = createMockChild({ autoClose: false });
       if (isMcporterCommand(cmd) && args[0] === "call") {
+        expect(commandPhases).toEqual(["pause"]);
         // Verify it calls qmd.query (v2) not qmd.deep_search (v1)
         expect(args[1]).toBe("qmd.query");
         const callArgs = JSON.parse(args[args.indexOf("--args") + 1]);
@@ -4023,7 +5496,13 @@ describe("QmdMemoryManager", () => {
     });
 
     const { manager } = await createManager();
-    await manager.search("hello", { sessionKey: "agent:main:slack:dm:u123" });
+    await manager.search("hello", {
+      sessionKey: "agent:main:slack:dm:u123",
+      [MEMORY_SEARCH_DEADLINE_CONTROL]: (action) => {
+        commandPhases.push(action);
+      },
+    });
+    expect(commandPhases).toEqual(["pause", "resume"]);
     await manager.close();
   });
 
@@ -4478,7 +5957,10 @@ describe("QmdMemoryManager", () => {
           searchMode: "search",
           searchTool: "query",
           update: { interval: "0s", debounceMs: 60_000, onBoot: false },
-          paths: [{ path: workspaceDir, pattern: "**/*.md", name: "workspace" }],
+          paths: [
+            { path: path.join(workspaceDir, "notes-a"), pattern: "**/*.md", name: "workspace-a" },
+            { path: path.join(workspaceDir, "notes-b"), pattern: "**/*.md", name: "workspace-b" },
+          ],
           mcporter: { enabled: true, serverName: "qmd", startDaemon: false },
         },
       },
@@ -4490,7 +5972,7 @@ describe("QmdMemoryManager", () => {
         expect(args[1]).toBe("qmd.query");
         const callArgs = JSON.parse(args[args.indexOf("--args") + 1]);
         expect(callArgs).toHaveProperty("searches", [{ type: "lex", query: "hello" }]);
-        expect(callArgs).toHaveProperty("collections", ["workspace-main"]);
+        expect(callArgs).toHaveProperty("collections", ["workspace-a-main", "workspace-b-main"]);
         expect(callArgs).not.toHaveProperty("query");
         expect(callArgs).not.toHaveProperty("minScore");
         expect(callArgs).not.toHaveProperty("collection");
@@ -4503,6 +5985,11 @@ describe("QmdMemoryManager", () => {
 
     const { manager } = await createManager();
     await manager.search("hello", { sessionKey: "agent:main:slack:dm:u123" });
+    expect(
+      spawnMock.mock.calls.filter(
+        (call) => isMcporterCommand(String(call[0])) && call[1]?.[0] === "call",
+      ),
+    ).toHaveLength(1);
     await manager.close();
   });
 
@@ -5615,6 +7102,34 @@ describe("QmdMemoryManager", () => {
     }
   });
 
+  it("keeps an explicit session collection name stable when another collection has that name", async () => {
+    cfg = {
+      ...cfg,
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          update: { interval: "0s", debounceMs: 0, onBoot: false },
+          sessions: { enabled: true, name: "brodie-sessions" },
+          paths: [
+            {
+              path: workspaceDir,
+              pattern: "**/*.md",
+              name: "brodie-sessions",
+              preserveName: true,
+            },
+          ],
+        },
+      },
+    } as OpenClawConfig;
+
+    const { manager } = await createManager({ mode: "status" });
+    const exporter = (manager as unknown as { sessionExporter?: { collectionName: string } })
+      .sessionExporter;
+    expect(exporter?.collectionName).toBe("brodie-sessions");
+    await manager.close();
+  });
+
   it("maps exported QMD artifacts to the persisted session identity", async () => {
     cfg = {
       ...cfg,
@@ -6725,7 +8240,7 @@ describe("QmdMemoryManager", () => {
     await manager.close();
   });
 
-  it("exports valid session transcripts whose IDs contain checkpoint words", async () => {
+  it("exports valid session transcripts whose IDs contain checkpoint words during full repair", async () => {
     cfg = {
       ...cfg,
       memory: {
@@ -6760,6 +8275,7 @@ describe("QmdMemoryManager", () => {
     );
 
     const { manager } = await createManager({ mode: "full" });
+    await manager.sync({ reason: "full-repair", force: true });
     const sessionExportDir = path.join(stateDir, "agents", agentId, "qmd", "sessions");
     const exported = (await fs.readdir(sessionExportDir)).toSorted();
 

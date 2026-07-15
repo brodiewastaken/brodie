@@ -12,6 +12,11 @@ import {
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
 import {
+  deleteWorkspaceSetupStateRecord,
+  readWorkspaceSetupStateRecord,
+  writeWorkspaceSetupStateRecord,
+} from "./workspace-state-store.js";
+import {
   DEFAULT_AGENTS_FILENAME,
   DEFAULT_BOOTSTRAP_FILENAME,
   DEFAULT_HEARTBEAT_FILENAME,
@@ -82,12 +87,11 @@ async function readWorkspaceState(dir: string): Promise<{
   bootstrapSeededAt?: string;
   setupCompletedAt?: string;
 }> {
-  const raw = await fs.readFile(path.join(dir, ...WORKSPACE_STATE_PATH_SEGMENTS), "utf-8");
-  return JSON.parse(raw) as {
-    version: number;
-    bootstrapSeededAt?: string;
-    setupCompletedAt?: string;
-  };
+  const state = readWorkspaceSetupStateRecord(dir);
+  if (!state) {
+    throw new Error(`expected workspace setup state for ${dir}`);
+  }
+  return state;
 }
 
 async function writeLegacyWorkspaceState(dir: string, state: unknown): Promise<void> {
@@ -138,6 +142,32 @@ function expectCronAllowedBootstrapNames(files: WorkspaceBootstrapFile[]) {
   expect(names).toStrictEqual(["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"]);
 }
 
+describe("workspace setup state store", () => {
+  it("merges each timestamp monotonically and deletes the typed SQLite row", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-state-store-");
+    writeWorkspaceSetupStateRecord(tempDir, {
+      version: 1,
+      bootstrapSeededAt: "2026-06-01T00:00:00.000Z",
+      setupCompletedAt: "2026-07-01T00:00:00.000Z",
+    });
+
+    expect(
+      writeWorkspaceSetupStateRecord(tempDir, {
+        version: 1,
+        bootstrapSeededAt: "2026-08-01T00:00:00.000Z",
+        setupCompletedAt: "2026-05-01T00:00:00.000Z",
+      }),
+    ).toEqual({
+      version: 1,
+      bootstrapSeededAt: "2026-08-01T00:00:00.000Z",
+      setupCompletedAt: "2026-07-01T00:00:00.000Z",
+    });
+
+    deleteWorkspaceSetupStateRecord(tempDir);
+    expect(readWorkspaceSetupStateRecord(tempDir)).toBeNull();
+  });
+});
+
 describe("ensureAgentWorkspace", () => {
   it("creates BOOTSTRAP.md and records a seeded marker for brand new workspaces", async () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
@@ -145,6 +175,7 @@ describe("ensureAgentWorkspace", () => {
     await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
 
     await expectBootstrapSeeded(tempDir);
+    await expectPathMissing(path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS));
     await expectPathMissing(path.join(tempDir, ...LEGACY_WORKSPACE_STATE_PATH_SEGMENTS));
     expect((await readWorkspaceState(tempDir)).setupCompletedAt).toBeUndefined();
   });
@@ -261,12 +292,10 @@ describe("ensureAgentWorkspace", () => {
     const tempDir = await makeTempWorkspace("openclaw-workspace-");
     await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
     const generatedAgents = await fs.readFile(path.join(tempDir, DEFAULT_AGENTS_FILENAME), "utf-8");
-    const state = await fs.readFile(path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS), "utf-8");
 
     await fs.rm(tempDir, { recursive: true, force: true });
     await fs.mkdir(tempDir, { recursive: true });
     await fs.writeFile(path.join(tempDir, DEFAULT_AGENTS_FILENAME), generatedAgents);
-    await fs.writeFile(path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS), state);
 
     await expectWorkspaceVanished(
       ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true }),
@@ -583,14 +612,58 @@ describe("ensureAgentWorkspace", () => {
 
     const state = await readWorkspaceState(tempDir);
     expect(state.setupCompletedAt).toBe("2026-03-15T02:30:00.000Z");
-    await expect(
-      fs.access(path.join(tempDir, ...LEGACY_WORKSPACE_STATE_PATH_SEGMENTS)),
-    ).resolves.toBeUndefined();
-    const persisted = await fs.readFile(
+    await expectPathMissing(path.join(tempDir, ...LEGACY_WORKSPACE_STATE_PATH_SEGMENTS));
+    await expectPathMissing(path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS));
+  });
+
+  it("gives canonical root state precedence when both migration files exist", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    await fs.writeFile(
       path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS),
-      "utf-8",
+      `${JSON.stringify({ version: 1, setupCompletedAt: "2026-04-01T00:00:00.000Z" })}\n`,
     );
-    expect(persisted).toContain('"setupCompletedAt": "2026-03-15T02:30:00.000Z"');
+    await writeLegacyWorkspaceState(tempDir, {
+      version: 1,
+      onboardingCompletedAt: "2026-05-01T00:00:00.000Z",
+    });
+
+    await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
+
+    expect((await readWorkspaceState(tempDir)).setupCompletedAt).toBe("2026-04-01T00:00:00.000Z");
+    await expectPathMissing(path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS));
+    await expectPathMissing(path.join(tempDir, ...LEGACY_WORKSPACE_STATE_PATH_SEGMENTS));
+  });
+
+  it("never downgrades a newer SQLite workspace setup row during import", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    writeWorkspaceSetupStateRecord(tempDir, {
+      version: 1,
+      setupCompletedAt: "2026-06-01T00:00:00.000Z",
+    });
+    await fs.writeFile(
+      path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS),
+      `${JSON.stringify({ version: 1, setupCompletedAt: "2026-04-01T00:00:00.000Z" })}\n`,
+    );
+
+    await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
+
+    expect((await readWorkspaceState(tempDir)).setupCompletedAt).toBe("2026-06-01T00:00:00.000Z");
+    await expectPathMissing(path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS));
+  });
+
+  it("retains malformed migration files while using SQLite for new state", async () => {
+    const tempDir = await makeTempWorkspace("openclaw-workspace-");
+    const canonicalPath = path.join(tempDir, ...WORKSPACE_STATE_PATH_SEGMENTS);
+    const legacyPath = path.join(tempDir, ...LEGACY_WORKSPACE_STATE_PATH_SEGMENTS);
+    await fs.writeFile(canonicalPath, "not json\n");
+    await fs.mkdir(path.dirname(legacyPath), { recursive: true });
+    await fs.writeFile(legacyPath, "also not json\n");
+
+    await ensureAgentWorkspace({ dir: tempDir, ensureBootstrapFiles: true });
+
+    await expect(fs.readFile(canonicalPath, "utf-8")).resolves.toBe("not json\n");
+    await expect(fs.readFile(legacyPath, "utf-8")).resolves.toBe("also not json\n");
+    await expectBootstrapSeeded(tempDir);
   });
 
   it("reports bootstrap pending while BOOTSTRAP.md exists and setup is incomplete", async () => {

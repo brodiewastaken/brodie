@@ -56,7 +56,7 @@ type MemorySearchManagerCacheState =
   | "transient-cli"
   | "transient-status"
   | "pending-create-wait"
-  | "fallback-builtin"
+  | "qmd-unavailable"
   | "recent-failure-cooldown";
 
 type MemorySearchManagerDebug = {
@@ -216,9 +216,7 @@ export async function getMemorySearchManager(params: {
         await fs.mkdir(workspaceDir, { recursive: true });
       } catch (err) {
         const message = formatErrorMessage(err);
-        log.warn(
-          `qmd workspace unavailable (${workspaceDir}); falling back to builtin: ${message}`,
-        );
+        log.warn(`qmd workspace unavailable (${workspaceDir}): ${message}`);
         return {
           manager: null,
           failureReason: `qmd workspace unavailable (${workspaceDir}): ${message}`,
@@ -236,7 +234,7 @@ export async function getMemorySearchManager(params: {
           resolveQmdBinaryUnavailableReason(qmdBinary) === "workspace-cwd"
             ? `qmd workspace unavailable (${workspaceDir})`
             : `qmd binary unavailable (${qmdResolved.command})`;
-        log.warn(`${failurePrefix}; falling back to builtin: ${message}`);
+        log.warn(`${failurePrefix}: ${message}`);
         return {
           manager: null,
           failureReason: `${failurePrefix}: ${message}`,
@@ -257,7 +255,7 @@ export async function getMemorySearchManager(params: {
         }
       } catch (err) {
         const message = formatErrorMessage(err);
-        log.warn(`qmd memory unavailable; falling back to builtin: ${message}`);
+        log.warn(`qmd memory unavailable: ${message}`);
         return { manager: null, failureReason: `qmd memory unavailable: ${message}` };
       }
       return { manager: null, failureReason: "qmd memory unavailable: no manager returned" };
@@ -270,21 +268,12 @@ export async function getMemorySearchManager(params: {
       if (!primary) {
         return { entry: null, failureReason };
       }
-      const wrapper = new FallbackMemoryManager(
-        {
-          primary,
-          fallbackFactory: async () => {
-            const { MemoryIndexManager } = await loadManagerRuntime();
-            return await MemoryIndexManager.get(params);
-          },
-        },
-        () => {
-          const current = QMD_MANAGER_CACHE.get(scopeKey);
-          if (current === cacheEntry) {
-            QMD_MANAGER_CACHE.delete(scopeKey);
-          }
-        },
-      );
+      const wrapper = new QmdMemoryManagerWrapper(primary, () => {
+        const current = QMD_MANAGER_CACHE.get(scopeKey);
+        if (current === cacheEntry) {
+          QMD_MANAGER_CACHE.delete(scopeKey);
+        }
+      });
       const cacheEntry: CachedQmdManagerEntry = {
         identityKey: expectedIdentityKey,
         manager: wrapper,
@@ -333,19 +322,22 @@ export async function getMemorySearchManager(params: {
               qmdIdentityHash: debugIdentityHash,
             },
           )
-        : finish(await getBuiltinMemorySearchManagerAfterQmdFailure(params, failureReason), {
-            backend: "qmd",
-            managerCacheState: "fallback-builtin",
-            qmdIdentityHash: debugIdentityHash,
-            failureCode: "qmd-unavailable",
-          });
+        : finish(
+            { manager: null, error: failureReason },
+            {
+              backend: "qmd",
+              managerCacheState: "qmd-unavailable",
+              qmdIdentityHash: debugIdentityHash,
+              failureCode: "qmd-unavailable",
+            },
+          );
     }
 
     const recentFailure = getActiveQmdManagerOpenFailure(scopeKey, identityKey);
     if (recentFailure) {
-      log.debug?.(`qmd memory unavailable; using builtin during cooldown: ${recentFailure.reason}`);
+      log.debug?.(`qmd memory unavailable during cooldown: ${recentFailure.reason}`);
       return finish(
-        await getBuiltinMemorySearchManagerAfterQmdFailure(params, recentFailure.reason),
+        { manager: null, error: recentFailure.reason },
         {
           backend: "qmd",
           managerCacheState: "recent-failure-cooldown",
@@ -400,38 +392,20 @@ export async function getMemorySearchManager(params: {
             qmdIdentityHash: debugIdentityHash,
           },
         )
-      : finish(await getBuiltinMemorySearchManagerAfterQmdFailure(params, pendingFailureReason), {
-          backend: "qmd",
-          managerCacheState: "fallback-builtin",
-          qmdIdentityHash: debugIdentityHash,
-          failureCode: "qmd-unavailable",
-        });
+      : finish(
+          { manager: null, error: pendingFailureReason },
+          {
+            backend: "qmd",
+            managerCacheState: "qmd-unavailable",
+            qmdIdentityHash: debugIdentityHash,
+            failureCode: "qmd-unavailable",
+          },
+        );
   }
 
   return finish(await getBuiltinMemorySearchManager(params), {
     backend: "builtin",
   });
-}
-
-async function getBuiltinMemorySearchManagerAfterQmdFailure(
-  params: {
-    cfg: OpenClawConfig;
-    agentId: string;
-    purpose?: MemorySearchManagerPurpose;
-  },
-  qmdFailureReason: string | undefined,
-): Promise<MemorySearchManagerResult> {
-  const fallback = await getBuiltinMemorySearchManager(params);
-  if (fallback.manager || !qmdFailureReason) {
-    return fallback;
-  }
-  const fallbackError = fallback.error?.trim();
-  return {
-    manager: null,
-    error: fallbackError
-      ? `${qmdFailureReason}; builtin fallback unavailable: ${fallbackError}`
-      : qmdFailureReason,
-  };
 }
 
 async function getBuiltinMemorySearchManager(params: {
@@ -547,8 +521,7 @@ export async function closeMemorySearchManager(params: {
   }
 }
 
-class FallbackMemoryManager implements MemorySearchManager {
-  private fallback: Maybe<MemorySearchManager> = null;
+class QmdMemoryManagerWrapper implements MemorySearchManager {
   private primaryFailed = false;
   private lastError?: string;
   private cacheEvicted = false;
@@ -556,10 +529,7 @@ class FallbackMemoryManager implements MemorySearchManager {
   private closeReason = "memory search manager is closed";
 
   constructor(
-    private readonly deps: {
-      primary: MemorySearchManager;
-      fallbackFactory: () => Promise<Maybe<MemorySearchManager>>;
-    },
+    private readonly primary: MemorySearchManager,
     private readonly onClose?: () => void,
   ) {}
 
@@ -578,7 +548,7 @@ class FallbackMemoryManager implements MemorySearchManager {
     this.ensureOpen();
     if (!this.primaryFailed) {
       try {
-        return await this.deps.primary.search(query, opts);
+        return await this.primary.search(query, opts);
       } catch (err) {
         // Caller cancellation is request-scoped, not a QMD health failure.
         // Keep the shared manager active for concurrent and later searches.
@@ -587,57 +557,41 @@ class FallbackMemoryManager implements MemorySearchManager {
         }
         this.primaryFailed = true;
         this.lastError = formatErrorMessage(err);
-        log.warn(`qmd memory failed; switching to builtin index: ${this.lastError}`);
-        await this.deps.primary.close?.().catch(() => {});
+        log.warn(`qmd memory failed: ${this.lastError}`);
         // Evict the failed wrapper so the next request can retry QMD with a fresh manager.
         this.evictCacheEntry();
+        // Retirement is best-effort. The original QMD failure is the only
+        // result this configured backend may surface for this request.
+        void this.primary.close?.().catch(() => {});
+        throw err;
       }
     }
-    const fallback = await this.ensureFallback();
-    if (fallback) {
-      return await fallback.search(query, opts);
-    }
-    throw new Error(this.lastError ?? "memory search unavailable");
+    throw new Error(this.lastError ?? "qmd memory search unavailable");
   }
 
   async readFile(params: { relPath: string; from?: number; lines?: number }) {
     this.ensureOpen();
     if (!this.primaryFailed) {
-      return await this.deps.primary.readFile(params);
+      return await this.primary.readFile(params);
     }
-    const fallback = await this.ensureFallback();
-    if (fallback) {
-      return await fallback.readFile(params);
-    }
-    throw new Error(this.lastError ?? "memory read unavailable");
+    throw new Error(this.lastError ?? "qmd memory unavailable");
   }
 
   status() {
     this.ensureOpen();
     if (!this.primaryFailed) {
-      return this.deps.primary.status();
+      return this.primary.status();
     }
-    const fallbackStatus = this.fallback?.status();
-    const fallbackInfo = { from: "qmd", reason: this.lastError ?? "unknown" };
-    if (fallbackStatus) {
-      const custom = fallbackStatus.custom ?? {};
-      return {
-        ...fallbackStatus,
-        fallback: fallbackInfo,
-        custom: {
-          ...custom,
-          fallback: { disabled: true, reason: this.lastError ?? "unknown" },
-        },
-      };
-    }
-    const primaryStatus = this.deps.primary.status();
+    const primaryStatus = this.primary.status();
     const custom = primaryStatus.custom ?? {};
     return {
       ...primaryStatus,
-      fallback: fallbackInfo,
       custom: {
         ...custom,
-        fallback: { disabled: true, reason: this.lastError ?? "unknown" },
+        qmd: {
+          ...(typeof custom.qmd === "object" && custom.qmd ? custom.qmd : {}),
+          lastError: this.lastError,
+        },
       },
     };
   }
@@ -645,53 +599,43 @@ class FallbackMemoryManager implements MemorySearchManager {
   async sync(params?: MemorySyncParams) {
     this.ensureOpen();
     if (!this.primaryFailed) {
-      await this.deps.primary.sync?.(params);
+      await this.primary.sync?.(params);
       return;
     }
-    const fallback = await this.ensureFallback();
-    await fallback?.sync?.(params);
+    throw new Error(this.lastError ?? "qmd memory unavailable");
   }
 
   async probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult> {
     this.ensureOpen();
     if (!this.primaryFailed) {
-      return await this.deps.primary.probeEmbeddingAvailability();
+      return await this.primary.probeEmbeddingAvailability();
     }
-    const fallback = await this.ensureFallback();
-    if (fallback) {
-      return await fallback.probeEmbeddingAvailability();
-    }
-    return { ok: false, error: this.lastError ?? "memory embeddings unavailable" };
+    return { ok: false, error: this.lastError ?? "qmd memory unavailable" };
   }
 
   getCachedEmbeddingAvailability(): MemoryEmbeddingProbeResult | null {
     this.ensureOpen();
     if (!this.primaryFailed) {
-      return this.deps.primary.getCachedEmbeddingAvailability?.() ?? null;
+      return this.primary.getCachedEmbeddingAvailability?.() ?? null;
     }
-    return this.fallback?.getCachedEmbeddingAvailability?.() ?? null;
+    return { ok: false, error: this.lastError ?? "qmd memory unavailable" };
   }
 
   async probeVectorStoreAvailability() {
     this.ensureOpen();
     if (!this.primaryFailed) {
-      return await (this.deps.primary.probeVectorStoreAvailability?.() ??
-        this.deps.primary.probeVectorAvailability());
+      return await (this.primary.probeVectorStoreAvailability?.() ??
+        this.primary.probeVectorAvailability());
     }
-    const fallback = await this.ensureFallback();
-    return (
-      (await (fallback?.probeVectorStoreAvailability?.() ?? fallback?.probeVectorAvailability())) ??
-      false
-    );
+    return false;
   }
 
   async probeVectorAvailability() {
     this.ensureOpen();
     if (!this.primaryFailed) {
-      return await this.deps.primary.probeVectorAvailability();
+      return await this.primary.probeVectorAvailability();
     }
-    const fallback = await this.ensureFallback();
-    return (await fallback?.probeVectorAvailability()) ?? false;
+    return false;
   }
 
   async close() {
@@ -699,34 +643,13 @@ class FallbackMemoryManager implements MemorySearchManager {
       return;
     }
     this.closed = true;
-    await this.deps.primary.close?.();
-    await this.fallback?.close?.();
+    await this.primary.close?.();
     this.evictCacheEntry();
   }
 
   async invalidate(reason: string) {
     this.closeReason = reason;
     await this.close();
-  }
-
-  private async ensureFallback(): Promise<Maybe<MemorySearchManager>> {
-    if (this.fallback) {
-      return this.fallback;
-    }
-    let fallback: Maybe<MemorySearchManager>;
-    try {
-      fallback = await this.deps.fallbackFactory();
-      if (!fallback) {
-        log.warn("memory fallback requested but builtin index is unavailable");
-        return null;
-      }
-    } catch (err) {
-      const message = formatErrorMessage(err);
-      log.warn(`memory fallback unavailable: ${message}`);
-      return null;
-    }
-    this.fallback = fallback;
-    return this.fallback;
   }
 
   private ensureOpen(): void {
@@ -745,7 +668,7 @@ class FallbackMemoryManager implements MemorySearchManager {
 }
 
 async function closeQmdManagerForReplacement(manager: MemorySearchManager): Promise<void> {
-  if (manager instanceof FallbackMemoryManager) {
+  if (manager instanceof QmdMemoryManagerWrapper) {
     await manager.invalidate("memory search manager was replaced by a newer qmd manager");
     return;
   }
