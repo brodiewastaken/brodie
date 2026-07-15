@@ -528,7 +528,7 @@ export function buildChannelInboundEventContext(
         : body,
     InboundEventKind: params.message.inboundEventKind ?? "user_request",
     BodyForAgent:
-      invocation.kind === "text"
+      invocation.kind === "text" && invocation.body !== invocation.triggerBody
         ? invocation.body
         : (params.message.bodyForAgent ?? params.message.rawBody),
     InboundHistory: params.message.inboundHistory,

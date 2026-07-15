@@ -46,6 +46,7 @@ import type { SlackAttachment, SlackFile, SlackMessageEvent } from "../../types.
 import { normalizeAllowListLower, normalizeSlackAllowOwnerEntry } from "../allow-list.js";
 import {
   authorizeSlackBotRoomMessage,
+  authorizeSlackOwnerPresence,
   resolveSlackCommandIngress,
   resolveSlackEffectiveAllowFrom,
 } from "../auth.js";
@@ -536,8 +537,14 @@ async function authorizeSlackInboundMessage(params: {
   conversation: SlackConversationContext;
 }): Promise<SlackAuthorizationContext | null> {
   const { ctx, account, message, conversation } = params;
-  const { isDirectMessage, channelName, resolvedChannelType, isBotMessage, allowBotsMode } =
-    conversation;
+  const {
+    isDirectMessage,
+    isRoomish,
+    channelName,
+    resolvedChannelType,
+    isBotMessage,
+    allowBotsMode,
+  } = conversation;
 
   if (isBotMessage) {
     if (message.user && ctx.botUserId && message.user === ctx.botUserId) {
@@ -608,6 +615,18 @@ async function authorizeSlackInboundMessage(params: {
     if (!allowed) {
       return null;
     }
+  }
+
+  if (
+    isRoomish &&
+    ctx.requireOwnerPresence &&
+    !(await authorizeSlackOwnerPresence({
+      ctx,
+      channelId: message.channel,
+      allowFromLower,
+    }))
+  ) {
+    return null;
   }
 
   return {

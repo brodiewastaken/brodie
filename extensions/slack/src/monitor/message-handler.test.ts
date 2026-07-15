@@ -1,11 +1,17 @@
 // Slack tests cover message handler plugin behavior.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SlackSchedulerAdmission } from "../scheduler-admission.js";
 
 const enqueueMock = vi.fn(async (_entry: unknown) => {});
 const flushKeyMock = vi.fn(async (_key: string) => {});
 const onFlushCallbacks: Array<(entries: Array<Record<string, unknown>>) => Promise<void>> = [];
 const prepareSlackMessageMock = vi.fn(async () => ({ ctxPayload: {} }));
 const dispatchPreparedSlackMessageMock = vi.fn(async () => {});
+const admitSlackScheduledInboundMock = vi.fn<(params: unknown) => Promise<SlackSchedulerAdmission>>(
+  async (_params) => ({
+    result: { accepted: false, reason: "disabled" },
+  }),
+);
 const hasSlackInboundMessageDeliveryMock = vi.fn(async () => false);
 const recordSlackInboundMessageDeliveriesMock = vi.fn(async () => {});
 const resolveThreadTsMock = vi.fn(async ({ message }: { message: Record<string, unknown> }) => ({
@@ -44,6 +50,10 @@ vi.mock("./thread-resolution.js", () => ({
 vi.mock("./message-handler/pipeline.runtime.js", () => ({
   prepareSlackMessage: prepareSlackMessageMock,
   dispatchPreparedSlackMessage: dispatchPreparedSlackMessageMock,
+}));
+
+vi.mock("../scheduler-admission.js", () => ({
+  admitSlackScheduledInbound: admitSlackScheduledInboundMock,
 }));
 
 vi.mock("./inbound-delivery-state.js", () => ({
@@ -103,6 +113,10 @@ describe("createSlackMessageHandler", () => {
     onFlushCallbacks.length = 0;
     prepareSlackMessageMock.mockClear();
     dispatchPreparedSlackMessageMock.mockClear();
+    admitSlackScheduledInboundMock.mockReset();
+    admitSlackScheduledInboundMock.mockResolvedValue({
+      result: { accepted: false as const, reason: "disabled" as const },
+    });
     hasSlackInboundMessageDeliveryMock.mockReset();
     hasSlackInboundMessageDeliveryMock.mockResolvedValue(false);
     recordSlackInboundMessageDeliveriesMock.mockClear();
@@ -252,6 +266,86 @@ describe("createSlackMessageHandler", () => {
 
     await onFlushCallbacks[0]?.([entry]);
     await expect(handled).resolves.toBeUndefined();
+    expect(dispatchPreparedSlackMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands durable human input to the scheduler before native dispatch", async () => {
+    admitSlackScheduledInboundMock.mockResolvedValueOnce({
+      result: { accepted: true as const, receiptId: "receipt-1", durableAt: 10 },
+    });
+    const { handler } = createHandlerWithTracker();
+
+    await handleDirectMessage(handler);
+    const entry = enqueueMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    await onFlushCallbacks[0]?.([entry]);
+
+    expect(admitSlackScheduledInboundMock).toHaveBeenCalledWith({
+      prepared: expect.anything(),
+      source: "message",
+      onError: expect.any(Function),
+    });
+    expect(dispatchPreparedSlackMessageMock).not.toHaveBeenCalled();
+    expect(recordSlackInboundMessageDeliveriesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves every debounced direct-message source as its own scheduler admission", async () => {
+    admitSlackScheduledInboundMock.mockResolvedValue({
+      result: { accepted: true as const, receiptId: "receipt", durableAt: 10 },
+    });
+    const { handler } = createHandlerWithTracker();
+    await handler(
+      { type: "message", channel: "D1", user: "U1", ts: "1.001", text: "first" } as never,
+      { source: "message" },
+    );
+    await handler(
+      { type: "message", channel: "D1", user: "U1", ts: "1.002", text: "second" } as never,
+      { source: "message" },
+    );
+
+    const entries = enqueueMock.mock.calls.map(([entry]) => entry as Record<string, unknown>);
+    await onFlushCallbacks[0]?.(entries);
+
+    expect(prepareSlackMessageMock).toHaveBeenCalledTimes(2);
+    expect(prepareSlackMessageMock.mock.calls.map(([params]) => params.message)).toEqual([
+      expect.objectContaining({ ts: "1.001", text: "first" }),
+      expect.objectContaining({ ts: "1.002", text: "second" }),
+    ]);
+    expect(admitSlackScheduledInboundMock).toHaveBeenCalledTimes(2);
+    expect(recordSlackInboundMessageDeliveriesMock).toHaveBeenNthCalledWith(1, {
+      accountId: "default",
+      messages: [expect.objectContaining({ ts: "1.001" })],
+    });
+    expect(recordSlackInboundMessageDeliveriesMock).toHaveBeenNthCalledWith(2, {
+      accountId: "default",
+      messages: [expect.objectContaining({ ts: "1.002" })],
+    });
+  });
+
+  it("fails open to native dispatch after scheduler admission declines", async () => {
+    const { handler } = createHandlerWithTracker();
+
+    await handleDirectMessage(handler);
+    const entry = enqueueMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    await onFlushCallbacks[0]?.([entry]);
+
+    expect(admitSlackScheduledInboundMock).toHaveBeenCalledTimes(1);
+    expect(dispatchPreparedSlackMessageMock).toHaveBeenCalledTimes(1);
+    expect(admitSlackScheduledInboundMock.mock.invocationCallOrder[0]).toBeLessThan(
+      dispatchPreparedSlackMessageMock.mock.invocationCallOrder[0] ?? 0,
+    );
+  });
+
+  it("keeps lifecycle commands on the native path", async () => {
+    prepareSlackMessageMock.mockResolvedValueOnce({
+      ctxPayload: { CommandBody: "/new" },
+    });
+    const { handler } = createHandlerWithTracker();
+
+    await handleDirectMessage(handler);
+    const entry = enqueueMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    await onFlushCallbacks[0]?.([entry]);
+
+    expect(admitSlackScheduledInboundMock).not.toHaveBeenCalled();
     expect(dispatchPreparedSlackMessageMock).toHaveBeenCalledTimes(1);
   });
 

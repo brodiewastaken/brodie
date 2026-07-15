@@ -11,6 +11,10 @@ import {
 import type { SessionEntry } from "../../config/sessions.js";
 import { HEARTBEAT_RUN_SCOPE } from "../../infra/heartbeat-run-scope.js";
 import { MESSAGE_TOOL_ONLY_DELIVERY_HINT } from "../../plugin-sdk/message-tool-delivery-hints.js";
+import {
+  materializeHumanInboundBatch,
+  renderHumanInboundBatch,
+} from "../../scheduler/human-inbound.js";
 import { createReplyOperation } from "./reply-run-registry.js";
 
 vi.mock("../../agents/auth-profiles/session-override.js", () => ({
@@ -1179,6 +1183,133 @@ describe("runPreparedReply media-only handling", () => {
     expect(call.followupRun.imageOrder).toEqual(["inline"]);
   });
 
+  it("binds scheduled native image evidence to the actual provider image block", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-followup-image-"));
+    cleanupPaths.push(tmpDir);
+    const imagePath = path.join(tmpDir, "inbound.png");
+    await writeFile(
+      imagePath,
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+        "base64",
+      ),
+    );
+    const route = {
+      channel: "discord",
+      accountId: "default",
+      conversationKind: "channel" as const,
+      conversationId: "C123",
+      sessionKey: "agent:main:conversation:discord:channel:C123",
+      queueLaneKey: "discord:default:channel:C123",
+      transcriptOwner: {
+        agentId: "main",
+        sessionKey: "agent:main:conversation:discord:channel:C123",
+      },
+    };
+    const batch = materializeHumanInboundBatch({
+      route,
+      placement: "idle",
+      payloads: [
+        {
+          version: 1,
+          channel: "discord",
+          accountId: "default",
+          conversationId: "C123",
+          sessionKey: route.sessionKey,
+          messageId: "discord-message-1",
+          receivedAt: Date.UTC(2026, 6, 16, 1),
+          chatType: "channel",
+          sender: { id: "user-1", name: "Abhay" },
+          body: "what is in this image?",
+          bodyForAgent: "what is in this image?",
+          commandAuthorized: true,
+          media: [
+            {
+              kind: "image",
+              mimeType: "image/png",
+              mediaRef: "discord:discord-message-1:0",
+              managedLocalPath: imagePath,
+              sourceMessageId: "discord-message-1",
+              sourceIndex: 0,
+              understanding: [
+                {
+                  kind: "image.description",
+                  text: "possibly a tiny dot",
+                  provider: "google",
+                  model: "gemini-3-flash",
+                  trust: "derived_untrusted",
+                },
+              ],
+            },
+          ],
+          conversation: {
+            channel: "discord",
+            conversationType: "guild_channel",
+            conversationName: "#testing",
+            sessionKey: route.sessionKey,
+          },
+          nativeMetadata: {},
+        },
+      ],
+    });
+    const body = renderHumanInboundBatch(batch);
+
+    await runPreparedReply(
+      baseParams({
+        ctx: {
+          Body: body,
+          BodyForAgent: body,
+          RawBody: "what is in this image?",
+          CommandBody: "what is in this image?",
+          HumanInboundBatch: batch,
+          MediaPaths: [imagePath],
+          MediaTypes: ["image/png"],
+          MediaWorkspaceDir: tmpDir,
+          MessageSids: ["discord-message-1"],
+          ExplicitDeliverRoute: true,
+          OriginatingChannel: "discord",
+          OriginatingTo: "C123",
+          ChatType: "group",
+        },
+        sessionCtx: {
+          Body: body,
+          BodyStripped: body,
+          Provider: "discord",
+          OriginatingChannel: "discord",
+          OriginatingTo: "C123",
+          ChatType: "group",
+          MediaPaths: [imagePath],
+          MediaTypes: ["image/png"],
+          MediaWorkspaceDir: tmpDir,
+        },
+      }),
+    );
+
+    const call = requireRunReplyAgentCall();
+    expect(call.followupRun.images).toHaveLength(1);
+    expect(call.followupRun.prompt.startsWith("[📋 QUEUE ENGINE]:")).toBe(true);
+    expect(call.followupRun.prompt).not.toContain("[media attached:");
+    expect(call.followupRun.prompt).toContain("Native Image Input:");
+    expect(call.followupRun.prompt).toContain("attached_as_next_provider_content_block");
+    expect(call.followupRun.userTurnTranscriptRecorder?.message).toMatchObject({
+      openclawSourceMessage: { text: "what is in this image?" },
+      __openclaw: {
+        humanInboundBatch: {
+          inbounds: [
+            {
+              media: [
+                {
+                  nativeImageCandidate: { contentHash: expect.stringMatching(/^sha256:/u) },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    expect(call.followupRun.humanInboundBatch).toBeDefined();
+  });
+
   it("does not copy prior session media onto text-only followups", async () => {
     await runPreparedReply(
       baseParams({
@@ -1295,7 +1426,7 @@ describe("runPreparedReply media-only handling", () => {
     });
   });
 
-  it("does not rehydrate current MediaPaths after image understanding enriched the prompt", async () => {
+  it("keeps current image pixels after image understanding enriched the prompt", async () => {
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-followup-image-"));
     cleanupPaths.push(tmpDir);
     const imagePath = path.join(tmpDir, "inbound.png");
@@ -1340,6 +1471,16 @@ describe("runPreparedReply media-only handling", () => {
               text: "another tiny dot image",
             },
           ],
+          MessageSids: ["message-1"],
+          ExternalFiles: [
+            {
+              marker: "[External file: clip]",
+              idempotencyKey: "file:clip",
+              attachmentIndex: 2,
+              mediaRef: "media:clip",
+              mimeType: "video/mp4",
+            },
+          ],
           OriginatingChannel: "webchat",
           OriginatingTo: "webchat:local",
           ChatType: "direct",
@@ -1361,12 +1502,47 @@ describe("runPreparedReply media-only handling", () => {
     expect(result).toEqual({ text: "ok" });
     expect(vi.mocked(runReplyAgent)).toHaveBeenCalledOnce();
     const call = requireRunReplyAgentCall();
-    expect(call.followupRun.images).toBeUndefined();
-    expect(call.followupRun.imageOrder).toBeUndefined();
+    expect(call.followupRun.images).toEqual([
+      {
+        type: "image",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+        mimeType: "image/png",
+      },
+      {
+        type: "image",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+        mimeType: "image/png",
+      },
+    ]);
+    expect(call.followupRun.imageOrder).toEqual(["inline", "inline"]);
+    expect(call.followupRun.externalFiles).toEqual([
+      {
+        marker: "[External file: clip]",
+        idempotencyKey: "file:clip",
+        attachmentIndex: 2,
+        mediaRef: "media:clip",
+        mimeType: "video/mp4",
+      },
+    ]);
+    expect(call.followupRun.promptImageRefExclusions).toEqual(["media:clip"]);
+    expect(call.followupRun.queueBatchIdentity).toMatchObject({
+      version: 1,
+      sourceMessageIds: ["message-1"],
+      nativeImageCount: 2,
+    });
+    expect(call.followupRun.userTurnTranscriptRecorder?.message).toMatchObject({
+      __openclaw: {
+        queueBatchIdentity: {
+          version: 1,
+          sourceMessageIds: ["message-1"],
+          nativeImageCount: 2,
+        },
+      },
+    });
     expect(call.followupRun.prompt).toContain("a tiny dot image");
   });
 
-  it("rehydrates only current MediaPaths missing image understanding", async () => {
+  it("keeps described and undescribed current image pixels", async () => {
     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-followup-image-"));
     cleanupPaths.push(tmpDir);
     const imagePath = path.join(tmpDir, "inbound.png");
@@ -1423,11 +1599,16 @@ describe("runPreparedReply media-only handling", () => {
     expect(call.followupRun.images).toEqual([
       {
         type: "image",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+        mimeType: "image/png",
+      },
+      {
+        type: "image",
         data: secondImageData.toString("base64"),
         mimeType: "image/png",
       },
     ]);
-    expect(call.followupRun.imageOrder).toEqual(["inline"]);
+    expect(call.followupRun.imageOrder).toEqual(["inline", "inline"]);
     expect(call.followupRun.prompt).toContain("a tiny dot image");
   });
 
@@ -1451,6 +1632,7 @@ describe("runPreparedReply media-only handling", () => {
     const call = requireRunReplyAgentCall();
     expect(call?.resetTriggered).toBe(true);
     expect(call?.replyThreadingOverride).toEqual({ implicitCurrentMessage: "deny" });
+    expect(call.followupRun.run.allowedConversationalActions).toEqual(["reply"]);
     expect(vi.mocked(routeReply)).not.toHaveBeenCalled();
   });
 
@@ -1492,6 +1674,44 @@ describe("runPreparedReply media-only handling", () => {
     );
     expect(call.followupRun.run.allowedConversationalActions).toEqual(["reply"]);
     expect(call.followupRun.run.sourceReplyDeliveryMode).toBe("message_tool_only");
+  });
+
+  it("preserves authored source text beside a scheduler model envelope", async () => {
+    const schedulerEnvelope =
+      "[HUMAN_MESSAGE EVENT]\n[THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\nmodel-visible body";
+    await runPreparedReply(
+      baseParams({
+        ctx: {
+          Body: schedulerEnvelope,
+          BodyForAgent: schedulerEnvelope,
+          RawBody: "authored source message",
+          CommandBody: "authored source message",
+          ExplicitDeliverRoute: true,
+          MessageSids: ["message-1"],
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: "whatsapp" },
+        },
+        sessionCtx: {
+          Body: schedulerEnvelope,
+          BodyStripped: schedulerEnvelope,
+          RawBody: "authored source message",
+          Provider: "whatsapp",
+          ChatType: "group",
+          OriginatingChannel: "whatsapp",
+          OriginatingTo: "room-1",
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: "whatsapp" },
+        },
+        opts: { sourceReplyDeliveryMode: "message_tool_only" },
+      }),
+    );
+
+    const message = requireRunReplyAgentCall().followupRun.userTurnTranscriptRecorder?.message;
+    expect(message).toMatchObject({
+      role: "user",
+      content: schedulerEnvelope,
+      openclawSourceMessage: { text: "authored source message" },
+    });
   });
 
   it("keeps /reset soft tails even when the bare reset prompt is empty", async () => {
@@ -3696,6 +3916,18 @@ describe("runPreparedReply media-only handling", () => {
 
     const call = requireRunReplyAgentCall();
     expect(call.followupRun.run.fastMode).toBe("auto");
+  });
+
+  it("forwards a channel reasoning override into the followup run", async () => {
+    await runPreparedReply(
+      baseParams({
+        resolvedThinkLevel: "low",
+        runPolicyReasoningOverride: "low",
+      }),
+    );
+
+    const call = requireRunReplyAgentCall();
+    expect(call.followupRun.run.runPolicyReasoningOverride).toBe("low");
   });
 
   it("carries system events into followupRun.prompt for deferred turns", async () => {

@@ -203,6 +203,23 @@ describe("buildChannelInboundEventContext", () => {
     }
   });
 
+  it("keeps a channel-projected agent body separate from command parsing text", () => {
+    const ctx = buildChannelInboundEventContext(
+      createBaseContextParams({
+        message: {
+          body: "@277038292303944 check",
+          rawBody: "@277038292303944 check",
+          bodyForAgent: "@Ada [+15551234567][277038292303944@lid] check",
+          commandBody: "check",
+        },
+      }),
+    );
+
+    expect(ctx.Body).toBe("@277038292303944 check");
+    expect(ctx.BodyForAgent).toBe("@Ada [+15551234567][277038292303944@lid] check");
+    expect(ctx.CommandBody).toBe("check");
+  });
+
   it("preserves channel-owned hook context without rendering it as prompt text", () => {
     const ctx = buildChannelInboundEventContext(
       createBaseContextParams({

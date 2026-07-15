@@ -36,20 +36,47 @@ export function buildReplyPromptBodies(params: {
   queuedBody: string;
   transcriptCommandBody: string;
 } {
+  const isHumanInboundBatch = Boolean(params.ctx.HumanInboundBatch);
   const combinedEventsBlock = (params.systemEventBlocks ?? []).filter(Boolean).join("\n");
   const prependEvents = (body: string) =>
-    combinedEventsBlock ? `${combinedEventsBlock}\n\n${body}` : body;
+    combinedEventsBlock
+      ? isHumanInboundBatch
+        ? `${body}\n\n${combinedEventsBlock}`
+        : `${combinedEventsBlock}\n\n${body}`
+      : body;
+  const anchorHumanInboundBody = (decoratedBody: string, baseBody: string): string => {
+    if (!isHumanInboundBatch || decoratedBody === baseBody) {
+      return decoratedBody;
+    }
+    const baseIndex = decoratedBody.indexOf(baseBody);
+    if (baseIndex === -1) {
+      return decoratedBody;
+    }
+    const before = decoratedBody.slice(0, baseIndex).trim();
+    const after = decoratedBody.slice(baseIndex + baseBody.length).trim();
+    return [baseBody, before, after].filter(Boolean).join("\n\n");
+  };
   const rawPrefixedBody = params.prefixedBody ?? params.effectiveBaseBody;
   const bodyWithEvents = prependEvents(params.effectiveBaseBody);
   const prefixedBodyWithEvents = appendUntrustedContext(
-    prependEvents(rawPrefixedBody),
+    prependEvents(anchorHumanInboundBody(rawPrefixedBody, params.effectiveBaseBody)),
     params.sessionCtx.UntrustedContext,
   );
-  const prefixedBody = [params.threadContextNote, prefixedBodyWithEvents]
+  const prefixedBody = (
+    isHumanInboundBatch
+      ? [prefixedBodyWithEvents, params.threadContextNote]
+      : [params.threadContextNote, prefixedBodyWithEvents]
+  )
     .filter(Boolean)
     .join("\n\n");
-  const queueBodyBase = [params.threadContextNote, bodyWithEvents].filter(Boolean).join("\n\n");
-  const mediaNote = buildInboundMediaNote(params.ctx);
+  const queueBodyBase = (
+    isHumanInboundBatch
+      ? [bodyWithEvents, params.threadContextNote]
+      : [params.threadContextNote, bodyWithEvents]
+  )
+    .filter(Boolean)
+    .join("\n\n");
+  const mediaNote = isHumanInboundBatch ? undefined : buildInboundMediaNote(params.ctx);
   const mediaReplyHint = mediaNote ? REPLY_MEDIA_HINT : undefined;
   const queuedBodyRaw = mediaNote
     ? [mediaNote, mediaReplyHint, queueBodyBase].filter(Boolean).join("\n").trim()
@@ -69,14 +96,16 @@ export function buildReplyPromptBodies(params: {
     : includeMediaTranscript
       ? mediaNote
       : "";
+  const annotate = (body: string) =>
+    anchorHumanInboundBody(
+      annotateInterSessionPromptText(body, params.sessionCtx.InputProvenance),
+      params.effectiveBaseBody,
+    );
   return {
     mediaNote,
     mediaReplyHint,
-    prefixedCommandBody: annotateInterSessionPromptText(
-      prefixedCommandBodyRaw,
-      params.sessionCtx.InputProvenance,
-    ),
-    queuedBody: annotateInterSessionPromptText(queuedBodyRaw, params.sessionCtx.InputProvenance),
+    prefixedCommandBody: annotate(prefixedCommandBodyRaw),
+    queuedBody: annotate(queuedBodyRaw),
     transcriptCommandBody: transcriptCommandBodyRaw,
   };
 }
@@ -214,7 +243,8 @@ export function buildReplyPromptEnvelopeBase(
   params: ReplyPromptEnvelopeBaseParams,
 ): ReplyPromptEnvelopeBase {
   const softResetTail = params.softResetTail?.trim() ?? "";
-  const isRoomEvent = params.inboundEventKind === "room_event";
+  const isHumanInboundBatch = Boolean(params.ctx.HumanInboundBatch);
+  const isRoomEvent = params.inboundEventKind === "room_event" && !isHumanInboundBatch;
   const inboundUserContext = params.inboundUserContext.trim();
   const roomEventContext = buildRoomEventContext(params, inboundUserContext);
   const resumableRoomEventContext = isRoomEvent
@@ -226,7 +256,9 @@ export function buildReplyPromptEnvelopeBase(
   });
   const currentInboundContextText = isRoomEvent
     ? roomEventContext
-    : [inboundUserContext, userRequestDeliveryDirective].filter(Boolean).join("\n\n");
+    : [inboundUserContext, isHumanInboundBatch ? undefined : userRequestDeliveryDirective]
+        .filter(Boolean)
+        .join("\n\n");
   const resetModelBody = params.isBareSessionReset
     ? [
         params.inboundUserContext,
@@ -239,11 +271,13 @@ export function buildReplyPromptEnvelopeBase(
         .filter(Boolean)
         .join("\n\n")
     : params.baseBody;
-  const effectiveBaseBody = isRoomEvent
-    ? ROOM_EVENT_PROMPT
-    : params.hasUserBody
-      ? resetModelBody
-      : "[User sent media without caption]";
+  const effectiveBaseBody = isHumanInboundBatch
+    ? params.baseBody
+    : isRoomEvent
+      ? ROOM_EVENT_PROMPT
+      : params.hasUserBody
+        ? resetModelBody
+        : "[User sent media without caption]";
   // Room-event transcript rows are plain chat lines; replay treats them as
   // conversation, while the OpenClaw marker remains current-turn context only.
   const transcriptBody = params.isHeartbeat
@@ -261,6 +295,7 @@ export function buildReplyPromptEnvelopeBase(
           text: currentInboundContextText,
           ...(resumableRoomEventContext ? { resumableText: resumableRoomEventContext } : {}),
           promptJoiner: params.inboundUserContextPromptJoiner,
+          ...(isHumanInboundBatch ? { placement: "tail" as const } : {}),
           ...(params.activeGoalContext ? { injectedGoalContexts: [params.activeGoalContext] } : {}),
         }
       : undefined;

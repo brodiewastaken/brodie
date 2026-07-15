@@ -1,7 +1,7 @@
 // Slack plugin module implements shortcut interaction behavior.
+import { createHash } from "node:crypto";
 import type { GlobalShortcut, MessageShortcut, SlackShortcutMiddlewareArgs } from "@slack/bolt";
-import { requestHeartbeat } from "openclaw/plugin-sdk/heartbeat-runtime";
-import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
+import { admitDurableSystemEventWake } from "openclaw/plugin-sdk/heartbeat-runtime";
 import { authorizeSlackSystemEventSender } from "../auth.js";
 import type { SlackMonitorContext } from "../context.js";
 
@@ -96,25 +96,30 @@ async function handleSlackShortcut(params: {
   params.ctx.runtime.log?.(
     `slack:interaction ${interactionType} callback=${callbackId} user=${userId} channel=${channelId ?? "direct"}`,
   );
-  const queued = enqueueSystemEvent(params.formatSystemEvent(eventPayload), {
+  const systemEventText = params.formatSystemEvent(eventPayload);
+  const deliveryContext = {
+    channel: "slack" as const,
+    to: auth.channelType === "im" ? `user:${userId}` : `channel:${channelId}`,
+    accountId: params.ctx.accountId,
+    threadId: threadTs,
+  };
+  await admitDurableSystemEventWake({
+    cfg: params.ctx.cfg,
     sessionKey,
-    contextKey,
-    deliveryContext: {
-      channel: "slack",
-      to: auth.channelType === "im" ? `user:${userId}` : `channel:${channelId}`,
-      accountId: params.ctx.accountId,
-      threadId: threadTs,
-    },
+    systemEvent: { text: systemEventText, contextKey, deliveryContext },
+    source: "hook",
+    intent: "immediate",
+    reason: "hook:slack-interaction",
+    sourceGeneration: createHash("sha256")
+      .update(params.ctx.accountId)
+      .update("\0")
+      .update(sessionKey)
+      .update("\0")
+      .update(contextKey)
+      .digest("hex"),
+    producerKind: "system",
+    heartbeat: { target: "last" },
   });
-  if (queued) {
-    requestHeartbeat({
-      source: "hook",
-      intent: "immediate",
-      reason: "hook:slack-interaction",
-      sessionKey,
-      heartbeat: { target: "last" },
-    });
-  }
 }
 
 export function registerSlackShortcutHandler(params: {

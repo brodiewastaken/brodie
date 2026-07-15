@@ -1620,6 +1620,7 @@ export async function startGatewayServer(
           startCron: false,
           logCron,
           log,
+          gatewayRequestContext,
           pluginLookUpTable,
         });
         runtimeState.heartbeatRunner = activated.heartbeatRunner;

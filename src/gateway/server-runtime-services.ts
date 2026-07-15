@@ -1,3 +1,5 @@
+import { ensureMediaGenerationCompletionSchedulerProducerRegistered } from "../agents/tools/media-generate-background-scheduler-registration.js";
+import { ensureSessionsSendSchedulerProducerRegistered } from "../agents/tools/sessions-send-tool.scheduler-registration.js";
 // Gateway post-ready runtime services.
 // Starts delayed maintenance, cron, heartbeat, recovery, and pricing refresh work.
 import { getRuntimeConfig } from "../config/config.js";
@@ -5,8 +7,11 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isVitestRuntimeEnv } from "../infra/env.js";
 import { startHeartbeatRunner, type HeartbeatRunner } from "../infra/heartbeat-runner.js";
 import type { PluginMetadataRegistryView } from "../plugins/plugin-metadata-snapshot.types.js";
+import { ensureRuntimeTurnSchedulerProducerRegistered } from "../scheduler/runtime-turn-admission.js";
 import { isGatewayModelPricingEnabled } from "./model-pricing-config.js";
+import { installGatewayOperatorTurnRecovery } from "./operator-turn-recovery.js";
 import type { startGatewayMaintenanceTimers } from "./server-maintenance.js";
+import type { GatewayRequestContext } from "./server-methods/types.js";
 import {
   createNoopHeartbeatRunner,
   type GatewayRuntimeServiceLogger,
@@ -224,6 +229,7 @@ export function activateGatewayScheduledServices(params: {
   startCron?: boolean;
   logCron: { error: (message: string) => void };
   log: GatewayRuntimeServiceLogger;
+  gatewayRequestContext?: GatewayRequestContext;
   pluginLookUpTable?: PluginMetadataRegistryView;
 }): { heartbeatRunner: HeartbeatRunner; stopModelPricingRefresh: () => void } {
   if (params.minimalTestGateway) {
@@ -231,6 +237,12 @@ export function activateGatewayScheduledServices(params: {
     // production starts without launching background loops.
     return { heartbeatRunner: createNoopHeartbeatRunner(), stopModelPricingRefresh: () => {} };
   }
+  ensureMediaGenerationCompletionSchedulerProducerRegistered();
+  if (params.gatewayRequestContext) {
+    installGatewayOperatorTurnRecovery(params.gatewayRequestContext);
+  }
+  ensureRuntimeTurnSchedulerProducerRegistered();
+  ensureSessionsSendSchedulerProducerRegistered();
   const heartbeatRunner = startHeartbeatRunner({
     cfg: params.cfgAtStart,
     readCurrentConfig: getRuntimeConfig,

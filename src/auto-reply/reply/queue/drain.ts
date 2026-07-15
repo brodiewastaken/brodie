@@ -11,6 +11,11 @@ import {
 } from "../../../plugin-sdk/channel-route.js";
 import { defaultRuntime } from "../../../runtime.js";
 import {
+  renderHumanInboundBatch,
+  type HumanInboundBatch,
+} from "../../../scheduler/human-inbound.js";
+import { mergeQueueBatchIdentities } from "../../../scheduler/queue-batch-identity.js";
+import {
   buildPersistedUserTurnMediaInputsFromFields,
   createUserTurnTranscriptRecorder,
 } from "../../../sessions/user-turn-transcript.js";
@@ -269,11 +274,25 @@ function collectQueuedImages(items: FollowupRun[]): Pick<FollowupRun, "images" |
   };
 }
 
+function collectExternalFiles(items: FollowupRun[]): FollowupRun["externalFiles"] {
+  const files = new Map<string, NonNullable<FollowupRun["externalFiles"]>[number]>();
+  for (const file of items.flatMap((item) => item.externalFiles ?? [])) {
+    if (!files.has(file.idempotencyKey)) {
+      files.set(file.idempotencyKey, file);
+    }
+  }
+  return files.size > 0 ? [...files.values()] : undefined;
+}
+
 type FollowupRuntimeMetadata = Pick<
   FollowupRun,
   | "currentInboundEventKind"
   | "currentInboundAudio"
   | "currentInboundContext"
+  | "humanInboundBatch"
+  | "externalFiles"
+  | "queueBatchIdentity"
+  | "promptImageRefExclusions"
   | "abortSignal"
   | "queueAbortSignal"
   | "deliveryCorrelations"
@@ -300,6 +319,10 @@ function buildCollectTranscriptPrompt(items: FollowupRun[]): string {
     renderItem: (item, index) =>
       renderCollectItemPrompt(item, index, item.transcriptPrompt ?? item.prompt),
   });
+}
+
+function buildCollectAuthoredSource(items: FollowupRun[]): string {
+  return items.map((item) => item.transcriptPrompt ?? item.prompt).join("\n\n");
 }
 
 function resolveFollowupTranscriptTarget(source: FollowupRun) {
@@ -335,12 +358,18 @@ function resolveFollowupTranscriptTarget(source: FollowupRun) {
   };
 }
 
-function createCollectUserTurnTranscriptRecorder(items: FollowupRun[]) {
+function createCollectUserTurnTranscriptRecorder(
+  items: FollowupRun[],
+  humanInboundBatch?: HumanInboundBatch,
+) {
   const transcriptSources = items.filter((item) => item.userTurnTranscriptRecorder);
   const source = transcriptSources.at(-1);
   if (!source) {
     return undefined;
   }
+  const queueBatchIdentity = mergeQueueBatchIdentities(
+    transcriptSources.map((item) => item.queueBatchIdentity),
+  );
   const buildInput = async () => {
     const messages = await Promise.all(
       transcriptSources.map(
@@ -370,9 +399,12 @@ function createCollectUserTurnTranscriptRecorder(items: FollowupRun[]) {
       .digest("hex");
     return {
       text: transcriptPrompt,
+      sourceMessage: buildCollectAuthoredSource(transcriptSources),
       senderIsOwner: source.run.senderIsOwner,
       provenance: source.run.inputProvenance,
       idempotencyKey: `followup-collect:${source.run.sessionId}:${identityHash}`,
+      ...(queueBatchIdentity ? { queueBatchIdentity } : {}),
+      ...(humanInboundBatch ? { humanInboundBatch } : {}),
       ...(timestamp === undefined ? {} : { timestamp }),
       ...(media.length === 0
         ? {}
@@ -386,8 +418,11 @@ function createCollectUserTurnTranscriptRecorder(items: FollowupRun[]) {
   return createUserTurnTranscriptRecorder({
     input: {
       text: initialTranscriptPrompt,
+      sourceMessage: buildCollectAuthoredSource(transcriptSources),
       senderIsOwner: source.run.senderIsOwner,
       provenance: source.run.inputProvenance,
+      ...(queueBatchIdentity ? { queueBatchIdentity } : {}),
+      ...(humanInboundBatch ? { humanInboundBatch } : {}),
     },
     resolveInput: buildInput,
     target: () => resolveFollowupTranscriptTarget(source),
@@ -508,8 +543,55 @@ function collectCurrentInboundContext(items: FollowupRun[]): FollowupRun["curren
     text,
     ...(resumableText ? { resumableText } : {}),
     promptJoiner: "\n\n",
+    ...(contexts.every(({ context }) => context.placement === "tail")
+      ? { placement: "tail" as const }
+      : {}),
     ...(injectedGoalContexts.length > 0 ? { injectedGoalContexts } : {}),
   };
+}
+
+function mergeCollectedHumanInboundBatch(items: FollowupRun[]): HumanInboundBatch | undefined {
+  const batches = items.map((item) => item.humanInboundBatch);
+  if (batches.some((batch) => !batch)) {
+    return undefined;
+  }
+  const typedBatches = batches as HumanInboundBatch[];
+  const first = typedBatches[0];
+  const last = typedBatches.at(-1);
+  if (!first || !last) {
+    return undefined;
+  }
+  const routeKey = first.route.queueLaneKey;
+  if (typedBatches.some((batch) => batch.route.queueLaneKey !== routeKey)) {
+    return undefined;
+  }
+  return {
+    ...first,
+    placement: last.placement,
+    inbounds: typedBatches.flatMap((batch) => batch.inbounds),
+    ...(last.recovery ? { recovery: last.recovery } : {}),
+  };
+}
+
+function buildCollectedHumanInboundPrompt(params: {
+  batch: HumanInboundBatch;
+  items: FollowupRun[];
+}): string {
+  const supplements = params.items.flatMap((item) => {
+    const sourceBatch = item.humanInboundBatch;
+    if (!sourceBatch) {
+      return [];
+    }
+    const renderedSource = renderHumanInboundBatch(sourceBatch);
+    if (!item.prompt.startsWith(renderedSource)) {
+      return [];
+    }
+    const supplement = item.prompt.slice(renderedSource.length).trim();
+    return supplement ? [supplement] : [];
+  });
+  return [renderHumanInboundBatch(params.batch), ...new Set(supplements)]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function collectRuntimeMetadata(
@@ -523,10 +605,18 @@ function collectRuntimeMetadata(
       item.onFollowupAdmissionWaitChange ? [item.onFollowupAdmissionWaitChange] : [],
     ),
   );
+  const promptImageRefExclusions = [
+    ...new Set(items.flatMap((item) => item.promptImageRefExclusions ?? [])),
+  ];
   return {
     currentInboundEventKind: currentTurnSource?.currentInboundEventKind,
     currentInboundAudio: currentTurnSource?.currentInboundAudio,
     currentInboundContext: collectCurrentInboundContext(items),
+    humanInboundBatch: mergeCollectedHumanInboundBatch(items),
+    externalFiles: collectExternalFiles(items),
+    queueBatchIdentity: mergeQueueBatchIdentities(items.map((item) => item.queueBatchIdentity)),
+    promptImageRefExclusions:
+      promptImageRefExclusions.length > 0 ? promptImageRefExclusions : undefined,
     abortSignal,
     queueAbortSignal: items.find((item) => item.queueAbortSignal)?.queueAbortSignal,
     deliveryCorrelations: deliveryCorrelations.length > 0 ? deliveryCorrelations : undefined,
@@ -856,6 +946,11 @@ export function createOverflowSummaryRetrySource(source: FollowupRun): FollowupR
     originatingReplyToMode: source.originatingReplyToMode,
     originatingChatType: source.originatingChatType,
     abortSignal: source.abortSignal,
+    images: source.images,
+    imageOrder: source.imageOrder,
+    externalFiles: source.externalFiles,
+    queueBatchIdentity: source.queueBatchIdentity,
+    promptImageRefExclusions: source.promptImageRefExclusions,
     queuedLifecycle: source.queuedLifecycle,
     onFollowupAdmissionWaitChange: source.onFollowupAdmissionWaitChange,
     ...(source.currentInboundEventKind === "room_event"
@@ -896,17 +991,22 @@ async function runSyntheticOverflowSummary(params: {
       ]),
     )
     .digest("hex");
+  const queueBatchIdentity = mergeQueueBatchIdentities(
+    params.sources.map((source) => source.queueBatchIdentity),
+  );
   const userTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
     input: {
       text: params.prompt,
       idempotencyKey: `followup-overflow:${params.source.run.sessionId}:${routeHash}:${params.source.messageId ?? params.source.enqueuedAt}:${promptHash}`,
       provenance: params.source.run.inputProvenance,
+      ...(queueBatchIdentity ? { queueBatchIdentity } : {}),
     },
     target: () => resolveFollowupTranscriptTarget(params.source),
     beforeMessageWrite: runAgentHarnessBeforeMessageWriteHook,
     errorContext: "followup overflow summary transcript",
   });
   const currentInboundEventKind = resolveOverflowSummaryInboundEventKind(params.sources);
+  const runtimeMetadata = collectRuntimeMetadata(params.sources, params.abortSignal);
   let admitted = false;
   await params.runFollowup({
     prompt: params.prompt,
@@ -916,9 +1016,7 @@ async function runSyntheticOverflowSummary(params: {
     userTurnTranscriptRecorder,
     run: params.source.run,
     enqueuedAt: Date.now(),
-    abortSignal: params.abortSignal,
-    onFollowupAdmissionWaitChange: collectRuntimeMetadata(params.sources)
-      .onFollowupAdmissionWaitChange,
+    ...runtimeMetadata,
     ...(params.onAdmitted
       ? {
           queuedLifecycle: {
@@ -938,6 +1036,7 @@ async function runSyntheticOverflowSummary(params: {
       : {}),
     ...resolveOriginRoutingMetadata([params.source]),
     ...(currentInboundEventKind ? { currentInboundEventKind } : {}),
+    ...collectQueuedImages(params.sources),
   });
 }
 
@@ -1177,14 +1276,24 @@ export function scheduleFollowupDrain(
             }
 
             const routing = resolveOriginRoutingMetadata(activeGroupItems);
-            const prompt = buildCollectPrompt({
-              title: "[Queued messages while agent was busy]",
-              items: activeGroupItems,
-              renderItem: renderCollectItem,
-            });
-            const transcriptPrompt = buildCollectTranscriptPrompt(activeGroupItems);
-            const userTurnTranscriptRecorder =
-              createCollectUserTurnTranscriptRecorder(activeGroupItems);
+            const humanInboundBatch = mergeCollectedHumanInboundBatch(activeGroupItems);
+            const prompt = humanInboundBatch
+              ? buildCollectedHumanInboundPrompt({
+                  batch: humanInboundBatch,
+                  items: activeGroupItems,
+                })
+              : buildCollectPrompt({
+                  title: "[Queued messages while agent was busy]",
+                  items: activeGroupItems,
+                  renderItem: renderCollectItem,
+                });
+            const transcriptPrompt = humanInboundBatch
+              ? prompt
+              : buildCollectTranscriptPrompt(activeGroupItems);
+            const userTurnTranscriptRecorder = createCollectUserTurnTranscriptRecorder(
+              activeGroupItems,
+              humanInboundBatch,
+            );
             const aggregateOwner = resolveAggregateOwner(activeGroupItems);
             const cancellation = createAggregateCancellation(activeGroupItems);
             let admitted = false;
@@ -1221,6 +1330,7 @@ export function scheduleFollowupDrain(
                 prompt,
                 transcriptPrompt,
                 ...(userTurnTranscriptRecorder ? { userTurnTranscriptRecorder } : {}),
+                ...(humanInboundBatch ? { humanInboundBatch } : {}),
                 run,
                 messageId:
                   groupSource?.messageId ??

@@ -294,6 +294,33 @@ function resolveExplicitSlackOwnerIds(allowFromLower: string[]): string[] {
   return [...ownerIds];
 }
 
+export async function authorizeSlackOwnerPresence(params: {
+  ctx: SlackMonitorContext;
+  channelId: string;
+  allowFromLower: string[];
+}): Promise<boolean> {
+  const explicitOwnerIds = resolveExplicitSlackOwnerIds(params.allowFromLower);
+  if (explicitOwnerIds.length === 0) {
+    logVerbose(
+      `slack: drop inbound event in ${params.channelId} (no explicit owner id for presence check)`,
+    );
+    return false;
+  }
+
+  try {
+    const channelMemberIds = await resolveSlackChannelMemberIds(params.ctx, params.channelId);
+    if (explicitOwnerIds.some((ownerId) => channelMemberIds.has(ownerId))) {
+      return true;
+    }
+    logVerbose(`slack: drop inbound event in ${params.channelId} (no owner present)`);
+  } catch (error) {
+    logVerbose(
+      `slack: drop inbound event in ${params.channelId} (owner presence lookup failed: ${formatErrorMessage(error)})`,
+    );
+  }
+  return false;
+}
+
 export async function authorizeSlackBotRoomMessage(params: {
   ctx: SlackMonitorContext;
   channelId: string;
@@ -317,28 +344,11 @@ export async function authorizeSlackBotRoomMessage(params: {
     return true;
   }
 
-  const explicitOwnerIds = resolveExplicitSlackOwnerIds(params.allowFromLower);
-  if (explicitOwnerIds.length === 0) {
-    logVerbose(
-      `slack: drop bot message ${params.senderId} in ${params.channelId} (no explicit owner id for presence check)`,
-    );
-    return false;
-  }
-
-  try {
-    const channelMemberIds = await resolveSlackChannelMemberIds(params.ctx, params.channelId);
-    if (explicitOwnerIds.some((ownerId) => channelMemberIds.has(ownerId))) {
-      return true;
-    }
-    logVerbose(
-      `slack: drop bot message ${params.senderId} in ${params.channelId} (no owner present)`,
-    );
-  } catch (error) {
-    logVerbose(
-      `slack: drop bot message ${params.senderId} in ${params.channelId} (owner presence lookup failed: ${formatErrorMessage(error)})`,
-    );
-  }
-  return false;
+  return await authorizeSlackOwnerPresence({
+    ctx: params.ctx,
+    channelId: params.channelId,
+    allowFromLower: params.allowFromLower,
+  });
 }
 
 function wildcardWhenOpen(entries: readonly string[]): string[] {
@@ -568,6 +578,22 @@ export async function authorizeSlackSystemEventSender(params: {
   const allowFromLower = await resolveSlackEffectiveAllowFrom(params.ctx, {
     includePairingStore: ingressChannelType === "im",
   });
+  if (
+    ingressChannelType !== "im" &&
+    params.ctx.requireOwnerPresence &&
+    (!channelId ||
+      !(await authorizeSlackOwnerPresence({
+        ctx: params.ctx,
+        channelId,
+        allowFromLower,
+      })))
+  ) {
+    return {
+      allowed: false,
+      reason: "owner-not-present",
+      ...(channelId ? { channelType, channelName } : {}),
+    };
+  }
   const channelConfig = channelId
     ? resolveSlackChannelConfig({
         channelId,

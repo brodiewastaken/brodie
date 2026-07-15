@@ -301,6 +301,56 @@ describe("buildReplyPromptEnvelope", () => {
     expect(envelope.transcriptCommandBody).toContain("https://example.com/photo.jpg");
   });
 
+  it("keeps scheduler envelopes first and suppresses duplicate legacy media text", () => {
+    const queueEnvelope = [
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]",
+      "",
+      "[Conversation Metadata]:",
+      '```json\n{"channel":"discord"}\n```',
+      "Message Media:",
+      '```json\n[{"media_reference":"media://inbound/image.png"}]\n```',
+    ].join("\n");
+    const humanInboundBatch = {
+      version: 1,
+      placement: "idle",
+      inbounds: [{}],
+    } as NonNullable<Parameters<typeof buildReplyPromptEnvelope>[0]["ctx"]["HumanInboundBatch"]>;
+    const sessionCtx = finalizeInboundContext({
+      Body: queueEnvelope,
+      BodyStripped: queueEnvelope,
+      Provider: "discord",
+      ChatType: "group",
+      HumanInboundBatch: humanInboundBatch,
+      MediaPaths: ["/tmp/openclaw-staged-image.png"],
+      MediaTypes: ["image/png"],
+    });
+
+    const envelope = buildReplyPromptEnvelope({
+      ctx: sessionCtx,
+      sessionCtx,
+      baseBody: queueEnvelope,
+      prefixedBody: `Note: previous run was aborted.\n\n${queueEnvelope}`,
+      hasUserBody: true,
+      inboundUserContext: "Active goal: finish the current rollout.",
+      isBareSessionReset: false,
+      startupAction: "new",
+      threadContextNote: "[Thread history - for context]\nprior thread message",
+      systemEventBlocks: ["System: [t] Model switched."],
+      inboundEventKind: "user_request",
+      sourceReplyDeliveryMode: "message_tool_only",
+    });
+
+    expect(envelope.prefixedCommandBody.startsWith("[📋 QUEUE ENGINE]:")).toBe(true);
+    expect(envelope.queuedBody.startsWith("[📋 QUEUE ENGINE]:")).toBe(true);
+    expect(envelope.prefixedCommandBody).not.toContain("[media attached:");
+    expect(envelope.queuedBody).not.toContain("[media attached:");
+    expect(envelope.mediaNote).toBeUndefined();
+    expect(envelope.currentInboundContext).toMatchObject({
+      text: "Active goal: finish the current rollout.",
+      placement: "tail",
+    });
+  });
+
   it("persists the complete authored soft reset without leaking startup context", () => {
     const sessionCtx = finalizeInboundContext({
       Body: "/reset soft re-read persona files",

@@ -4,6 +4,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const enqueueSystemEventMock = vi.hoisted(() => vi.fn());
 const requestHeartbeatMock = vi.hoisted(() => vi.fn());
+const admitDurableSystemEventWakeMock = vi.hoisted(() => vi.fn());
 type DispatchPluginInteractiveHandlerResult = {
   matched: boolean;
   handled: boolean;
@@ -38,6 +39,35 @@ vi.mock("openclaw/plugin-sdk/heartbeat-runtime", async (importOriginal) => {
   return {
     ...actual,
     requestHeartbeat: (...args: unknown[]) => requestHeartbeatMock(...args),
+    admitDurableSystemEventWake: async (options: {
+      sessionKey: string;
+      systemEvent: { text: string; contextKey?: string | null; deliveryContext?: unknown };
+      source: string;
+      intent: string;
+      reason: string;
+      sourceGeneration: string;
+      producerKind: string;
+      heartbeat?: unknown;
+    }) => {
+      enqueueSystemEventMock(options.systemEvent.text, {
+        sessionKey: options.sessionKey,
+        contextKey: options.systemEvent.contextKey,
+        deliveryContext: options.systemEvent.deliveryContext,
+      });
+      const admission = await admitDurableSystemEventWakeMock(options);
+      if (!admission?.accepted) {
+        requestHeartbeatMock({
+          source: options.source,
+          intent: options.intent,
+          reason: options.reason,
+          sessionKey: options.sessionKey,
+          sourceGeneration: options.sourceGeneration,
+          producerKind: options.producerKind,
+          heartbeat: options.heartbeat,
+        });
+      }
+      return admission ?? { accepted: false, reason: "disabled" };
+    },
   };
 });
 
@@ -405,6 +435,8 @@ describe("registerSlackInteractionEvents", () => {
     enqueueSystemEventMock.mockReset();
     enqueueSystemEventMock.mockReturnValue(true);
     requestHeartbeatMock.mockClear();
+    admitDurableSystemEventWakeMock.mockReset();
+    admitDurableSystemEventWakeMock.mockResolvedValue({ accepted: false, reason: "disabled" });
     dispatchPluginInteractiveHandlerMock.mockClear();
     resolvePluginConversationBindingApprovalMock.mockClear();
     resolvePluginConversationBindingApprovalMock.mockResolvedValue({ status: "expired" });
@@ -960,6 +992,8 @@ describe("registerSlackInteractionEvents", () => {
       reason: "hook:slack-interaction",
       sessionKey: "agent:ops:slack:channel:C1",
       heartbeat: { target: "last" },
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "system",
     });
     expect(app.client.chat.update).toHaveBeenCalledTimes(1);
   });
@@ -1046,6 +1080,13 @@ describe("registerSlackInteractionEvents", () => {
     expect(firstCall?.dedupeId).toContain(":trigger-1:");
     expect(secondCall?.dedupeId).toContain(":trigger-2:");
     expect(firstCall?.dedupeId).not.toBe(secondCall?.dedupeId);
+    expect(admitDurableSystemEventWakeMock).toHaveBeenCalledTimes(2);
+    const durableCalls = admitDurableSystemEventWakeMock.mock.calls as Array<
+      [{ sourceGeneration?: string }]
+    >;
+    expect(durableCalls[0]?.[0]?.sourceGeneration).toMatch(/^[a-f0-9]{64}$/);
+    expect(durableCalls[1]?.[0]?.sourceGeneration).toMatch(/^[a-f0-9]{64}$/);
+    expect(durableCalls[0]?.[0]?.sourceGeneration).not.toBe(durableCalls[1]?.[0]?.sourceGeneration);
   });
 
   it("resolves plugin binding approvals from shared interactive Slack actions", async () => {

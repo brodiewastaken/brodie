@@ -434,6 +434,52 @@ export async function queueEmbeddedAgentMessageWithOutcomeAsync(
   }
 }
 
+/** Queues an injected turn into one exact active run and waits for transcript adoption. */
+export async function queueEmbeddedAgentMessageForRunId(
+  runId: string,
+  text: string,
+  options?: EmbeddedAgentQueueMessageOptions,
+): Promise<boolean> {
+  const normalizedRunId = runId.trim();
+  const handle = normalizedRunId ? ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get(normalizedRunId) : undefined;
+  if (!handle || !isEmbeddedQueueHandleMessageInjectable(normalizedRunId, handle)) {
+    return false;
+  }
+  if (handle.isCompacting() || handle.supportsTranscriptCommitWait !== true) {
+    return false;
+  }
+  if (
+    options?.sourceReplyDeliveryMode === "message_tool_only" &&
+    handle.sourceReplyDeliveryMode !== "message_tool_only"
+  ) {
+    return false;
+  }
+  try {
+    await handle.queueMessage(text, {
+      steeringMode: "all",
+      waitForTranscriptCommit: true,
+      ...options,
+    });
+    logMessageQueued({ sessionId: normalizedRunId, source: "embedded-agent-runner" });
+    return true;
+  } catch (error) {
+    diag.debug(`queue message rejected: runId=${normalizedRunId} err=${formatQueueError(error)}`);
+    return false;
+  }
+}
+
+/** Returns the exact image policy of one injectable embedded run. */
+export function resolveActiveEmbeddedRunNativeImagePolicy(
+  runId: string,
+): EmbeddedAgentQueueHandle["nativeImagePolicy"] | undefined {
+  const normalizedRunId = runId.trim();
+  const handle = normalizedRunId ? ACTIVE_EMBEDDED_RUNS_BY_RUN_ID.get(normalizedRunId) : undefined;
+  if (!handle || !isEmbeddedQueueHandleMessageInjectable(normalizedRunId, handle)) {
+    return undefined;
+  }
+  return handle.nativeImagePolicy;
+}
+
 function prepareEmbeddedAgentQueueMessage(
   sessionId: string,
   text: string,
@@ -655,6 +701,11 @@ export function resolveActiveEmbeddedRunSessionIdBySessionFile(
   sessionFile: string,
 ): string | undefined {
   return resolveActiveEmbeddedRunHandleSessionIdBySessionFile(sessionFile);
+}
+
+/** Resolve the provider-facing run id for one active embedded session when the handle has one. */
+export function resolveActiveEmbeddedRunCorrelationId(sessionId: string): string | undefined {
+  return ACTIVE_EMBEDDED_RUNS.get(sessionId)?.runId?.trim() || undefined;
 }
 
 export function getActiveEmbeddedRunSnapshot(

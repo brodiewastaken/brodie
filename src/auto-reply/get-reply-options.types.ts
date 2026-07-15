@@ -1,5 +1,6 @@
 import type { FastMode } from "@openclaw/normalization-core/string-coerce";
 /** Public option types for reply generation callbacks, streaming, and delivery policy. */
+import type { ConversationalOutcome } from "../infra/outbound/conversational-action.js";
 import type { ImageContent } from "../llm/types.js";
 import type { PromptImageOrderEntry } from "../media/prompt-image-order.js";
 import type { UserTurnTranscriptRecorder } from "../sessions/user-turn-transcript.types.js";
@@ -155,6 +156,8 @@ export type GetReplyOptions = {
   onBlockReplyQueued?: (payload: ReplyPayload, context?: BlockReplyContext) => Promise<void> | void;
   onBlockReply?: (payload: ReplyPayload, context?: BlockReplyContext) => Promise<void> | void;
   onToolResult?: (payload: ReplyPayload) => Promise<void> | void;
+  /** Runs after a completed tool result and before the next provider step. */
+  onToolStreamBoundary?: () => Promise<void> | void;
   /** Called when a tool phase starts/updates, before summary payloads are emitted. */
   onToolStart?: (payload: {
     itemId?: string;
@@ -256,6 +259,8 @@ export type GetReplyOptions = {
   allowProgressCallbacksWhenSourceDeliverySuppressed?: boolean;
   /** Called when a suppressed source reply mode observes visible delivery through another path. */
   onObservedReplyDelivery?: () => Promise<void> | void;
+  /** Called when the agent records its terminal conversational outcome. */
+  onConversationOutcome?: (outcome: ConversationalOutcome) => Promise<void> | void;
   /** Emit tool result summaries for channel-owned progress UI even when verbose is off. */
   forceToolResultProgress?: boolean;
   disableBlockStreaming?: boolean;

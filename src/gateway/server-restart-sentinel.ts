@@ -13,6 +13,7 @@ import type { CliDeps } from "../cli/deps.types.js";
 import { resolveMainSessionKeyFromConfig } from "../config/sessions.js";
 import { parseSessionThreadInfo } from "../config/sessions/thread-info.js";
 import { formatErrorMessage, toErrorObject } from "../infra/errors.js";
+import { admitRuntimeHeartbeatWake } from "../infra/heartbeat-runner.js";
 import { requestHeartbeat } from "../infra/heartbeat-wake.js";
 import { ackDelivery, enqueueDelivery, failDelivery } from "../infra/outbound/delivery-queue.js";
 import { buildOutboundSessionContext } from "../infra/outbound/session-context.js";
@@ -36,14 +37,16 @@ import {
   type SessionDeliveryRecoveryLogger,
   type SessionDeliveryRoute,
 } from "../infra/session-delivery-queue.js";
-import { enqueueSystemEvent } from "../infra/system-events.js";
+import { enqueueSystemEventEntry } from "../infra/system-events.js";
 import { isPendingControlPlaneUpdateRestartSentinel } from "../infra/update-control-plane-sentinel.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { stringifyRouteThreadId } from "../plugin-sdk/channel-route.js";
 import type { OutboundReplyPayload } from "../plugin-sdk/reply-payload.js";
+import { sanitizeInboundSystemTags } from "../security/system-tags.js";
 import {
   deliveryContextFromSession,
   mergeDeliveryContext,
+  normalizeDeliveryContext,
 } from "../utils/delivery-context.shared.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel.js";
 import { loadSessionEntry } from "./session-utils.js";
@@ -78,21 +81,53 @@ function hasRoutableDeliveryContext(context?: {
   return Boolean(context?.channel && context?.to);
 }
 
-function enqueueRestartSentinelWake(
-  message: string,
-  sessionKey: string,
+async function enqueueRestartSentinelWake(params: {
+  message: string;
+  sessionKey: string;
+  sourceGeneration: string;
   deliveryContext?: {
     channel?: string;
     to?: string;
     accountId?: string;
     threadId?: string | number;
-  },
-) {
-  enqueueSystemEvent(message, {
-    sessionKey,
-    ...(deliveryContext ? { deliveryContext } : {}),
+  };
+}) {
+  const { cfg } = loadSessionEntry(params.sessionKey);
+  const agentId = resolveSessionAgentId({ sessionKey: params.sessionKey, config: cfg });
+  const systemEvent = {
+    text: sanitizeInboundSystemTags(params.message).trim(),
+    contextKey: null,
+    deliveryContext: normalizeDeliveryContext(params.deliveryContext),
+  };
+  if (!systemEvent.text) {
+    return;
+  }
+  enqueueSystemEventEntry(systemEvent.text, {
+    sessionKey: params.sessionKey,
+    ...(params.deliveryContext ? { deliveryContext: params.deliveryContext } : {}),
   });
-  requestHeartbeat({ source: "restart-sentinel", intent: "immediate", reason: "wake", sessionKey });
+  const admission = await admitRuntimeHeartbeatWake({
+    cfg,
+    agentId,
+    source: "restart-sentinel",
+    intent: "immediate",
+    reason: "wake",
+    sessionKey: params.sessionKey,
+    sourceGeneration: params.sourceGeneration,
+    producerKind: "restart",
+    systemEvent,
+  });
+  if (admission.accepted) {
+    return;
+  }
+  requestHeartbeat({
+    source: "restart-sentinel",
+    intent: "immediate",
+    reason: "wake",
+    sessionKey: params.sessionKey,
+    sourceGeneration: params.sourceGeneration,
+    producerKind: "restart",
+  });
 }
 
 async function waitForOutboundRetry(delayMs: number) {
@@ -245,7 +280,12 @@ async function deliverQueuedSessionDelivery(params: {
   const queuedDeliveryContext = resolveQueuedSessionDeliveryContext(params.entry);
 
   if (params.entry.kind === "systemEvent") {
-    enqueueRestartSentinelWake(params.entry.text, canonicalKey, queuedDeliveryContext);
+    await enqueueRestartSentinelWake({
+      message: params.entry.text,
+      sessionKey: canonicalKey,
+      sourceGeneration: `restart-continuation:${params.entry.id}`,
+      deliveryContext: queuedDeliveryContext,
+    });
     return;
   }
 
@@ -259,12 +299,22 @@ async function deliverQueuedSessionDelivery(params: {
       expectedSessionId: params.entry.expectedSessionId,
       actualSessionId: entry?.sessionId ?? null,
     });
-    enqueueRestartSentinelWake(params.entry.message, canonicalKey, queuedDeliveryContext);
+    await enqueueRestartSentinelWake({
+      message: params.entry.message,
+      sessionKey: canonicalKey,
+      sourceGeneration: `restart-continuation:${params.entry.id}`,
+      deliveryContext: queuedDeliveryContext,
+    });
     return;
   }
 
   if (!params.entry.route) {
-    enqueueRestartSentinelWake(params.entry.message, canonicalKey, queuedDeliveryContext);
+    await enqueueRestartSentinelWake({
+      message: params.entry.message,
+      sessionKey: canonicalKey,
+      sourceGeneration: `restart-continuation:${params.entry.id}`,
+      deliveryContext: queuedDeliveryContext,
+    });
     return;
   }
 
@@ -485,10 +535,15 @@ async function loadRestartSentinelStartupTask(params: {
 
     if (!sessionKey) {
       const mainSessionKey = resolveMainSessionKeyFromConfig();
-      enqueueSystemEvent(message, { sessionKey: mainSessionKey });
+      const fallbackSessionKey = mainSessionKey;
+      await enqueueRestartSentinelWake({
+        message,
+        sessionKey: fallbackSessionKey,
+        sourceGeneration: `restart-sentinel:${payload.kind}:${payload.ts}:${fallbackSessionKey}`,
+      });
       if (payload.continuation) {
         log.warn(`${summary}: continuation skipped: restart sentinel sessionKey unavailable`, {
-          sessionKey: mainSessionKey,
+          sessionKey: fallbackSessionKey,
           continuationKind: payload.continuation.kind,
         });
       }
@@ -590,7 +645,12 @@ async function loadRestartSentinelStartupTask(params: {
     const routedAgentTurnContinuation =
       payload.continuation?.kind === "agentTurn" && continuationRoute !== undefined;
     if (!routedAgentTurnContinuation) {
-      enqueueRestartSentinelWake(message, sessionKey, wakeDeliveryContext);
+      await enqueueRestartSentinelWake({
+        message,
+        sessionKey: canonicalKey,
+        sourceGeneration: `restart-sentinel:${payload.kind}:${payload.ts}:${canonicalKey}`,
+        deliveryContext: wakeDeliveryContext,
+      });
     }
 
     if (resolvedTo && channel) {

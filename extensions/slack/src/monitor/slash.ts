@@ -37,7 +37,11 @@ import {
   isSlackInteractiveRepliesEnabled,
 } from "../interactive-replies.js";
 import { truncateSlackText } from "../truncate.js";
-import { resolveSlackCommandIngress, resolveSlackEffectiveAllowFrom } from "./auth.js";
+import {
+  authorizeSlackOwnerPresence,
+  resolveSlackCommandIngress,
+  resolveSlackEffectiveAllowFrom,
+} from "./auth.js";
 import { resolveSlackChannelConfig, type SlackChannelConfigResolved } from "./channel-config.js";
 import { buildSlackSlashCommandMatcher, resolveSlackSlashCommandConfig } from "./commands.js";
 import type { SlackMonitorContext } from "./context.js";
@@ -441,6 +445,21 @@ export async function registerSlackMonitorSlashCommands(params: {
       const effectiveAllowFromLower = await resolveSlackEffectiveAllowFrom(ctx, {
         includePairingStore: isDirectMessage,
       });
+      if (
+        isRoomish &&
+        ctx.requireOwnerPresence &&
+        !(await authorizeSlackOwnerPresence({
+          ctx,
+          channelId: command.channel_id,
+          allowFromLower: effectiveAllowFromLower,
+        }))
+      ) {
+        await respond({
+          text: "This channel is not allowed.",
+          response_type: "ephemeral",
+        });
+        return;
+      }
 
       // Privileged command surface: compute CommandAuthorized, don't assume true.
       // Keep this aligned with the Slack message path (message-handler/prepare.ts).

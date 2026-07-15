@@ -903,6 +903,10 @@ async function runEmbeddedAgentInternal(
         fastModeAutoProgressState.offAnnounced = true;
         await emitFastModeAutoProgress(next);
       };
+      const onToolStreamBoundary = async () => {
+        await maybeAnnounceFastModeAutoOff();
+        await params.onToolStreamBoundary?.();
+      };
       const notifyToolResult = async (payload: ReplyPayload) => {
         await params.onToolResult?.(payload);
       };
@@ -2242,7 +2246,7 @@ async function runEmbeddedAgentInternal(
             thinkLevel,
             onToolOutcome: observeToolOutcome,
             allocateToolOutcomeOrdinal,
-            onToolStreamBoundary: maybeAnnounceFastModeAutoOff,
+            onToolStreamBoundary,
             onRunProgress: notifyRunProgress,
             fastMode: attemptFastMode,
             fastModeAuto: params.fastMode === "auto",

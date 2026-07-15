@@ -1,5 +1,7 @@
 // Tracks heartbeat wake requests, busy skips, and retry timing.
+import { randomUUID } from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import type { SchedulerProducerKind } from "../scheduler/conversation-scheduler.js";
 import { resolveTimerTimeoutMs } from "../shared/number-coercion.js";
 import { normalizeHeartbeatWakeReason } from "./heartbeat-reason.js";
 
@@ -56,6 +58,9 @@ export type HeartbeatWakeRequest = {
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
+  /** Stable identity for this producer wake across coalescing and dispatch. */
+  sourceGeneration?: string;
+  producerKind?: SchedulerProducerKind;
 };
 
 export type HeartbeatWakeHandler = (opts: HeartbeatWakeRequest) => Promise<HeartbeatRunResult>;
@@ -80,6 +85,8 @@ type PendingWakeReason = {
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
+  sourceGeneration: string;
+  producerKind?: SchedulerProducerKind;
 };
 
 let handler: HeartbeatWakeHandler | null = null;
@@ -144,6 +151,8 @@ function queuePendingWakeReason(params: {
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
+  sourceGeneration?: string;
+  producerKind?: SchedulerProducerKind;
 }) {
   const requestedAt = params.requestedAt ?? Date.now();
   const normalizedReason = normalizeWakeReason(params.reason);
@@ -166,6 +175,8 @@ function queuePendingWakeReason(params: {
     agentId: normalizedAgentId,
     sessionKey: normalizedSessionKey,
     heartbeat: params.heartbeat,
+    sourceGeneration: params.sourceGeneration ?? randomUUID(),
+    producerKind: params.producerKind,
   };
   const previous = pendingWakes.get(wakeTargetKey);
   if (!previous) {
@@ -227,14 +238,19 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
       running = true;
       try {
         for (const pendingWake of pendingBatch) {
-          const wakeOpts = {
+          const wakeOpts: HeartbeatWakeRequest = {
             source: pendingWake.source,
             intent: pendingWake.intent,
             reason: pendingWake.reason ?? undefined,
             ...(pendingWake.agentId ? { agentId: pendingWake.agentId } : {}),
             ...(pendingWake.sessionKey ? { sessionKey: pendingWake.sessionKey } : {}),
             ...(pendingWake.heartbeat ? { heartbeat: pendingWake.heartbeat } : {}),
+            ...(pendingWake.producerKind ? { producerKind: pendingWake.producerKind } : {}),
           };
+          Object.defineProperty(wakeOpts, "sourceGeneration", {
+            value: pendingWake.sourceGeneration,
+            enumerable: false,
+          });
           const res = await active(wakeOpts);
           if (res.status === "skipped" && isRetryableHeartbeatBusySkipReason(res.reason)) {
             // The target runtime is busy; retry this wake target soon.
@@ -245,6 +261,8 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
               agentId: pendingWake.agentId,
               sessionKey: pendingWake.sessionKey,
               heartbeat: pendingWake.heartbeat,
+              sourceGeneration: pendingWake.sourceGeneration,
+              producerKind: pendingWake.producerKind,
             });
             schedule(DEFAULT_RETRY_MS, "retry");
           }
@@ -259,6 +277,8 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
             agentId: pendingWake.agentId,
             sessionKey: pendingWake.sessionKey,
             heartbeat: pendingWake.heartbeat,
+            sourceGeneration: pendingWake.sourceGeneration,
+            producerKind: pendingWake.producerKind,
           });
         }
         schedule(DEFAULT_RETRY_MS, "retry");
@@ -323,6 +343,8 @@ export function requestHeartbeat(opts: {
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
+  sourceGeneration?: string;
+  producerKind?: SchedulerProducerKind;
 }) {
   queuePendingWakeReason({
     source: opts.source,
@@ -331,6 +353,8 @@ export function requestHeartbeat(opts: {
     agentId: opts.agentId,
     sessionKey: opts.sessionKey,
     heartbeat: opts.heartbeat,
+    sourceGeneration: opts.sourceGeneration,
+    producerKind: opts.producerKind,
   });
   schedule(opts.coalesceMs ?? DEFAULT_COALESCE_MS, "normal");
 }

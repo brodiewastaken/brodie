@@ -1,5 +1,5 @@
 // Gateway hook server wiring translates external hook requests into wake events or isolated agent runs.
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   resolveDateTimestampMs,
   resolveTimestampMsToIsoString,
@@ -16,11 +16,17 @@ import {
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { RunCronAgentTurnResult } from "../../cron/isolated-agent/run.types.js";
 import type { CronJob } from "../../cron/types.js";
-import { requestHeartbeat } from "../../infra/heartbeat-wake.js";
+import { admitDurableSystemEventWake } from "../../infra/durable-system-event-wake.js";
 import { enqueueSystemEvent } from "../../infra/system-events.js";
 import type { createSubsystemLogger } from "../../logging/subsystem.js";
+import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import type { HookAgentDispatchPayload, HooksConfigResolved } from "../hooks.js";
 import { createHooksRequestHandler, type HookClientIpConfig } from "./hooks-request-handler.js";
+import {
+  admitScheduledHook,
+  ensureHookSchedulerProducerRegistered,
+  type ScheduledHookPayload,
+} from "./hooks-scheduler-admission.js";
 
 /**
  * Gateway hook HTTP handler factory.
@@ -91,6 +97,13 @@ function formatHookRunWarningConsoleMessage(params: {
   return parts.join(" ");
 }
 
+function deriveHookExecutionId(kind: "job" | "run", sourceGeneration: string): string {
+  return createHash("sha256")
+    .update(`hook-${kind}\0`)
+    .update(sourceGeneration, "utf8")
+    .digest("hex");
+}
+
 /** Creates the HTTP handler used by gateway hook endpoints. */
 export function createGatewayHooksRequestHandler(params: {
   deps: CliDeps;
@@ -102,21 +115,145 @@ export function createGatewayHooksRequestHandler(params: {
 }) {
   const { deps, getHooksConfig, getClientIpConfig, bindHost, port, logHooks } = params;
 
-  const dispatchWakeHook = (value: { text: string; mode: "now" | "next-heartbeat" }) => {
-    const sessionKey = resolveMainSessionKeyFromConfig();
-    enqueueSystemEvent(value.text, {
-      sessionKey,
+  const dispatchHeartbeatWake = async (wakeParams: {
+    sessionKey: string;
+    sourceGeneration: string;
+    producerKind: "hook" | "system";
+    reason: string;
+    systemEvent: { text: string };
+  }) => {
+    const cfg = getRuntimeConfig();
+    const agentId = resolveAgentIdFromSessionKey(wakeParams.sessionKey) ?? "main";
+    await admitDurableSystemEventWake({
+      cfg,
+      agentId,
+      source: "hook",
+      intent: "immediate",
+      reason: wakeParams.reason,
+      sessionKey: wakeParams.sessionKey,
+      sourceGeneration: wakeParams.sourceGeneration,
+      producerKind: wakeParams.producerKind,
+      systemEvent: wakeParams.systemEvent,
     });
+  };
+
+  const dispatchWakeHook = async (value: {
+    text: string;
+    mode: "now" | "next-heartbeat";
+    sourceGeneration: string;
+  }): Promise<void> => {
+    const sessionKey = resolveMainSessionKeyFromConfig();
     if (value.mode === "now") {
-      requestHeartbeat({ source: "hook", intent: "immediate", reason: "hook:wake" });
+      await dispatchHeartbeatWake({
+        reason: "hook:wake",
+        sessionKey,
+        sourceGeneration: value.sourceGeneration,
+        producerKind: "hook",
+        systemEvent: { text: value.text },
+      });
+    } else {
+      enqueueSystemEvent(value.text, { sessionKey });
     }
   };
 
-  const dispatchAgentHook = (value: HookAgentDispatchPayload) => {
+  const executeScheduledHook = async (
+    payload: ScheduledHookPayload,
+  ): Promise<{ ok: true } | { ok: false; reason: string }> => {
+    const { job, message, sessionKey, lane, runId, sourcePath } = payload;
+    const safeName = job.name;
+    const jobId = job.id;
+    const deliver = job.delivery?.mode !== undefined && job.delivery.mode !== "none";
+    const model = job.payload.kind === "agentTurn" ? job.payload.model : undefined;
+    let hookEventSessionKey: string | undefined;
+    try {
+      const cfg = getRuntimeConfig();
+      hookEventSessionKey = resolveHookEventSessionKey({
+        cfg,
+        agentId: job.agentId,
+      });
+      const { runCronIsolatedAgentTurn } = await import("../../cron/isolated-agent.js");
+      const result = await runCronIsolatedAgentTurn({
+        cfg,
+        deps,
+        job,
+        message,
+        sessionKey,
+        lane,
+      });
+      const summary = resolveHookRunSummary(result);
+      const prefix =
+        result.status === "ok" ? `Hook ${safeName}` : `Hook ${safeName} (${result.status})`;
+      const shouldAnnounce = shouldAnnounceHookRunResult({ deliver, result });
+      if (result.status !== "ok") {
+        logHooks.warn("hook agent run returned non-ok status", {
+          sourcePath,
+          name: safeName,
+          runId,
+          jobId,
+          agentId: job.agentId,
+          sessionKey,
+          status: result.status,
+          model,
+          summary,
+          consoleMessage: formatHookRunWarningConsoleMessage({
+            status: result.status,
+            model,
+            summary,
+          }),
+        });
+      }
+      if (shouldAnnounce) {
+        const eventSessionKey = hookEventSessionKey ?? resolveMainSessionKeyFromConfig();
+        const systemEventText = `${prefix}: ${summary}`.trim();
+        if (job.wakeMode === "now") {
+          await dispatchHeartbeatWake({
+            reason: `hook:${jobId}`,
+            sessionKey: eventSessionKey,
+            sourceGeneration: `${jobId}:announcement`,
+            producerKind: "system",
+            systemEvent: { text: systemEventText },
+          });
+        } else {
+          enqueueSystemEvent(systemEventText, { sessionKey: eventSessionKey });
+        }
+      } else if (result.status === "ok" && !deliver) {
+        logHooks.info("hook agent run completed without announcement", {
+          sourcePath,
+          name: safeName,
+          runId,
+          jobId,
+          agentId: job.agentId,
+          sessionKey,
+          completedAt: new Date().toISOString(),
+        });
+      }
+      return result.status === "ok" ? { ok: true } : { ok: false, reason: summary };
+    } catch (err) {
+      logHooks.warn(`hook agent failed: ${String(err)}`);
+      const eventSessionKey = hookEventSessionKey ?? resolveMainSessionKeyFromConfig();
+      const systemEventText = `Hook ${safeName} (error): ${String(err)}`;
+      if (job.wakeMode === "now") {
+        await dispatchHeartbeatWake({
+          reason: `hook:${jobId}:error`,
+          sessionKey: eventSessionKey,
+          sourceGeneration: `${jobId}:announcement`,
+          producerKind: "system",
+          systemEvent: { text: systemEventText },
+        });
+      } else {
+        enqueueSystemEvent(systemEventText, { sessionKey: eventSessionKey });
+      }
+      return { ok: false, reason: String(err) };
+    }
+  };
+
+  ensureHookSchedulerProducerRegistered(executeScheduledHook);
+
+  const dispatchAgentHook = async (value: HookAgentDispatchPayload): Promise<string> => {
     const sessionKey = value.sessionKey;
     const safeName = sanitizeInboundSystemTags(value.name);
-    const jobId = randomUUID();
-    const runId = randomUUID();
+    const jobId = deriveHookExecutionId("job", value.sourceGeneration);
+    const runId = deriveHookExecutionId("run", value.sourceGeneration);
     const nowMs = resolveDateTimestampMs(Date.now());
     const delivery = value.deliver
       ? {
@@ -148,80 +285,21 @@ export function createGatewayHooksRequestHandler(params: {
       state: { nextRunAtMs: nowMs },
     };
 
-    let hookEventSessionKey: string | undefined;
-    void (async () => {
-      try {
-        // Agent hooks run after the HTTP response path has returned, so failure
-        // handling must record a system event instead of throwing to the caller.
-        const cfg = getRuntimeConfig();
-        hookEventSessionKey = resolveHookEventSessionKey({
-          cfg,
-          agentId: value.agentId,
-        });
-        const { runCronIsolatedAgentTurn } = await import("../../cron/isolated-agent.js");
-        const result = await runCronIsolatedAgentTurn({
-          cfg,
-          deps,
-          job,
-          message: value.message,
-          sessionKey,
-          lane: "cron",
-        });
-        const summary = resolveHookRunSummary(result);
-        const prefix =
-          result.status === "ok" ? `Hook ${safeName}` : `Hook ${safeName} (${result.status})`;
-        const shouldAnnounce = shouldAnnounceHookRunResult({ deliver: value.deliver, result });
-        if (result.status !== "ok") {
-          logHooks.warn("hook agent run returned non-ok status", {
-            sourcePath: value.sourcePath,
-            name: safeName,
-            runId,
-            jobId,
-            agentId: value.agentId,
-            sessionKey,
-            status: result.status,
-            model: value.model,
-            summary,
-            consoleMessage: formatHookRunWarningConsoleMessage({
-              status: result.status,
-              model: value.model,
-              summary,
-            }),
-          });
-        }
-        if (shouldAnnounce) {
-          const eventSessionKey = hookEventSessionKey ?? resolveMainSessionKeyFromConfig();
-          enqueueSystemEvent(`${prefix}: ${summary}`.trim(), {
-            sessionKey: eventSessionKey,
-          });
-          if (value.wakeMode === "now") {
-            requestHeartbeat({ source: "hook", intent: "immediate", reason: `hook:${jobId}` });
-          }
-        } else if (result.status === "ok" && !value.deliver) {
-          logHooks.info("hook agent run completed without announcement", {
-            sourcePath: value.sourcePath,
-            name: safeName,
-            runId,
-            jobId,
-            agentId: value.agentId,
-            sessionKey,
-            completedAt: new Date().toISOString(),
-          });
-        }
-      } catch (err) {
-        logHooks.warn(`hook agent failed: ${String(err)}`);
-        enqueueSystemEvent(`Hook ${safeName} (error): ${String(err)}`, {
-          sessionKey: hookEventSessionKey ?? resolveMainSessionKeyFromConfig(),
-        });
-        if (value.wakeMode === "now") {
-          requestHeartbeat({
-            source: "hook",
-            intent: "immediate",
-            reason: `hook:${jobId}:error`,
-          });
-        }
-      }
-    })();
+    const payload: ScheduledHookPayload = {
+      version: 1,
+      kind: "hook_run",
+      job,
+      message: value.message,
+      sessionKey,
+      lane: "cron",
+      runId,
+      sourcePath: value.sourcePath,
+      sourceGeneration: value.sourceGeneration,
+    };
+    const admission = await admitScheduledHook(payload);
+    if (!admission.accepted) {
+      void executeScheduledHook(payload);
+    }
 
     return runId;
   };

@@ -56,6 +56,10 @@ import {
   toAgentStoreSessionKey,
 } from "../routing/session-key.js";
 import { defaultRuntime } from "../runtime.js";
+import {
+  getRuntimeConversationScheduler,
+  registerRuntimeConversationSchedulerProducer,
+} from "../scheduler/runtime-conversation-scheduler.js";
 import { parseAgentSessionKey } from "../sessions/session-key-utils.js";
 import { createCronExitWatchers, type CronExitResult } from "./cron-exit-watchers.js";
 import {
@@ -328,6 +332,28 @@ export function buildGatewayCronService(params: {
     return { runtimeConfig, agentId, sessionKey };
   };
 
+  const resolveOperatorWakeTarget = (opts?: {
+    agentId?: string;
+    sessionKey?: string;
+  }): { agentId?: string; sessionKey?: string } => {
+    const requestedSessionKey = opts?.sessionKey?.trim() || undefined;
+    if (requestedSessionKey) {
+      const { agentId, sessionKey } = resolveCronTarget({
+        agentId: opts?.agentId,
+        sessionKey: requestedSessionKey,
+      });
+      return { agentId, sessionKey };
+    }
+    const { agentId, cfg: runtimeConfig } = resolveCronAgent(opts?.agentId);
+    return {
+      agentId,
+      sessionKey: resolveCronSessionKey({
+        runtimeConfig,
+        agentId,
+      }),
+    };
+  };
+
   const resolveCronHeartbeatOverride = (paramsLocal: {
     runtimeConfig: OpenClawConfig;
     agentId?: string;
@@ -404,6 +430,8 @@ export function buildGatewayCronService(params: {
     storePath,
     cronEnabled,
     cronConfig: params.cfg.cron,
+    conversationScheduler: getRuntimeConversationScheduler(),
+    registerConversationSchedulerProducer: registerRuntimeConversationSchedulerProducer,
     ...(triggerEvaluator
       ? {
           evaluateCronTrigger: ({ job, script, state, abortSignal }) =>
@@ -450,6 +478,7 @@ export function buildGatewayCronService(params: {
       }
       return resolveCronStoredDeliveryContext({ cfg: runtimeConfig, sessionKey });
     },
+    resolveOperatorWakeTarget,
     requestHeartbeat: (opts) => {
       const { agentId, sessionKey } = resolveCronTarget({ ...opts, preserveUntargeted: true });
       requestHeartbeat({

@@ -427,6 +427,7 @@ export async function createVoiceCallRuntime(params: {
             messageProvider: "voice",
             lane: "voice",
             runIdPrefix: `voice-realtime-consult:${callId}`,
+            turnId: handlerContext.turnId ?? handlerContext.toolCallId,
             args,
             transcript: mapVoiceCallConsultTranscript(call, handlerContext),
             surface: "a live phone call",

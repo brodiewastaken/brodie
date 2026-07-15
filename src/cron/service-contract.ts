@@ -49,5 +49,6 @@ export interface CronServiceContract {
     text: string;
     sessionKey?: string;
     agentId?: string;
+    sourceGeneration?: string;
   }): CronWakeResult;
 }
