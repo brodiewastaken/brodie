@@ -27,6 +27,13 @@ function expectSchemaFailurePath(result: SchemaParseResult, expectedPathPrefix: 
 }
 
 describe("agent defaults schema", () => {
+  it("accepts the Fast OFF enforcement switch only on global defaults", () => {
+    expectSchemaSuccess(AgentDefaultsSchema.safeParse({ fastModeEnforcedOff: true }));
+    expect(AgentEntrySchema.safeParse({ id: "worker", fastModeEnforcedOff: true }).success).toBe(
+      false,
+    );
+  });
+
   it("accepts utility models on defaults and agent entries", () => {
     const defaults = AgentDefaultsSchema.parse({ utilityModel: "openai/gpt-5.4-mini" })!;
     const agent = AgentEntrySchema.parse({
@@ -36,6 +43,35 @@ describe("agent defaults schema", () => {
 
     expect(defaults.utilityModel).toBe("openai/gpt-5.4-mini");
     expect(agent.utilityModel).toBe("google/gemini-3.1-flash-lite-preview");
+  });
+
+  it("accepts fallback notice policy only on the global default model", () => {
+    const defaults = AgentDefaultsSchema.parse({
+      model: {
+        primary: "openai/gpt-5.5",
+        fallbacks: ["anthropic/claude-sonnet-4-6"],
+        fallbackNotice: "silent",
+      },
+    });
+
+    expect(defaults?.model).toEqual({
+      primary: "openai/gpt-5.5",
+      fallbacks: ["anthropic/claude-sonnet-4-6"],
+      fallbackNotice: "silent",
+    });
+    expectSchemaFailurePath(
+      AgentDefaultsSchema.safeParse({
+        model: { primary: "openai/gpt-5.5", fallbackNotice: "invalid" },
+      }),
+      "model",
+    );
+    expectSchemaFailurePath(
+      AgentEntrySchema.safeParse({
+        id: "worker",
+        model: { primary: "openai/gpt-5.5", fallbackNotice: "silent" },
+      }),
+      "model",
+    );
   });
 
   it("accepts subagent archiveAfterMinutes=0 to disable archiving", () => {

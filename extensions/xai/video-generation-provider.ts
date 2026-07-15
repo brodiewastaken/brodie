@@ -26,6 +26,7 @@ import type {
 
 const DEFAULT_XAI_VIDEO_BASE_URL = "https://api.x.ai/v1";
 const DEFAULT_XAI_VIDEO_MODEL = "grok-imagine-video";
+const XAI_VIDEO_1_5_MODEL = "grok-imagine-video-1.5";
 const DEFAULT_TIMEOUT_MS = 600_000;
 const POLL_INTERVAL_MS = 5_000;
 const MAX_POLL_ATTEMPTS = 120;
@@ -67,6 +68,30 @@ type VideoGenerationSourceInput = {
   mimeType?: string;
   role?: string;
 };
+
+type XaiVideoGenerationDefaults = {
+  aspectRatio?: string;
+  durationSeconds?: number;
+  resolution?: string;
+};
+
+function resolveXaiVideoGenerationDefaults(
+  req: VideoGenerationRequest,
+): XaiVideoGenerationDefaults {
+  const pluginConfig = req.cfg.plugins?.entries?.xai?.config;
+  if (!isRecord(pluginConfig) || !isRecord(pluginConfig.videoGeneration)) {
+    return {};
+  }
+  const defaults = pluginConfig.videoGeneration;
+  return {
+    aspectRatio: normalizeOptionalString(defaults.aspectRatio),
+    durationSeconds:
+      typeof defaults.durationSeconds === "number" && Number.isFinite(defaults.durationSeconds)
+        ? defaults.durationSeconds
+        : undefined,
+    resolution: normalizeOptionalString(defaults.resolution),
+  };
+}
 
 async function readXaiVideoJson(response: Response): Promise<Record<string, unknown>> {
   let payload: unknown;
@@ -152,7 +177,11 @@ function resolveRequiredImageUrl(input: VideoGenerationSourceInput): string {
 }
 
 function isReferenceImage(input: VideoGenerationSourceInput): boolean {
-  return normalizeOptionalString(input.role)?.toLowerCase() === "reference_image";
+  return isReferenceImageRole(input.role);
+}
+
+function isReferenceImageRole(role: string | undefined): boolean {
+  return normalizeOptionalString(role)?.toLowerCase() === "reference_image";
 }
 
 function resolveInputVideoUrl(input: VideoGenerationSourceInput | undefined): string | undefined {
@@ -189,16 +218,23 @@ function resolveAspectRatio(value: string | undefined): string | undefined {
   return trimmed;
 }
 
-function resolveResolution(value: string | undefined): "480p" | "720p" | undefined {
-  if (typeof value !== "string") {
+function resolveResolution(params: {
+  value?: string;
+  model: string;
+  mode: "generate" | "referenceToVideo" | "edit" | "extend";
+}): "480p" | "720p" | "1080p" | undefined {
+  if (typeof params.value !== "string") {
     return undefined;
   }
-  const normalized = value.trim().toLowerCase();
+  const normalized = params.value.trim().toLowerCase();
   if (normalized === "480p") {
     return "480p";
   }
-  if (normalized === "720p" || normalized === "1080p") {
+  if (normalized === "720p") {
     return "720p";
+  }
+  if (normalized === "1080p") {
+    return params.model === XAI_VIDEO_1_5_MODEL && params.mode === "generate" ? "1080p" : "720p";
   }
   return undefined;
 }
@@ -244,8 +280,10 @@ function buildCreateBody(req: VideoGenerationRequest): Record<string, unknown> {
   }
 
   const mode = resolveXaiVideoMode(req);
+  const model = normalizeOptionalString(req.model) ?? DEFAULT_XAI_VIDEO_MODEL;
+  const configuredDefaults = resolveXaiVideoGenerationDefaults(req);
   const body: Record<string, unknown> = {
-    model: normalizeOptionalString(req.model) ?? DEFAULT_XAI_VIDEO_MODEL,
+    model,
     prompt: req.prompt,
   };
 
@@ -256,12 +294,19 @@ function buildCreateBody(req: VideoGenerationRequest): Record<string, unknown> {
     }
     body.duration =
       resolveDurationSeconds({
-        durationSeconds: req.durationSeconds,
+        durationSeconds: req.durationSeconds ?? configuredDefaults.durationSeconds,
         min: 1,
         max: 15,
       }) ?? XAI_VIDEO_DEFAULT_DURATION_SECONDS;
-    body.aspect_ratio = resolveAspectRatio(req.aspectRatio) ?? XAI_VIDEO_DEFAULT_ASPECT_RATIO;
-    body.resolution = resolveResolution(req.resolution) ?? XAI_VIDEO_DEFAULT_RESOLUTION;
+    body.aspect_ratio =
+      resolveAspectRatio(req.aspectRatio ?? configuredDefaults.aspectRatio) ??
+      XAI_VIDEO_DEFAULT_ASPECT_RATIO;
+    body.resolution =
+      resolveResolution({
+        value: req.resolution ?? configuredDefaults.resolution,
+        model,
+        mode,
+      }) ?? XAI_VIDEO_DEFAULT_RESOLUTION;
     return body;
   }
 
@@ -269,12 +314,19 @@ function buildCreateBody(req: VideoGenerationRequest): Record<string, unknown> {
     body.reference_images = inputImages.map((image) => ({ url: resolveRequiredImageUrl(image) }));
     body.duration =
       resolveDurationSeconds({
-        durationSeconds: req.durationSeconds,
+        durationSeconds: req.durationSeconds ?? configuredDefaults.durationSeconds,
         min: 1,
-        max: 10,
+        max: model === XAI_VIDEO_1_5_MODEL ? 15 : 10,
       }) ?? XAI_VIDEO_DEFAULT_DURATION_SECONDS;
-    body.aspect_ratio = resolveAspectRatio(req.aspectRatio) ?? XAI_VIDEO_DEFAULT_ASPECT_RATIO;
-    body.resolution = resolveResolution(req.resolution) ?? XAI_VIDEO_DEFAULT_RESOLUTION;
+    body.aspect_ratio =
+      resolveAspectRatio(req.aspectRatio ?? configuredDefaults.aspectRatio) ??
+      XAI_VIDEO_DEFAULT_ASPECT_RATIO;
+    body.resolution =
+      resolveResolution({
+        value: req.resolution ?? configuredDefaults.resolution,
+        model,
+        mode,
+      }) ?? XAI_VIDEO_DEFAULT_RESOLUTION;
     return body;
   }
 
@@ -380,18 +432,21 @@ export function buildXaiVideoGenerationProvider(): VideoGenerationProvider {
     label: "xAI",
     defaultModel: DEFAULT_XAI_VIDEO_MODEL,
     defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
-    models: [DEFAULT_XAI_VIDEO_MODEL],
-    isConfigured: ({ agentDir }) =>
+    models: [XAI_VIDEO_1_5_MODEL, DEFAULT_XAI_VIDEO_MODEL],
+    isConfigured: ({ cfg, workspaceDir, agentDir, authStore }) =>
       isProviderApiKeyConfigured({
         provider: "xai",
+        cfg,
+        workspaceDir,
         agentDir,
+        store: authStore,
       }),
     capabilities: {
       generate: {
         maxVideos: 1,
         maxDurationSeconds: 15,
         aspectRatios: [...XAI_VIDEO_ASPECT_RATIOS],
-        resolutions: ["480P", "720P"],
+        resolutions: ["480P", "720P", "1080P"],
         supportsAspectRatio: true,
         supportsResolution: true,
       },
@@ -401,7 +456,7 @@ export function buildXaiVideoGenerationProvider(): VideoGenerationProvider {
         maxInputImages: 7,
         maxDurationSeconds: 15,
         aspectRatios: [...XAI_VIDEO_ASPECT_RATIOS],
-        resolutions: ["480P", "720P"],
+        resolutions: ["480P", "720P", "1080P"],
         supportsAspectRatio: true,
         supportsResolution: true,
       },
@@ -413,6 +468,25 @@ export function buildXaiVideoGenerationProvider(): VideoGenerationProvider {
         supportsAspectRatio: true,
         supportsResolution: true,
       },
+    },
+    resolveModelCapabilities: ({ model, inputImageRoles }) => {
+      if (model === XAI_VIDEO_1_5_MODEL) {
+        return inputImageRoles?.some(isReferenceImageRole)
+          ? {
+              imageToVideo: {
+                enabled: true,
+                resolutions: ["480P", "720P"],
+              },
+            }
+          : undefined;
+      }
+      return {
+        generate: { resolutions: ["480P", "720P"] },
+        imageToVideo: {
+          enabled: true,
+          resolutions: ["480P", "720P"],
+        },
+      };
     },
     async generateVideo(req) {
       const auth = await resolveApiKeyForProvider({

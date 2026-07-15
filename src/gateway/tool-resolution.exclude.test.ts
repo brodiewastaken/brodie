@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
 type CreateOpenClawToolsArg = {
+  agentDir?: string;
   cronCreatorToolAllowlist?: Array<string | { name: string; pluginId?: string }>;
   inheritedToolDenylist?: string[];
   pluginToolDenylist?: string[];
@@ -43,6 +44,7 @@ describe("resolveGatewayScopedTools excludeToolNames", () => {
   });
 
   function readCreateToolsArgs(index = 0): {
+    agentDir?: string;
     cronCreatorToolAllowlist?: Array<string | { name: string; pluginId?: string }>;
     inheritedToolDenylist?: string[];
     pluginToolDenylist?: string[];
@@ -52,11 +54,26 @@ describe("resolveGatewayScopedTools excludeToolNames", () => {
       throw new Error("expected createOpenClawTools args");
     }
     return args as {
+      agentDir?: string;
       cronCreatorToolAllowlist?: Array<string | { name: string; pluginId?: string }>;
       inheritedToolDenylist?: string[];
       pluginToolDenylist?: string[];
     };
   }
+
+  it("passes the session agent directory into gateway tool construction", () => {
+    resolveGatewayScopedTools({
+      cfg: {
+        agents: {
+          list: [{ id: "main", agentDir: "/tmp/agents/main/agent" }],
+        },
+      } as OpenClawConfig,
+      sessionKey: "agent:main:direct:test",
+      surface: "http",
+    });
+
+    expect(readCreateToolsArgs().agentDir).toBe("/tmp/agents/main/agent");
+  });
 
   it("filters loopback dedup exclusions without inheriting policy denies", () => {
     const result = resolveGatewayScopedTools({

@@ -136,6 +136,10 @@
       "label": "Inline Citations",
       "help": "Include inline markdown citations in Grok responses."
     },
+    "webSearch.reasoningEffort": {
+      "label": "Grok Search Reasoning Effort",
+      "help": "Optional reasoning effort for Grok web search requests."
+    },
     "codeExecution.enabled": {
       "label": "Enable Code Execution",
       "help": "Enable the code_execution tool for remote xAI sandbox analysis."
@@ -155,6 +159,10 @@
     "xSearch.inlineCitations": {
       "label": "X Search Inline Citations",
       "help": "Keep inline markdown citations from xAI in x_search responses when available."
+    },
+    "xSearch.reasoningEffort": {
+      "label": "X Search Reasoning Effort",
+      "help": "Optional reasoning effort for x_search requests."
     },
     "xSearch.maxTurns": {
       "label": "X Search Max Turns",
@@ -179,6 +187,18 @@
     "codeExecution.timeoutSeconds": {
       "label": "Code Execution Timeout",
       "help": "Timeout in seconds for code_execution requests."
+    },
+    "videoGeneration.aspectRatio": {
+      "label": "Video Generation Aspect Ratio",
+      "help": "Default xAI video aspect ratio when video_generate omits aspectRatio."
+    },
+    "videoGeneration.resolution": {
+      "label": "Video Generation Resolution",
+      "help": "Default xAI video resolution when video_generate omits resolution."
+    },
+    "videoGeneration.durationSeconds": {
+      "label": "Video Generation Duration",
+      "help": "Default xAI video duration in seconds when video_generate omits durationSeconds."
     }
   },
   "contracts": {
@@ -262,6 +282,10 @@
           },
           "inlineCitations": {
             "type": "boolean"
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": ["none", "low", "medium", "high", "xhigh"]
           }
         }
       },
@@ -280,6 +304,10 @@
           },
           "inlineCitations": {
             "type": "boolean"
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": ["none", "low", "medium", "high", "xhigh"]
           },
           "maxTurns": {
             "type": "number"
@@ -307,6 +335,25 @@
           },
           "timeoutSeconds": {
             "type": "number"
+          }
+        }
+      },
+      "videoGeneration": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "aspectRatio": {
+            "type": "string",
+            "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]
+          },
+          "resolution": {
+            "type": "string",
+            "enum": ["480P", "720P", "1080P"]
+          },
+          "durationSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 15
           }
         }
       }

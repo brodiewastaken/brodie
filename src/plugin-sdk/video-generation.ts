@@ -26,9 +26,7 @@ import type {
 export type GeneratedVideoAsset = {
   /** Raw video bytes. Either buffer or url must be present. */
   buffer?: Buffer;
-  /** Pre-signed or provider-hosted URL for the video. When set and buffer is
-   * absent, callers can deliver or download the asset without requiring the
-   * provider to materialize the full file in memory first. */
+  /** Provider URL used when no local buffer is returned. */
   url?: string;
   mimeType: string;
   fileName?: string;
@@ -45,11 +43,7 @@ export type VideoGenerationResolution =
   | "1080P"
   | (string & {});
 
-/**
- * Canonical semantic role hints for reference assets (first/last frame,
- * reference image/video/audio). Providers may accept additional role strings;
- * the asset.role type accepts both canonical values and arbitrary strings.
- */
+/** Semantic role for generation reference assets. */
 export type VideoGenerationAssetRole =
   | "first_frame"
   | "last_frame"
@@ -63,11 +57,7 @@ export type VideoGenerationSourceAsset = {
   buffer?: Buffer;
   mimeType?: string;
   fileName?: string;
-  /**
-   * Optional semantic role hint forwarded to the provider. Canonical values
-   * come from `VideoGenerationAssetRole`; plain strings are accepted for
-   * provider-specific extensions.
-   */
+  /** Optional reference role, including provider-specific values. */
   role?: VideoGenerationAssetRole | (string & {});
   metadata?: Record<string, unknown>;
 };
@@ -75,7 +65,9 @@ export type VideoGenerationSourceAsset = {
 /** Context passed when checking whether a video provider is configured. */
 export type VideoGenerationProviderConfiguredContext = {
   cfg?: OpenClawConfig;
+  workspaceDir?: string;
   agentDir?: string;
+  authStore?: AuthProfileStore;
 };
 
 /** Context passed when resolving model-specific video generation capabilities. */
@@ -85,6 +77,7 @@ export type VideoGenerationModelCapabilitiesContext = {
   cfg: OpenClawConfig;
   agentDir?: string;
   authStore?: AuthProfileStore;
+  inputImageRoles?: readonly VideoGenerationSourceAsset["role"][];
   timeoutMs?: number;
 };
 

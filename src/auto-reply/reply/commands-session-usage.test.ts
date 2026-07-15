@@ -453,4 +453,17 @@ describe("handleFastCommand", () => {
     expect(params.sessionEntry.fastMode).toBe(false);
     expect(params.sessionStore[params.sessionKey]?.fastMode).toBeUndefined();
   });
+
+  it("rejects /fast on without persisting it when Fast is locked off", async () => {
+    const params = buildUsageParams();
+    params.cfg = { agents: { defaults: { fastModeEnforcedOff: true } } } as OpenClawConfig;
+    params.command.commandBodyNormalized = "/fast on";
+    params.sessionEntry = { sessionId: "target-session", updatedAt: Date.now(), fastMode: false };
+    params.sessionStore = { [params.sessionKey]: params.sessionEntry };
+
+    const result = await handleFastCommand(params, true);
+
+    expect(result?.reply?.text).toBe("⚙️ Fast mode is permanently disabled for this deployment.");
+    expect(params.sessionEntry.fastMode).toBe(false);
+  });
 });

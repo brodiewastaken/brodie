@@ -119,10 +119,15 @@ describe("xai image generation provider", () => {
     expect(provider.id).toBe("xai");
     expect(provider.label).toBe("xAI");
     expect(provider.defaultModel).toBe("grok-imagine-image");
-    expect(provider.models).toEqual(["grok-imagine-image", "grok-imagine-image-quality"]);
+    expect(provider.models).toEqual([
+      "grok-imagine-image-2.0",
+      "grok-imagine-image",
+      "grok-imagine-image-quality",
+    ]);
     expect(provider.capabilities.generate.maxCount).toBe(4);
     expect(provider.capabilities.generate.supportsAspectRatio).toBe(true);
     expect(provider.capabilities.geometry?.aspectRatios).toEqual([
+      "auto",
       "1:1",
       "16:9",
       "9:16",
@@ -130,6 +135,14 @@ describe("xai image generation provider", () => {
       "3:4",
       "2:3",
       "3:2",
+      "2:1",
+      "1:2",
+      "19.5:9",
+      "9:19.5",
+      "20:9",
+      "9:20",
+      "21:9",
+      "5:2",
     ]);
     expect(provider.capabilities.edit.enabled).toBe(true);
     expect(provider.capabilities.edit.maxInputImages).toBe(5);
@@ -140,7 +153,41 @@ describe("xai image generation provider", () => {
     expect(isConfigured({ agentDir: "/tmp/openclaw-xai-test" })).toBe(true);
     expect(isProviderApiKeyConfiguredMock).toHaveBeenCalledWith({
       provider: "xai",
+      cfg: undefined,
+      workspaceDir: undefined,
       agentDir: "/tmp/openclaw-xai-test",
+      store: undefined,
+    });
+  });
+
+  it("passes the request auth store into readiness", () => {
+    const provider = buildXaiImageGenerationProvider();
+    const authStore = {
+      version: 1 as const,
+      profiles: {
+        "xai:default": {
+          type: "oauth" as const,
+          provider: "xai",
+          access: "oauth-access",
+          refresh: "oauth-refresh",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+
+    provider.isConfigured?.({
+      cfg: {},
+      workspaceDir: "/tmp/workspace",
+      agentDir: "/tmp/agent",
+      authStore,
+    });
+
+    expect(isProviderApiKeyConfiguredMock).toHaveBeenLastCalledWith({
+      provider: "xai",
+      cfg: {},
+      workspaceDir: "/tmp/workspace",
+      agentDir: "/tmp/agent",
+      store: authStore,
     });
   });
 

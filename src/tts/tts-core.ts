@@ -1,15 +1,16 @@
 // TTS core coordinates text preparation, provider selection, and speech output.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { requireApiKey } from "../agents/model-auth.js";
 import {
   buildModelAliasIndex,
   resolveDefaultModelForAgent,
   resolveModelRefFromString,
   type ModelRef,
 } from "../agents/model-selection.js";
-import { prepareSimpleCompletionModel } from "../agents/simple-completion-runtime.js";
+import {
+  completeWithPreparedSimpleCompletionModel,
+  prepareSimpleCompletionModel,
+} from "../agents/simple-completion-runtime.js";
 import type { OpenClawConfig } from "../config/types.js";
-import { completeSimple } from "../llm/stream.js";
 import type { TextContent } from "../llm/types.js";
 import { resolveTimerTimeoutMs } from "../shared/number-coercion.js";
 import type { ResolvedTtsConfig } from "./tts-types.js";
@@ -22,16 +23,14 @@ export {
 } from "./tts-provider-helpers.js";
 
 type SummarizeTextDeps = {
-  completeSimple: typeof completeSimple;
+  completeWithPreparedSimpleCompletionModel: typeof completeWithPreparedSimpleCompletionModel;
   prepareSimpleCompletionModel: typeof prepareSimpleCompletionModel;
-  requireApiKey: typeof requireApiKey;
 };
 
 function resolveDefaultSummarizeTextDeps(): SummarizeTextDeps {
   return {
-    completeSimple,
+    completeWithPreparedSimpleCompletionModel,
     prepareSimpleCompletionModel,
-    requireApiKey,
   };
 }
 
@@ -103,7 +102,6 @@ export async function summarizeText(
     throw new Error(prepared.error);
   }
   const completionModel = prepared.model;
-  const apiKey = deps.requireApiKey(prepared.auth, ref.provider);
 
   try {
     const controller = new AbortController();
@@ -113,9 +111,11 @@ export async function summarizeText(
     try {
       // Keep summarization on the simple-completion path so provider auth,
       // aliases, and timeout behavior match other lightweight model calls.
-      const res = await deps.completeSimple(
-        completionModel,
-        {
+      const res = await deps.completeWithPreparedSimpleCompletionModel({
+        model: completionModel,
+        auth: prepared.auth,
+        cfg,
+        context: {
           messages: [
             {
               role: "user",
@@ -128,13 +128,12 @@ export async function summarizeText(
             },
           ],
         },
-        {
-          apiKey,
+        options: {
           maxTokens: Math.ceil(targetLength / 2),
           temperature: 0.3,
           signal: controller.signal,
         },
-      );
+      });
       const summary = res.content
         .filter(isTextContentBlock)
         .map((block) => block.text.trim())

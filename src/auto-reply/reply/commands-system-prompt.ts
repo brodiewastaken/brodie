@@ -271,6 +271,7 @@ export async function resolveCommandsSystemPromptBundle(
     reasoningLevel: params.resolvedReasoningLevel,
     extraSystemPrompt: undefined,
     ownerNumbers: undefined,
+    senderIsOwner: params.command.senderIsOwner,
     reasoningTagHint: false,
     toolNames,
     userTimezone,

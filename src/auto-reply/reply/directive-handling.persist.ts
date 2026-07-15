@@ -295,6 +295,7 @@ export async function persistInlineDirectives(params: {
         entry: sessionEntry,
         selection: modelResolution.modelSelection,
         profileOverride: modelResolution.profileOverride,
+        explicitSelectionIntent: true,
         markLiveSwitchPending: params.markLiveSwitchPending,
       });
       const appliedRuntimeOverride = applyModelRuntimeDirective(

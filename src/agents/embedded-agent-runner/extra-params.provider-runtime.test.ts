@@ -187,4 +187,50 @@ describe("extra-params: provider runtime handoff", () => {
 
     expect(payload.think).toBeUndefined();
   });
+
+  it("removes priority from completions extra_body when Fast is locked off", () => {
+    const payload = runExtraParamsCase({
+      cfg: {
+        agents: {
+          defaults: {
+            fastModeEnforcedOff: true,
+            models: {
+              "openai/gpt-6-astra": {
+                params: {
+                  extra_body: { service_tier: "priority", speed: "fast" },
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      model: {
+        api: "openai-completions",
+        provider: "openai",
+        id: "gpt-6-astra",
+      } as unknown as Model<"openai-completions">,
+      payload: { model: "gpt-6-astra", messages: [] },
+    }).payload as Record<string, unknown>;
+
+    expect(payload).not.toHaveProperty("service_tier");
+    expect(payload).not.toHaveProperty("speed");
+  });
+
+  it("enforces Fast off for a config-free explicit model without changing its route", () => {
+    const payload = runExtraParamsCase({
+      extraParamsOverride: {
+        fastModeEnforcedOff: true,
+        extra_body: { service_tier: "priority" },
+      },
+      model: {
+        api: "openai-completions",
+        provider: "openai",
+        id: "gpt-6-astra",
+      } as unknown as Model<"openai-completions">,
+      payload: { model: "gpt-6-astra", messages: [] },
+    }).payload as Record<string, unknown>;
+
+    expect(payload.model).toBe("gpt-6-astra");
+    expect(payload).not.toHaveProperty("service_tier");
+  });
 });

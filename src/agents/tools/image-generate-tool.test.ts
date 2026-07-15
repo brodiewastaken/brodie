@@ -2,6 +2,7 @@
 // background task handling, media saving, and duplicate-generation guards.
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { AuthProfileStore } from "../auth-profiles/types.js";
 
 const taskRuntimeInternalMocks = vi.hoisted(() => {
   const mocks = {
@@ -591,6 +592,10 @@ describe("createImageGenerateTool", () => {
   });
 
   it("generates images and returns details.media paths", async () => {
+    const authProfileStore: AuthProfileStore = {
+      version: 1,
+      profiles: { request: { type: "api_key", provider: "google", key: "test-request-key" } },
+    };
     vi.spyOn(imageGenerationRuntime, "listRuntimeImageGenerationProviders").mockReturnValue([
       {
         id: "openai",
@@ -651,6 +656,7 @@ describe("createImageGenerateTool", () => {
 
     const tool = requireImageGenerateTool(
       createImageGenerateTool({
+        authProfileStore,
         config: {
           agents: {
             defaults: {
@@ -720,6 +726,9 @@ describe("createImageGenerateTool", () => {
     expect(text).toContain('path="/tmp/generated-1.png"');
     expect(text).toContain('path="/tmp/generated-2.png"');
     expect(text).not.toMatch(/^MEDIA:/m);
+    expect(vi.mocked(imageGenerationRuntime.generateImage).mock.calls.at(-1)?.[0]?.authStore).toBe(
+      authProfileStore,
+    );
   });
 
   it("runs explicit deployment refs and preserves timeout-only image defaults", async () => {
@@ -797,6 +806,10 @@ describe("createImageGenerateTool", () => {
   });
 
   it("starts image generation asynchronously when a session delivery context is available", async () => {
+    const authProfileStore: AuthProfileStore = {
+      version: 1,
+      profiles: { request: { type: "api_key", provider: "google", key: "test-request-key" } },
+    };
     stubImageGenerationProviders();
     vi.stubEnv("OPENAI_API_KEY", "openai-test");
     const generateImage = vi.spyOn(imageGenerationRuntime, "generateImage").mockResolvedValue({
@@ -819,6 +832,7 @@ describe("createImageGenerateTool", () => {
     const onAsyncTaskStarted = vi.fn();
     const tool = requireImageGenerateTool(
       createImageGenerateTool({
+        authProfileStore,
         config: {
           agents: {
             defaults: {
@@ -878,6 +892,12 @@ describe("createImageGenerateTool", () => {
       "Image generation task task-image-123 is already running",
     );
     expect(resultDetails(duplicateResult).duplicateGuard).toBe(true);
+    const { imageGenerationTaskLifecycle } = await import("./image-generate-background.js");
+    vi.spyOn(imageGenerationTaskLifecycle, "wakeTaskCompletion").mockResolvedValue(true);
+    await scheduled[0]?.();
+    expect(vi.mocked(imageGenerationRuntime.generateImage).mock.calls.at(-1)?.[0]?.authStore).toBe(
+      authProfileStore,
+    );
   });
 
   it("starts run-scoped cron image generation as a tracked async task", async () => {

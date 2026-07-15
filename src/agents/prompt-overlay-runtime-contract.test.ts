@@ -23,6 +23,8 @@ describe("GPT-5 prompt overlay runtime contract", () => {
     });
 
     expect(contribution?.stablePrefix).toContain("<persona_latch>");
+    expect(contribution?.stablePrefix).toContain("not already clearly authorized");
+    expect(contribution?.stablePrefix).toContain("do not ask again");
     expect(contribution?.sectionOverrides?.interaction_style).toContain(
       "Live chat tone: short, natural, human.",
     );

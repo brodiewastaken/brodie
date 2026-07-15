@@ -273,6 +273,13 @@ describe("applyModelOverrideToSessionEntry", () => {
       modelOverride: "gpt-5.4",
       authProfileOverride: "oldprofile",
       authProfileOverrideSource: "user",
+      cronRunContinuationPolicy: {
+        provider: "openai",
+        model: "gpt-5.4",
+        thinking: "high",
+        fastMode: false,
+        fallbacks: [],
+      },
     };
 
     const result = applyModelOverrideToSessionEntry({
@@ -282,12 +289,94 @@ describe("applyModelOverrideToSessionEntry", () => {
         model: "gpt-5.4",
       },
       profileOverride: "newprofile",
+      explicitSelectionIntent: true,
       markLiveSwitchPending: true,
     });
 
     expect(result.updated).toBe(true);
     expect(entry.authProfileOverride).toBe("newprofile");
     expect(entry.liveModelSwitchPending).toBe(true);
+    expect(entry.cronRunContinuationPolicy).toBeDefined();
+  });
+
+  it("clears a cron continuation policy for explicit non-interrupting model selection", () => {
+    const entry: SessionEntry = {
+      sessionId: "sess-cron-model-switch",
+      updatedAt: Date.now() - 5_000,
+      cronRunContinuationPolicy: {
+        provider: "xai",
+        model: "grok-4.6",
+        thinking: "high",
+        fastMode: false,
+        fallbacks: ["xai/grok-4.5"],
+      },
+    };
+
+    const result = applyModelOverrideToSessionEntry({
+      entry,
+      selection: {
+        provider: "anthropic",
+        model: "claude-fable-5",
+      },
+      explicitSelectionIntent: true,
+    });
+
+    expect(result.updated).toBe(true);
+    expect(entry.cronRunContinuationPolicy).toBeUndefined();
+    expect(entry.liveModelSwitchPending).toBeUndefined();
+  });
+
+  it("clears a cron continuation policy when explicitly switching to the default", () => {
+    const entry: SessionEntry = {
+      sessionId: "sess-cron-default-switch",
+      updatedAt: Date.now() - 5_000,
+      cronRunContinuationPolicy: {
+        provider: "xai",
+        model: "grok-4.6",
+        thinking: "high",
+        fastMode: false,
+        fallbacks: [],
+      },
+    };
+
+    const result = applyModelOverrideToSessionEntry({
+      entry,
+      selection: {
+        provider: "openai",
+        model: "gpt-6-astra",
+        isDefault: true,
+      },
+      markLiveSwitchPending: true,
+    });
+
+    expect(result.updated).toBe(true);
+    expect(entry.cronRunContinuationPolicy).toBeUndefined();
+  });
+
+  it("preserves a cron continuation policy for automatic model changes", () => {
+    const entry: SessionEntry = {
+      sessionId: "sess-cron-auto-switch",
+      updatedAt: Date.now() - 5_000,
+      cronRunContinuationPolicy: {
+        provider: "xai",
+        model: "grok-4.6",
+        thinking: "high",
+        fastMode: false,
+        fallbacks: [],
+      },
+    };
+
+    applyModelOverrideToSessionEntry({
+      entry,
+      selection: {
+        provider: "anthropic",
+        model: "claude-fable-5",
+      },
+      selectionSource: "auto",
+      markLiveSwitchPending: true,
+    });
+
+    expect(entry.cronRunContinuationPolicy).toBeDefined();
   });
 });
 

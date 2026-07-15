@@ -22,6 +22,7 @@ import {
   resolveXaiXSearchInlineCitations,
   resolveXaiXSearchMaxTurns,
   resolveXaiXSearchModel,
+  resolveXaiXSearchReasoningEffort,
   type XaiXSearchOptions,
 } from "./src/x-search-shared.js";
 import {
@@ -112,6 +113,7 @@ function buildXSearchCacheKey(params: {
   endpoint: string;
   inlineCitations: boolean;
   maxTurns?: number;
+  reasoningEffort?: string;
   options: Omit<XaiXSearchOptions, "query">;
 }) {
   return JSON.stringify([
@@ -121,6 +123,7 @@ function buildXSearchCacheKey(params: {
     params.query,
     params.inlineCitations,
     params.maxTurns ?? null,
+    params.reasoningEffort ?? null,
     params.options.allowedXHandles ?? null,
     params.options.excludedXHandles ?? null,
     params.options.fromDate ?? null,
@@ -181,12 +184,14 @@ export function createXSearchTool(options?: {
     const endpoint = resolveXaiXSearchEndpoint(xSearchConfigRecord);
     const inlineCitations = resolveXaiXSearchInlineCitations(xSearchConfigRecord);
     const maxTurns = resolveXaiXSearchMaxTurns(xSearchConfigRecord);
+    const reasoningEffort = resolveXaiXSearchReasoningEffort(xSearchConfigRecord);
     const cacheKey = buildXSearchCacheKey({
       query,
       model,
       endpoint,
       inlineCitations,
       maxTurns,
+      reasoningEffort,
       options: {
         allowedXHandles,
         excludedXHandles,
@@ -209,6 +214,7 @@ export function createXSearchTool(options?: {
       timeoutSeconds: resolveTimeoutSeconds(xSearchConfig?.timeoutSeconds, 30),
       inlineCitations,
       maxTurns,
+      reasoningEffort,
       options: xSearchOptions,
     });
     const payload = buildXaiXSearchPayload({

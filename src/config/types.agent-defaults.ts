@@ -1,6 +1,7 @@
 // Defines agent default configuration types shared by runtime schemas.
 import type { SilentReplyPolicyShape } from "../shared/silent-reply-policy.js";
 import type {
+  AgentDefaultModelConfig,
   AgentModelConfig,
   AgentToolModelConfig,
   AgentRuntimePolicyConfig,
@@ -38,6 +39,8 @@ export type PromptOverlaysConfig = {
 export type AgentModelEntryConfig = {
   /** Optional display/lookup alias for this provider/model entry. */
   alias?: string;
+  /** Additional display/lookup aliases. */
+  aliases?: string[];
   /** Provider-specific API parameters (e.g., GLM-4.7 thinking mode). */
   params?: Record<string, unknown>;
   /** Optional agent execution runtime for this specific provider/model entry. */
@@ -46,6 +49,8 @@ export type AgentModelEntryConfig = {
   streaming?: boolean;
   /** Journal injection mode selected once when /new starts this model. */
   startupJournals?: "inline" | "paths";
+  /** Maximum native image blocks restored for runs selected on this model. */
+  maxNativeImages?: number;
 };
 
 export type AgentModelListConfig = {
@@ -222,39 +227,25 @@ export type CliBackendConfig = {
 };
 
 export type AgentDefaultsConfig = {
+  fastModeEnforcedOff?: boolean;
   /** Global default provider params applied to all models before per-model and per-agent overrides. */
   params?: Record<string, unknown>;
-  /** Primary model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
-  model?: AgentModelConfig;
-  /** Optional lower-cost model for short internal tasks such as generated session titles. */
+  /** Primary model, fallbacks, and fallback notice policy. */
+  model?: AgentDefaultModelConfig;
   utilityModel?: string;
   /**
    * @deprecated Legacy raw config accepted only by doctor/migration repair.
    * Normal schema parsing rejects this key; use per-model agentRuntime instead.
    */
   agentRuntime?: AgentRuntimePolicyConfig;
-  /** Optional image-capable model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
   imageModel?: AgentToolModelConfig;
-  /** Optional image-generation model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
   imageGenerationModel?: AgentToolModelConfig;
-  /** Optional video-generation model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
   videoGenerationModel?: AgentToolModelConfig;
-  /** Optional music-generation model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
   musicGenerationModel?: AgentToolModelConfig;
-  /** Optional voice model and fallbacks (provider/model) for TTS/STT/realtime voice providers. */
   voiceModel?: AgentToolModelConfig;
-  /**
-   * When true (default), shared image/music/video generation appends other
-   * auth-backed provider defaults after explicit primary/fallback refs. Set to
-   * false to disable implicit cross-provider fallback while keeping explicit
-   * fallbacks.
-   */
   mediaGenerationAutoProviderFallback?: boolean;
-  /** Optional PDF-capable model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
   pdfModel?: AgentToolModelConfig;
-  /** Maximum PDF file size in megabytes (default: 10). */
   pdfMaxBytesMb?: number;
-  /** Maximum number of PDF pages to process (default: 20). */
   pdfMaxPages?: number;
   /** Model catalog with optional aliases (full provider/model keys). */
   models?: Record<string, AgentModelEntryConfig>;
@@ -401,6 +392,8 @@ export type AgentDefaultsConfig = {
    * Default: 1200.
    */
   imageMaxDimensionPx?: number;
+  /** Global native-image restore ceiling. Per-model values take precedence; default: 42. */
+  maxNativeImages?: number;
   /**
    * Image compression/detail preference for image-tool media loading.
    * Default: auto, which adapts to provider/model limits and image count.

@@ -99,11 +99,23 @@ describe("isStrictAgenticExecutionContractActive", () => {
       }
     });
 
-    it("does not match non-gpt-5 family ids", () => {
+    it("auto-activates on the GPT-6 family (gpt-6, gpt-6-astra)", () => {
+      for (const modelId of ["gpt-6", "gpt-6-astra", "openai/gpt-6-astra", "GPT-6-ASTRA"]) {
+        expect(
+          isStrictAgenticExecutionContractActive({
+            config: emptyConfig,
+            provider: supportedProvider,
+            modelId,
+          }),
+        ).toBe(true);
+      }
+    });
+
+    it("does not match pre-GPT-5 family ids", () => {
       for (const modelId of [
         "gpt-4.5",
         "gpt-4o",
-        "gpt-6",
+        "gpt-60",
         "gpt-50",
         "claude-opus-4-6",
         "llama-3-70b",

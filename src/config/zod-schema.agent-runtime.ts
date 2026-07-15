@@ -12,7 +12,11 @@ import { getBlockedNetworkModeReason } from "../agents/sandbox/network-mode.js";
 import { parseDurationMs } from "../cli/parse-duration.js";
 import { isBlockedObjectKey } from "../infra/prototype-keys.js";
 import { LEGACY_WEB_SEARCH_PROVIDER_CONFIG_KEYS } from "./web-search-legacy-provider-keys.js";
-import { AgentModelSchema, AgentToolModelSchema } from "./zod-schema.agent-model.js";
+import {
+  AgentDefaultModelSchema,
+  AgentModelSchema,
+  AgentToolModelSchema,
+} from "./zod-schema.agent-model.js";
 import {
   GroupChatSchema,
   HumanDelaySchema,
@@ -986,7 +990,7 @@ export const MemorySearchSchema = z
   })
   .strict()
   .optional();
-export { AgentModelSchema, AgentToolModelSchema };
+export { AgentDefaultModelSchema, AgentModelSchema, AgentToolModelSchema };
 
 const AgentRuntimeAcpSchema = z
   .object({
@@ -1024,10 +1028,12 @@ export const AgentRuntimePolicySchema = z
 export const AgentModelRuntimeEntrySchema = z
   .object({
     alias: z.string().optional(),
+    aliases: z.array(z.string()).optional(),
     params: z.record(z.string(), z.unknown()).optional(),
     agentRuntime: AgentRuntimePolicySchema,
     streaming: z.boolean().optional(),
     startupJournals: z.enum(["inline", "paths"]).optional(),
+    maxNativeImages: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   })
   .strict();
 

@@ -73,6 +73,7 @@ Skip it to enable or change `x_search` later in config.
           webSearch: {
             apiKey: "xai-...", // optional if xAI OAuth or XAI_API_KEY is available
             baseUrl: "https://api.x.ai/v1", // optional Responses API proxy/base URL override
+            reasoningEffort: "low", // optional: none, low, medium, high, or xhigh
           },
         },
       },
@@ -103,6 +104,10 @@ citations, similar to Gemini's Google Search grounding approach.
 Grok search supports `query`. `count` is accepted for shared `web_search`
 compatibility, but Grok always returns one synthesized answer with citations
 rather than an N-result list. Provider-specific filters are not supported.
+
+Set `plugins.entries.xai.config.webSearch.reasoningEffort` to send an explicit
+xAI Responses reasoning effort. If omitted, xAI applies the selected model's
+provider default.
 
 Grok defaults to a 60 second timeout because xAI Responses web-grounded
 searches can run longer than the shared `web_search` default. Override it

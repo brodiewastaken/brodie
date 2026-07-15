@@ -237,6 +237,9 @@ function coercePayload(payload: UnknownRecord) {
       }
     }
   }
+  if ("fastMode" in next && typeof next.fastMode !== "boolean") {
+    delete next.fastMode;
+  }
   if ("timeoutSeconds" in next) {
     const timeoutSeconds = parseOptionalField(TimeoutSecondsFieldSchema, next.timeoutSeconds);
     if (timeoutSeconds !== undefined) {

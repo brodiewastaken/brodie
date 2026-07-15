@@ -16,6 +16,18 @@ export type AgentModelConfig =
       fallbacks?: string[];
     };
 
+/** Global default model selector plus user-visible fallback notice policy. */
+export type AgentDefaultModelConfig =
+  | string
+  | {
+      /** Primary model (provider/model). */
+      primary?: string;
+      /** Ordered global model fallbacks (provider/model). */
+      fallbacks?: string[];
+      /** Whether fallback transition and recovery notices are delivered to users. */
+      fallbackNotice?: "visible" | "silent";
+    };
+
 /** Tool-specific model selector with an optional capability timeout override. */
 export type AgentToolModelConfig =
   | string

@@ -141,6 +141,7 @@ export function buildCliAgentSystemPrompt(params: {
   runtimeChatType?: ChatType;
   runtimeCapabilities?: string[];
   ownerNumbers?: string[];
+  senderIsOwner?: boolean;
   heartbeatPrompt?: string;
   docsPath?: string;
   sourcePath?: string;
@@ -189,6 +190,7 @@ export function buildCliAgentSystemPrompt(params: {
     requireExplicitMessageTarget: params.requireExplicitMessageTarget,
     silentReplyPromptMode: params.silentReplyPromptMode,
     ownerNumbers: params.ownerNumbers,
+    senderIsOwner: params.senderIsOwner,
     reasoningTagHint: false,
     heartbeatPrompt: params.heartbeatPrompt,
     docsPath: params.docsPath,

@@ -1,6 +1,7 @@
 // Subagent announce delivery tests cover the last-mile routing used when child
 // runs report progress or completion back to the requester session.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SessionEntry } from "../config/sessions/types.js";
 import { OutboundDeliveryError } from "../infra/outbound/deliver-types.js";
 import {
   testing as sessionBindingServiceTesting,
@@ -331,7 +332,9 @@ async function deliverTelegramDirectMessageCompletion(params: {
 
 async function deliverSlackChannelAnnouncement(params: {
   callGateway: typeof runtimeCallGateway;
+  dispatchGatewayMethodInProcess?: typeof runtimeDispatchGatewayMethodInProcess;
   isActive: boolean;
+  activityStates?: boolean[];
   sessionId: string;
   expectsCompletionMessage: boolean;
   directIdempotencyKey: string;
@@ -355,6 +358,7 @@ async function deliverSlackChannelAnnouncement(params: {
   sourceChannel?: string;
   sourceTool?: string;
   trackedChildRun?: SubagentRunRecord | null;
+  requesterEntry?: SessionEntry;
   requesterAbandoned?: boolean;
   runtimeConfig?: Record<string, unknown>;
 }) {
@@ -364,13 +368,22 @@ async function deliverSlackChannelAnnouncement(params: {
     accountId: "acct-1",
   } as const;
 
+  let activityCheck = 0;
   testing.setDepsForTest({
     callGateway: params.callGateway,
+    ...(params.dispatchGatewayMethodInProcess
+      ? { dispatchGatewayMethodInProcess: params.dispatchGatewayMethodInProcess }
+      : {}),
     getRequesterSessionActivity: () => ({
       sessionId: params.sessionId,
-      isActive: params.isActive,
+      isActive: params.activityStates?.[activityCheck++] ?? params.isActive,
     }),
     getSubagentRunByChildSessionKey: () => params.trackedChildRun ?? null,
+    loadRequesterSessionEntry: (requesterSessionKey) => ({
+      cfg: (params.runtimeConfig ?? {}) as never,
+      entry: params.requesterEntry,
+      canonicalKey: requesterSessionKey,
+    }),
     isRequesterSessionAbandoned: () => params.requesterAbandoned === true,
     getRuntimeConfig: () => (params.runtimeConfig ?? {}) as never,
     sendMessage: params.sendMessage ?? runtimeSendMessage,
@@ -1484,11 +1497,13 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       threadId: "171.222",
       bestEffortDeliver: true,
     });
-    expect(mockCallArg(dispatchGatewayMethodInProcess, 0, 2)).toMatchObject({
+    const dispatchOptions = mockCallArg(dispatchGatewayMethodInProcess, 0, 2);
+    expect(dispatchOptions).toMatchObject({
       expectFinal: false,
       forceSyntheticClient: true,
       timeoutMs: 120_000,
     });
+    expect(dispatchOptions).not.toHaveProperty("allowSyntheticModelOverride");
   });
 
   it.each([
@@ -4305,10 +4320,12 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     const requesterSessionKey = "agent:main:cron:daily-text:run:run-123";
     const sourceSessionKey = "agent:main:subagent:cron-child";
     const callGateway = createGatewayMock();
+    const dispatchGatewayMethodInProcess = createInProcessGatewayMock();
     const sendMessage = createSendMessageMock();
     const queueEmbeddedAgentMessageWithOutcome = createQueueOutcomeMock(true);
     const result = await deliverSlackChannelAnnouncement({
       callGateway,
+      dispatchGatewayMethodInProcess,
       sendMessage,
       queueEmbeddedAgentMessageWithOutcome,
       sessionId: "stale-cron-run-session",
@@ -4321,6 +4338,17 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       sourceSessionKey,
       sourceTool: "subagent_announce",
       runtimeConfig: { messages: { visibleReplies: "message_tool" } },
+      requesterEntry: {
+        sessionId: "stale-cron-run-session",
+        updatedAt: 1,
+        cronRunContinuationPolicy: {
+          provider: "xai",
+          model: "grok-4.6",
+          thinking: "high",
+          fastMode: false,
+          fallbacks: [],
+        },
+      },
       trackedChildRun: {
         runId: "cron-child-run",
         childSessionKey: sourceSessionKey,
@@ -4341,8 +4369,11 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       path: "direct",
       phases: [{ phase: "direct-primary", status: "delivered", path: "direct", error: undefined }],
     });
-    const agentParams = expectGatewayAgentParams(callGateway, {
+    expect(callGateway).not.toHaveBeenCalled();
+    const agentParams = expectInProcessAgentParams(dispatchGatewayMethodInProcess, {
       sessionKey: requesterSessionKey,
+      provider: "xai",
+      model: "grok-4.6",
       deliver: false,
       idempotencyKey: `announce:v1:${sourceSessionKey}:cron-child-run`,
       inputProvenance: {
@@ -4355,8 +4386,117 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(agentParams.sourceReplyDeliveryMode).toBeUndefined();
     expect(agentParams.channel).toBe("webchat");
     expect(agentParams.to).toBeUndefined();
+    expect(mockCallArg(dispatchGatewayMethodInProcess, 0, 2)).toMatchObject({
+      allowSyntheticModelOverride: true,
+      expectFinal: false,
+      forceSyntheticClient: true,
+    });
     expect(queueEmbeddedAgentMessageWithOutcome).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps the explicit cron snapshot ahead of a pre-existing user model selection", async () => {
+    const requesterSessionKey = "agent:main:cron:daily-text:run:run-123";
+    const sourceSessionKey = "agent:main:subagent:cron-child-after-switch";
+    const callGateway = createGatewayMock();
+    await deliverSlackChannelAnnouncement({
+      callGateway,
+      sendMessage: createSendMessageMock(),
+      queueEmbeddedAgentMessageWithOutcome: createQueueOutcomeMock(true),
+      sessionId: "stale-cron-run-session",
+      isActive: false,
+      requesterSessionKey,
+      expectsCompletionMessage: true,
+      directIdempotencyKey: `announce:v1:${sourceSessionKey}:cron-child-after-switch-run`,
+      sourceSessionKey,
+      sourceTool: "subagent_announce",
+      requesterEntry: {
+        sessionId: "stale-cron-run-session",
+        updatedAt: 2,
+        providerOverride: "anthropic",
+        modelOverride: "claude-fable-5",
+        modelOverrideSource: "user",
+        cronRunContinuationPolicy: {
+          provider: "xai",
+          model: "grok-4.6",
+          thinking: "high",
+          fastMode: false,
+          fallbacks: [],
+        },
+      },
+      trackedChildRun: {
+        runId: "cron-child-after-switch-run",
+        childSessionKey: sourceSessionKey,
+        requesterSessionKey,
+        requesterDisplayKey: requesterSessionKey,
+        task: "collect more findings",
+        cleanup: "keep",
+        createdAt: 1,
+        expectsCompletionMessage: true,
+        completionEventId: "subagent:cron-child-after-switch-run:completion",
+        schedulerReceiptId: "receipt-cron-child-after-switch",
+        completionAdmittedAt: 2,
+      },
+    });
+
+    expectGatewayAgentParams(callGateway, {
+      sessionKey: requesterSessionKey,
+      provider: "xai",
+      model: "grok-4.6",
+      deliver: false,
+    });
+  });
+
+  it("rechecks requester activity after a failed wake before restoring cron policy", async () => {
+    const requesterSessionKey = "agent:main:cron:daily-text:run:run-123";
+    const sourceSessionKey = "agent:main:subagent:cron-child-race";
+    const callGateway = createGatewayMock();
+    const queueEmbeddedAgentMessageWithOutcome = createQueueOutcomeSequenceMock(["no_active_run"]);
+    await deliverSlackChannelAnnouncement({
+      callGateway,
+      queueEmbeddedAgentMessageWithOutcome,
+      sendMessage: createSendMessageMock(),
+      sessionId: "cron-run-session",
+      isActive: false,
+      activityStates: [true, false],
+      requesterSessionKey,
+      expectsCompletionMessage: true,
+      directIdempotencyKey: `announce:v1:${sourceSessionKey}:cron-child-race-run`,
+      sourceSessionKey,
+      sourceTool: "subagent_announce",
+      requesterEntry: {
+        sessionId: "cron-run-session",
+        updatedAt: 1,
+        cronRunContinuationPolicy: {
+          provider: "xai",
+          model: "grok-4.6",
+          thinking: "high",
+          fastMode: false,
+          fallbacks: [],
+        },
+      },
+      trackedChildRun: {
+        runId: "cron-child-race-run",
+        childSessionKey: sourceSessionKey,
+        requesterSessionKey,
+        requesterDisplayKey: requesterSessionKey,
+        task: "collect raced findings",
+        cleanup: "keep",
+        createdAt: 1,
+        expectsCompletionMessage: true,
+        completionEventId: "subagent:cron-child-race-run:completion",
+        schedulerReceiptId: "receipt-cron-child-race",
+        completionAdmittedAt: 2,
+      },
+    });
+
+    expect(queueEmbeddedAgentMessageWithOutcome).toHaveBeenCalledOnce();
+    expectGatewayAgentParams(callGateway, {
+      sessionKey: requesterSessionKey,
+      provider: "xai",
+      model: "grok-4.6",
+      deliver: false,
+    });
   });
 
   it("resumes an inactive isolated cron requester for a durably admitted failed child", async () => {

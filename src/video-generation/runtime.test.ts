@@ -495,6 +495,68 @@ describe("video-generation runtime", () => {
     });
   });
 
+  it("normalizes reference-role resolution against role-aware model capabilities", async () => {
+    let seenInputImageRoles: readonly (string | undefined)[] | undefined;
+    let seenResolution: string | undefined;
+    providers = [
+      {
+        id: "xai",
+        capabilities: {
+          imageToVideo: {
+            enabled: true,
+            maxInputImages: 7,
+            supportsResolution: true,
+            resolutions: ["480P", "720P", "1080P"],
+          },
+        },
+        resolveModelCapabilities: (ctx) => {
+          seenInputImageRoles = ctx.inputImageRoles;
+          return ctx.inputImageRoles?.includes("reference_image")
+            ? {
+                imageToVideo: {
+                  enabled: true,
+                  resolutions: ["480P", "720P"],
+                },
+              }
+            : undefined;
+        },
+        async generateVideo(req) {
+          seenResolution = req.resolution;
+          return {
+            videos: [{ buffer: Buffer.from("mp4-bytes"), mimeType: "video/mp4" }],
+          };
+        },
+      },
+    ];
+
+    const result = await runGenerateVideo({
+      cfg: {
+        agents: {
+          defaults: {
+            videoGenerationModel: { primary: "xai/grok-imagine-video-1.5" },
+          },
+        },
+      } as OpenClawConfig,
+      prompt: "reference video",
+      resolution: "1080P",
+      inputImages: [
+        {
+          buffer: Buffer.from("image-bytes"),
+          mimeType: "image/png",
+          role: "reference_image",
+        },
+      ],
+    });
+
+    expect(seenInputImageRoles).toEqual(["reference_image"]);
+    expect(seenResolution).toBe("720P");
+    expect(result.normalization?.resolution).toEqual({
+      requested: "1080P",
+      applied: "720P",
+    });
+    expect(result.ignoredOverrides).toEqual([]);
+  });
+
   it("lets selected-model capabilities clear inherited providerOptions before fallback", async () => {
     providers = [
       {

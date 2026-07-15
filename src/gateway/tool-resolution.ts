@@ -1,5 +1,9 @@
 // Gateway-scoped tool resolution for HTTP and loopback tool surfaces.
-import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope.js";
+import {
+  resolveAgentDir,
+  resolveAgentWorkspaceDir,
+  resolveDefaultAgentId,
+} from "../agents/agent-scope.js";
 import {
   resolveEffectiveToolPolicy,
   resolveGroupToolPolicy,
@@ -128,10 +132,9 @@ export function resolveGatewayScopedTools(params: {
       ? [...GATEWAY_OWNER_ONLY_CORE_TOOLS]
       : [];
   // HTTP callers start with additional surface denies because they cross auth only.
-  const workspaceDir = resolveAgentWorkspaceDir(
-    params.cfg,
-    agentId ?? resolveDefaultAgentId(params.cfg),
-  );
+  const resolvedAgentId = agentId ?? resolveDefaultAgentId(params.cfg);
+  const workspaceDir = resolveAgentWorkspaceDir(params.cfg, resolvedAgentId);
+  const agentDir = resolveAgentDir(params.cfg, resolvedAgentId);
   const explicitDenylist = collectExplicitDenylist([
     profilePolicy,
     providerProfilePolicy,
@@ -188,6 +191,7 @@ export function resolveGatewayScopedTools(params: {
     disablePluginTools: params.disablePluginTools,
     wrapBeforeToolCallHook: false,
     config: params.cfg,
+    agentDir,
     workspaceDir,
     pluginToolAllowlist: collectExplicitAllowlist([
       profilePolicy,

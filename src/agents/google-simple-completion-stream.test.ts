@@ -24,9 +24,7 @@ vi.mock("./custom-api-registry.js", () => ({
   ensureCustomApiRegistered,
 }));
 
-const { prepareGoogleSimpleCompletionModel } = await import(
-  "./google-simple-completion-stream.js"
-);
+const { prepareGoogleSimpleCompletionModel } = await import("./google-simple-completion-stream.js");
 
 const GOOGLE_SIMPLE_COMPLETION_API = "openclaw-google-generative-ai-simple";
 
@@ -152,4 +150,43 @@ describe("prepareGoogleSimpleCompletionModel", () => {
       ).payload.generationConfig.thinkingConfig,
     ).not.toHaveProperty("thinkingBudget");
   });
+
+  it.each(["off", undefined] as const)(
+    "sanitizes the Gemini 3.8 wire payload with reasoning=%s",
+    async (reasoning) => {
+      const actual = await vi.importActual<
+        typeof import("../plugin-sdk/provider-stream-shared.js")
+      >("../plugin-sdk/provider-stream-shared.js");
+      sanitizeGoogleThinkingPayload.mockImplementationOnce(actual.sanitizeGoogleThinkingPayload);
+      streamSimple.mockImplementationOnce((_model, _context, options) => {
+        const payload = {
+          config: {
+            temperature: 0.2,
+            topP: 0.9,
+            topK: 40,
+            candidateCount: 2,
+            thinkingConfig:
+              reasoning === "off" ? { thinkingBudget: 0 } : { thinkingLevel: "MINIMAL" },
+          },
+        };
+        options?.onPayload?.(payload, _model);
+        return { content: [{ type: "text", text: "ok" }], payload };
+      });
+      const model = makeGoogleModel("gemini-3.8-flash");
+      prepareGoogleSimpleCompletionModel(model);
+      const streamFn = ensureCustomApiRegistered.mock.calls[0]?.[1] as (
+        ...args: unknown[]
+      ) => unknown;
+
+      const result = await streamFn(
+        model,
+        { messages: [] },
+        { apiKey: "key", ...(reasoning ? { reasoning } : {}) },
+      );
+
+      expect((result as { payload: { config: Record<string, unknown> } }).payload.config).toEqual({
+        thinkingConfig: { thinkingLevel: "LOW" },
+      });
+    },
+  );
 });

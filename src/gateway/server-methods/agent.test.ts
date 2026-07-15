@@ -40,6 +40,11 @@ import {
 } from "../../tasks/task-registry.js";
 import { withTempDir } from "../../test-helpers/temp-dir.js";
 import { captureEnv, setTestEnvValue } from "../../test-utils/env.js";
+import {
+  clearFallbackGatewayContext,
+  dispatchGatewayMethodInProcess,
+  setFallbackGatewayContext,
+} from "../server-plugins.js";
 import { setGatewayDedupeEntry } from "./agent-wait-dedupe.js";
 import { agentHandlers } from "./agent.js";
 import { chatHandlers } from "./chat.js";
@@ -2364,6 +2369,39 @@ describe("gateway agent handler", () => {
       provider: "anthropic",
       model: "claude-haiku-4-5",
     });
+  });
+
+  it("authorizes provider and model overrides through the real in-process dispatcher", async () => {
+    primeMainAgentRun();
+    setFallbackGatewayContext(makeContext());
+    try {
+      await expect(
+        dispatchGatewayMethodInProcess(
+          "agent",
+          {
+            message: "test internal override",
+            agentId: "main",
+            sessionKey: "agent:main:main",
+            provider: "anthropic",
+            model: "claude-haiku-4-5",
+            idempotencyKey: "test-idem-model-override-in-process",
+          },
+          {
+            allowSyntheticModelOverride: true,
+            forceSyntheticClient: true,
+          },
+        ),
+      ).resolves.toMatchObject({
+        status: "accepted",
+        runId: "test-idem-model-override-in-process",
+      });
+      expectRecordFields(await waitForAgentCommandCall(), {
+        provider: "anthropic",
+        model: "claude-haiku-4-5",
+      });
+    } finally {
+      clearFallbackGatewayContext();
+    }
   });
 
   it("preserves cliSessionIds from existing session entry", async () => {

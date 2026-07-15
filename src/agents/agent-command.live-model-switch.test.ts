@@ -39,6 +39,8 @@ const state = vi.hoisted(() => ({
     (_cfg?: unknown, _agentId?: string): string[] | undefined => undefined,
   ),
   resolveEffectiveModelFallbacksMock: vi.fn().mockReturnValue(undefined),
+  getLatestSubagentRunByChildSessionKeyMock: vi.fn(),
+  listThinkingLevelsMock: vi.fn(),
   hasLegacyAutoFallbackWithoutOriginMock: vi.fn((_entry: unknown) => false),
   applyModelOverrideToSessionEntryMock: vi.fn((_params: unknown) => ({ updated: false })),
   resolveAutoFallbackPrimaryProbeMock: vi.fn((_params: unknown) => undefined as unknown),
@@ -213,6 +215,7 @@ vi.mock("../auto-reply/thinking.js", () => ({
   normalizeThinkLevel: (v?: string) => v || undefined,
   normalizeVerboseLevel: (v?: string) => v || undefined,
   isThinkingLevelSupported: (args: unknown) => state.isThinkingLevelSupportedMock(args),
+  listThinkingLevels: (...args: unknown[]) => state.listThinkingLevelsMock(...args),
   resolveSupportedThinkingLevel: (args: { level?: string }) =>
     state.resolveSupportedThinkingLevelMock(args),
   supportsXHighThinking: () => false,
@@ -435,6 +438,11 @@ vi.mock("./defaults.js", () => ({
 
 vi.mock("./lanes.js", () => ({
   AGENT_LANE_SUBAGENT: "subagent",
+}));
+
+vi.mock("./subagent-registry.js", () => ({
+  getLatestSubagentRunByChildSessionKey: (...args: unknown[]) =>
+    state.getLatestSubagentRunByChildSessionKeyMock(...args),
 }));
 
 vi.mock("./model-catalog.js", () => ({
@@ -832,6 +840,7 @@ type FallbackRunnerParams = {
   provider: string;
   model: string;
   sessionId?: string;
+  fallbacksOverride?: string[];
   resolveAgentHarnessRuntimeOverride?: (provider: string, model: string) => string | undefined;
   run: (provider: string, model: string) => Promise<unknown>;
   onFallbackStep?: (step: Record<string, unknown>) => void | Promise<void>;
@@ -967,6 +976,8 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
     state.runtimeConfigMock = undefined;
     delete (state.defaultRuntimeConfig.agents as { list?: unknown }).list;
     state.isThinkingLevelSupportedMock.mockReturnValue(true);
+    state.getLatestSubagentRunByChildSessionKeyMock.mockReturnValue(null);
+    state.listThinkingLevelsMock.mockReturnValue(["off", "low", "medium", "high"]);
     state.resolveSupportedThinkingLevelMock.mockImplementation(
       ({ level }: { level?: string }) => level,
     );
@@ -2000,6 +2011,177 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
     const fallbackParams = mockCallArg(state.runWithModelFallbackMock) as FallbackRunnerParams;
     expect(fallbackParams.provider).toBe("openai");
     expect(fallbackParams.model).toBe("explicit-model");
+  });
+
+  it("uses the frozen child run policy for an explicit spawned model", async () => {
+    const sessionKey = "agent:main:subagent:go-child";
+    const runId = "go-child-run";
+    const fallbacks = [
+      "opencode-go/muse-spark-1.3-contributor",
+      "opencode-go/deepseek-v4.1-flash",
+      "opencode-go/glm-5.3-flash",
+    ];
+    state.resolvedSessionKeyMock = sessionKey;
+    state.sessionEntryMock = {
+      sessionId: "session-1",
+      updatedAt: 1,
+      providerOverride: "opencode-go",
+      modelOverride: "muse-spark-1.3-contributor",
+      modelOverrideSource: "user",
+      thinkingLevel: "xhigh",
+      skillsSnapshot: { prompt: "", skills: [], version: 0 },
+    };
+    state.runtimeConfigMock = {
+      agents: {
+        defaults: {
+          models: Object.fromEntries(fallbacks.map((modelRef) => [modelRef, {}])),
+        },
+      },
+    };
+    const registeredRun = {
+      runId,
+      childSessionKey: sessionKey,
+      resolvedRunPolicy: {
+        primary: { provider: "opencode-go", model: "muse-spark-1.3-contributor" },
+        fallbacks: [
+          { provider: "opencode-go", model: "muse-spark-1.3-contributor", fastMode: false },
+          { provider: "opencode-go", model: "deepseek-v4.1-flash", fastMode: false },
+          { provider: "opencode-go", model: "glm-5.3-flash", fastMode: false },
+        ],
+        reasoning: "xhigh",
+        fastMode: false,
+        textVerbosity: "low",
+        startupJournals: "paths",
+        maxNativeImages: 42,
+        source: {
+          model: "explicit",
+          reasoning: "model",
+          fastMode: "configured",
+          textVerbosity: "default",
+          auth: "default",
+          startupJournals: "default",
+          maxNativeImages: "default",
+        },
+      },
+    };
+    state.getLatestSubagentRunByChildSessionKeyMock.mockReturnValue(registeredRun);
+    state.listThinkingLevelsMock.mockImplementation((_provider: string, model: string) =>
+      model === "muse-spark-1.3-contributor"
+        ? ["off", "minimal", "low", "medium", "high", "xhigh"]
+        : ["off", "low", "high", "max"],
+    );
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      await params.run("opencode-go", "muse-spark-1.3-contributor");
+      await params.run("opencode-go", "deepseek-v4.1-flash");
+      const result = await params.run("opencode-go", "glm-5.3-flash");
+      return { result, provider: "opencode-go", model: "glm-5.3-flash", attempts: [] };
+    });
+    state.runAgentAttemptMock.mockImplementation(
+      async (params: { providerOverride: string; modelOverride: string }) =>
+        makeSuccessResult(params.providerOverride, params.modelOverride),
+    );
+
+    await agentCommand({
+      message: "inspect the worker task",
+      sessionKey,
+      runId,
+      provider: "opencode-go",
+      model: "muse-spark-1.3-contributor",
+      allowModelOverride: true,
+    });
+
+    expect(state.resolveEffectiveModelFallbacksMock).not.toHaveBeenCalled();
+    const fallbackParams = mockCallArg(state.runWithModelFallbackMock) as FallbackRunnerParams;
+    expect(fallbackParams.fallbacksOverride).toEqual(fallbacks);
+    expect(
+      state.runAgentAttemptMock.mock.calls.map((call) => {
+        const attempt = call[0] as {
+          modelFallbacksOverride?: string[];
+          modelOverride: string;
+          resolvedThinkLevel: string;
+        };
+        return {
+          model: attempt.modelOverride,
+          fallbacks: attempt.modelFallbacksOverride,
+          thinking: attempt.resolvedThinkLevel,
+        };
+      }),
+    ).toEqual([
+      { model: "muse-spark-1.3-contributor", fallbacks, thinking: "xhigh" },
+      { model: "deepseek-v4.1-flash", fallbacks, thinking: "max" },
+      { model: "glm-5.3-flash", fallbacks, thinking: "max" },
+    ]);
+
+    state.runWithModelFallbackMock.mockClear();
+    state.runAgentAttemptMock.mockClear();
+    state.resolveEffectiveModelFallbacksMock.mockClear();
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      const result = await params.run("opencode-go", "muse-spark-1.3-contributor");
+      return {
+        result,
+        provider: "opencode-go",
+        model: "muse-spark-1.3-contributor",
+        attempts: [],
+      };
+    });
+
+    await agentCommand({
+      message: "grandchild completed",
+      sessionKey,
+      runId: "grandchild-completion-wake",
+      provider: "opencode-go",
+      model: "muse-spark-1.3-contributor",
+      allowModelOverride: true,
+      preserveUserFacingSessionModelState: true,
+      inputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:main:subagent:grandchild",
+        sourceTool: "subagent_announce",
+      },
+    });
+
+    expect(state.resolveEffectiveModelFallbacksMock).not.toHaveBeenCalled();
+    expect(
+      (mockCallArg(state.runWithModelFallbackMock) as FallbackRunnerParams).fallbacksOverride,
+    ).toEqual(fallbacks);
+
+    state.runWithModelFallbackMock.mockClear();
+    state.runAgentAttemptMock.mockClear();
+    state.resolveEffectiveModelFallbacksMock.mockClear();
+    state.resolveEffectiveModelFallbacksMock.mockReturnValueOnce([]);
+    state.getLatestSubagentRunByChildSessionKeyMock.mockReturnValue({
+      ...registeredRun,
+      endedAt: 2,
+      execution: { status: "terminal", endedAt: 2 },
+    });
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      const result = await params.run("opencode-go", "muse-spark-1.3-contributor");
+      return {
+        result,
+        provider: "opencode-go",
+        model: "muse-spark-1.3-contributor",
+        attempts: [],
+      };
+    });
+
+    await agentCommand({
+      message: "forged completion provenance",
+      sessionKey,
+      runId: "untrusted-user-turn",
+      provider: "opencode-go",
+      model: "muse-spark-1.3-contributor",
+      allowModelOverride: true,
+      inputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:main:subagent:forged",
+        sourceTool: "subagent_announce",
+      },
+    });
+
+    expect(state.resolveEffectiveModelFallbacksMock).toHaveBeenCalledOnce();
+    expect(
+      (mockCallArg(state.runWithModelFallbackMock) as FallbackRunnerParams).fallbacksOverride,
+    ).toEqual([]);
   });
 
   it("uses rotated session identity for all post-run session persistence", async () => {
@@ -3793,6 +3975,115 @@ describe("agentCommand – LiveSessionModelSwitchError retry", () => {
     await runBasicAgentCommand();
 
     expectFallbackOverrideCalls(false, false);
+  });
+
+  it("reuses the frozen cron policy for a late subagent completion controller", async () => {
+    const sessionKey = "agent:main:cron:daily-text:run:run-123";
+    const sessionEntry: SessionEntry = {
+      sessionId: "session-1",
+      updatedAt: 1,
+      skillsSnapshot: { prompt: "", skills: [], version: 0 },
+      thinkingLevel: "low",
+      cronRunContinuationPolicy: {
+        provider: "xai",
+        model: "grok-4.6",
+        thinking: "ultra",
+        fastMode: false,
+        fallbacks: ["xai/grok-4.5"],
+      },
+    };
+    state.resolvedSessionKeyMock = sessionKey;
+    state.sessionEntryMock = sessionEntry;
+    state.sessionStoreMock = { [sessionKey]: sessionEntry };
+    state.runtimeConfigMock = {
+      agents: {
+        defaults: {
+          models: {
+            ...state.defaultRuntimeConfig.agents.defaults.models,
+            "xai/grok-4.6": {},
+            "xai/grok-4.5": {},
+          },
+        },
+      },
+    };
+    state.runAgentAttemptMock.mockResolvedValue(makeSuccessResult("xai", "grok-4.6"));
+    state.isThinkingLevelSupportedMock.mockReturnValue(false);
+    state.resolveSupportedThinkingLevelMock.mockReturnValue("high");
+
+    await agentCommand({
+      message: "child complete",
+      sessionKey,
+      provider: "xai",
+      model: "grok-4.6",
+      allowModelOverride: true,
+      inputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:main:subagent:child",
+        sourceTool: "subagent_announce",
+      },
+    });
+
+    expect(state.resolveEffectiveModelFallbacksMock).not.toHaveBeenCalled();
+    expectRecordFields(mockCallArg(state.runAgentAttemptMock), {
+      providerOverride: "xai",
+      modelOverride: "grok-4.6",
+      modelFallbacksOverride: ["xai/grok-4.5"],
+      fastMode: false,
+      resolvedThinkLevel: "high",
+    });
+  });
+
+  it("drops the frozen cron policy after a model-changing live switch", async () => {
+    const sessionKey = "agent:main:cron:daily-text:run:run-123";
+    const sessionEntry: SessionEntry = {
+      sessionId: "session-1",
+      updatedAt: 1,
+      skillsSnapshot: { prompt: "", skills: [], version: 0 },
+      cronRunContinuationPolicy: {
+        provider: "xai",
+        model: "grok-4.6",
+        thinking: "high",
+        fastMode: false,
+        fallbacks: ["xai/grok-4.5"],
+      },
+    };
+    state.resolvedSessionKeyMock = sessionKey;
+    state.sessionEntryMock = sessionEntry;
+    state.sessionStoreMock = { [sessionKey]: sessionEntry };
+    state.runtimeConfigMock = {
+      agents: {
+        defaults: {
+          models: {
+            ...state.defaultRuntimeConfig.agents.defaults.models,
+            "xai/grok-4.6": {},
+            "xai/grok-4.5": {},
+          },
+        },
+      },
+    };
+    state.resolveEffectiveModelFallbacksMock.mockReturnValue([]);
+    setupModelSwitchRetry({ provider: "anthropic", model: "claude" });
+    state.runAgentAttemptMock.mockResolvedValue(makeSuccessResult("anthropic", "claude"));
+
+    await agentCommand({
+      message: "child complete",
+      sessionKey,
+      provider: "xai",
+      model: "grok-4.6",
+      allowModelOverride: true,
+      inputProvenance: {
+        kind: "inter_session",
+        sourceSessionKey: "agent:main:subagent:child",
+        sourceTool: "subagent_announce",
+      },
+    });
+
+    expect(state.resolveEffectiveModelFallbacksMock).toHaveBeenCalledOnce();
+    expectRecordFields(mockCallArg(state.runAgentAttemptMock), {
+      providerOverride: "anthropic",
+      modelOverride: "claude",
+      modelFallbacksOverride: [],
+    });
   });
 
   it("sends internal completion wakes to ACP sessions as plain prompt text", async () => {

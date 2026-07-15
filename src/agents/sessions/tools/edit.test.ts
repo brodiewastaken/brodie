@@ -360,7 +360,7 @@ describe("edit tool", () => {
     );
   });
 
-  it("returns terminal no-op when oldText equals newText", async () => {
+  it("returns a non-terminal no-op when oldText equals newText", async () => {
     const filePath = await createTempFile("unchanged content\n");
     const tool = createEditTool(tmpDir);
 
@@ -375,8 +375,30 @@ describe("edit tool", () => {
 
     const tc0 = result.content[0];
     expect("text" in tc0 ? tc0.text : "").toContain("No changes made");
-    expect((result as any).terminate).toBe(true);
+    expect(result.terminate).toBeUndefined();
     await expect(fs.readFile(filePath, "utf-8")).resolves.toBe("unchanged content\n");
+  });
+
+  it("returns a non-terminal no-op when separate edits have no net effect", async () => {
+    const filePath = await createTempFile("ab\n");
+    const tool = createEditTool(tmpDir);
+
+    const result = await tool.execute(
+      "call-net-no-op",
+      {
+        path: filePath,
+        edits: [
+          { oldText: "a", newText: "" },
+          { oldText: "b", newText: "ab" },
+        ],
+      },
+      undefined,
+    );
+
+    const content = result.content[0];
+    expect("text" in content ? content.text : "").toContain("No changes made");
+    expect(result.terminate).toBeUndefined();
+    await expect(fs.readFile(filePath, "utf-8")).resolves.toBe("ab\n");
   });
 
   it("shows an empty preview for an all-no-op edit", async () => {
@@ -490,7 +512,7 @@ describe("edit tool", () => {
     ).rejects.toThrow("No changes made to the disk because it is full");
   });
 
-  it("does not rewrite fuzzy-matched no-op text", async () => {
+  it("returns a non-terminal no-op without rewriting fuzzy-matched text", async () => {
     const filePath = await createTempFile("foo\n");
     const tool = createEditTool(tmpDir);
 
@@ -503,7 +525,7 @@ describe("edit tool", () => {
       undefined,
     );
 
-    expect((result as any).terminate).toBe(true);
+    expect(result.terminate).toBeUndefined();
     await expect(fs.readFile(filePath, "utf-8")).resolves.toBe("foo\n");
   });
 

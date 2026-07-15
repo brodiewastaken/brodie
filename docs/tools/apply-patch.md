@@ -30,6 +30,9 @@ The tool accepts a single `input` string that wraps one or more file operations:
 
 ## Notes
 
+- The native `write`, `edit`, and `apply_patch` tools leave unchanged content
+  untouched and return control to the agent so it can finish the remaining task
+  steps. A no-change result does not end the agent run.
 - Patch paths support relative paths (from the workspace directory) and absolute paths.
 - `tools.exec.applyPatch.workspaceOnly` defaults to `true` (workspace-contained). Set it to `false` only if you intentionally want `apply_patch` to write/delete outside the workspace directory.
 - Use `*** Move to:` within an `*** Update File:` hunk to rename files.

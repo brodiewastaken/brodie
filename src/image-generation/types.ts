@@ -58,7 +58,9 @@ export type ImageGenerationSourceImage = {
 
 export type ImageGenerationProviderConfiguredContext = {
   cfg?: OpenClawConfig;
+  workspaceDir?: string;
   agentDir?: string;
+  authStore?: AuthProfileStore;
 };
 
 /** Runtime request passed to an image-generation provider implementation. */

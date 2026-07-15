@@ -54,6 +54,7 @@ import {
   repairProviderWrappedModelOverride,
 } from "../sessions/model-overrides.js";
 import { resolveSendPolicy } from "../sessions/send-policy.js";
+import { isCronRunSessionKey } from "../sessions/session-key-utils.js";
 import { beginSessionWorkAdmission } from "../sessions/session-lifecycle-admission.js";
 import { createUserTurnTranscriptRecorder } from "../sessions/user-turn-transcript.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
@@ -140,6 +141,10 @@ import {
 import { listOpenAIAuthProfileProvidersForAgentRuntime } from "./openai-routing.js";
 import { resolveProviderIdForAuth } from "./provider-auth-aliases.js";
 import {
+  isBrodieMaximumThinkingProvider,
+  resolveConfiguredFallbackThinking,
+} from "./run-policy.js";
+import {
   createAgentRunRestartAbortError,
   isAgentRunDirectAbortReason,
   isAgentRunRestartAbortReason,
@@ -148,6 +153,7 @@ import {
 } from "./run-termination.js";
 import { resolveSessionRuntimeOverrideForProvider } from "./session-runtime-compat.js";
 import { normalizeSpawnedRunMetadata } from "./spawned-context.js";
+import { getLatestSubagentRunByChildSessionKey } from "./subagent-registry.js";
 import { resolveCandidateThinkingLevel, resolveEffectiveAgentRuntime } from "./thinking-runtime.js";
 import { resolveAgentTimeoutMs } from "./timeout.js";
 import { hasNonzeroUsage } from "./usage.js";
@@ -1314,7 +1320,23 @@ async function agentCommandInternal(
         });
       }
 
-      const requestedThinkLevel = thinkOnce ?? thinkOverride ?? persistedThinking;
+      const cronRunContinuationPolicyCandidate =
+        opts.inputProvenance?.kind === "inter_session" &&
+        opts.inputProvenance.sourceTool === "subagent_announce" &&
+        isCronRunSessionKey(sessionKey)
+          ? sessionEntry?.cronRunContinuationPolicy
+          : undefined;
+      const cronRunContinuationPolicy =
+        cronRunContinuationPolicyCandidate &&
+        opts.provider === cronRunContinuationPolicyCandidate.provider &&
+        opts.model === cronRunContinuationPolicyCandidate.model
+          ? cronRunContinuationPolicyCandidate
+          : undefined;
+      const requestedThinkLevel =
+        thinkOnce ??
+        thinkOverride ??
+        normalizeThinkLevel(cronRunContinuationPolicy?.thinking) ??
+        persistedThinking;
       const resolvedVerboseLevel =
         verboseOverride ??
         persistedVerbose ??
@@ -2061,17 +2083,43 @@ async function agentCommandInternal(
       for (;;) {
         try {
           const spawnedBy = normalizedSpawned.spawnedBy ?? sessionEntry?.spawnedBy;
-          const effectiveFallbacksOverride = resolveEffectiveModelFallbacks({
-            cfg,
-            agentId: sessionAgentId,
-            sessionKey,
-            hasSessionModelOverride:
-              hasExplicitRunOverride || Boolean(storedProviderOverride || storedModelOverride),
-            modelOverrideSource: hasExplicitRunOverride ? "user" : storedModelOverrideSource,
-            hasAutoFallbackProvenance: hasExplicitRunOverride
-              ? false
-              : hasStoredAutoFallbackProvenance,
-          });
+          const activeCronRunContinuationPolicy =
+            cronRunContinuationPolicy &&
+            provider === cronRunContinuationPolicy.provider &&
+            model === cronRunContinuationPolicy.model
+              ? cronRunContinuationPolicy
+              : undefined;
+          const registeredSubagentRun =
+            sessionKey && isSubagentSessionKey(sessionKey)
+              ? getLatestSubagentRunByChildSessionKey(sessionKey)
+              : undefined;
+          const continuesRegisteredSubagentRun =
+            opts.preserveUserFacingSessionModelState === true &&
+            opts.inputProvenance?.kind === "inter_session" &&
+            opts.inputProvenance.sourceTool === "subagent_announce";
+          const activeSubagentRunPolicy =
+            registeredSubagentRun &&
+            (registeredSubagentRun.runId === runId || continuesRegisteredSubagentRun) &&
+            registeredSubagentRun.resolvedRunPolicy?.primary.provider === provider &&
+            registeredSubagentRun.resolvedRunPolicy.primary.model === model
+              ? registeredSubagentRun.resolvedRunPolicy
+              : undefined;
+          const effectiveFallbacksOverride =
+            activeSubagentRunPolicy?.fallbacks.map(
+              (fallback) => `${fallback.provider}/${fallback.model}`,
+            ) ??
+            activeCronRunContinuationPolicy?.fallbacks ??
+            resolveEffectiveModelFallbacks({
+              cfg,
+              agentId: sessionAgentId,
+              sessionKey,
+              hasSessionModelOverride:
+                hasExplicitRunOverride || Boolean(storedProviderOverride || storedModelOverride),
+              modelOverrideSource: hasExplicitRunOverride ? "user" : storedModelOverrideSource,
+              hasAutoFallbackProvenance: hasExplicitRunOverride
+                ? false
+                : hasStoredAutoFallbackProvenance,
+            });
 
           let fallbackAttemptIndex = 0;
           const fallbackRuntimeState: { originRuntime?: "cli" | "embedded" } = {};
@@ -2152,7 +2200,8 @@ async function agentCommandInternal(
                 agentId: sessionAgentId,
                 sessionEntry,
               });
-              const fastMode = opts.fastMode ?? fastModeState.mode;
+              const fastMode =
+                opts.fastMode ?? activeCronRunContinuationPolicy?.fastMode ?? fastModeState.mode;
               const agentHarnessRuntimeOverride = resolveSessionRuntimeOverrideForProvider({
                 provider: providerOverride,
                 entry: attemptSessionEntry,
@@ -2167,6 +2216,12 @@ async function agentCommandInternal(
                 sessionEntry: attemptSessionEntry,
               });
               const candidateRequestedThinkLevel =
+                (providerOverride !== provider || modelOverride !== model
+                  ? resolveConfiguredFallbackThinking(cfg, providerOverride, modelOverride)
+                  : undefined) ??
+                (activeSubagentRunPolicy && !isBrodieMaximumThinkingProvider(providerOverride)
+                  ? activeSubagentRunPolicy.fallbackReasoning
+                  : undefined) ??
                 immutableThinkLevel ??
                 resolveThinkingDefault({
                   cfg,

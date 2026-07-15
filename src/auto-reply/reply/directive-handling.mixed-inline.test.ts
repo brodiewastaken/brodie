@@ -198,9 +198,18 @@ describe("mixed inline directives", () => {
     expect(sessionEntry.reasoningLevel).toBe("off");
   });
 
-  it("retargets queued thinking after a mixed-content model switch", async () => {
+  it("retires cron continuation policy and retargets queued thinking after a mixed model switch", async () => {
     const directives = parseInlineDirectives("please reply /model openai/gpt-5.6-luna");
-    const sessionEntry = createSessionEntry({ thinkingLevel: "ultra" });
+    const sessionEntry = createSessionEntry({
+      thinkingLevel: "ultra",
+      cronRunContinuationPolicy: {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        thinking: "high",
+        fastMode: false,
+        fallbacks: [],
+      },
+    });
     const sessionKey = "agent:main:dm:1";
     const cfg = {
       commands: { text: true },
@@ -236,6 +245,8 @@ describe("mixed inline directives", () => {
     });
 
     expect(sessionEntry.thinkingLevel).toBe("max");
+    expect(sessionEntry.cronRunContinuationPolicy).toBeUndefined();
+    expect(sessionEntry.liveModelSwitchPending).toBeUndefined();
     expect(refreshQueuedFollowupSession).toHaveBeenCalledWith(
       expect.objectContaining({
         key: sessionKey,

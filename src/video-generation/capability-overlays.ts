@@ -6,6 +6,7 @@ import type {
   VideoGenerationModeCapabilities,
   VideoGenerationProvider,
   VideoGenerationProviderCapabilities,
+  VideoGenerationSourceAsset,
   VideoGenerationTransformCapabilities,
 } from "./types.js";
 
@@ -144,6 +145,7 @@ export async function resolveProviderWithModelCapabilities(params: {
   cfg: OpenClawConfig;
   agentDir?: string;
   authStore?: GenerateVideoParams["authStore"];
+  inputImageRoles?: readonly VideoGenerationSourceAsset["role"][];
   timeoutMs?: number;
   log: Pick<Console, "debug">;
 }): Promise<VideoGenerationProvider> {
@@ -157,6 +159,7 @@ export async function resolveProviderWithModelCapabilities(params: {
       cfg: params.cfg,
       agentDir: params.agentDir,
       authStore: params.authStore,
+      inputImageRoles: params.inputImageRoles,
       ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
     });
     if (!modelCapabilities) {

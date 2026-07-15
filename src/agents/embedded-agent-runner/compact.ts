@@ -1191,6 +1191,7 @@ async function compactEmbeddedAgentSessionDirectOnce(
         reasoningLevel: params.reasoningLevel ?? "off",
         extraSystemPrompt: params.extraSystemPrompt,
         ownerNumbers: params.ownerNumbers,
+        senderIsOwner: params.senderIsOwner,
         reasoningTagHint,
         heartbeatPrompt: resolveHeartbeatPromptForSystemPrompt({
           config: params.config,

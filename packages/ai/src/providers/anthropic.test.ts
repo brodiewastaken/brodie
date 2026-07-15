@@ -225,12 +225,7 @@ describe("Anthropic provider", () => {
     expect((capturedPayload as { system?: unknown }).system).toEqual([
       {
         type: "text",
-        text: "x-anthropic-billing-header: cc_version=2.1.75; cc_entrypoint=sdk-cli;",
-      },
-      {
-        type: "text",
-        text: "You are Claude Code, Anthropic's official CLI for Claude.",
-        cache_control: { type: "ephemeral" },
+        text: "x-anthropic-billing-header: cc_version=2.1.258; cc_entrypoint=sdk-cli;",
       },
     ]);
   });

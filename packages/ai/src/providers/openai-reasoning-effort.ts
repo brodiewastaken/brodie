@@ -100,7 +100,8 @@ export function resolveOpenAISupportedReasoningEfforts(
   }
 
   const id = normalizeModelId(typeof model.id === "string" ? model.id : undefined);
-  if (/^gpt-5\.6(?:-|$)/u.test(id)) {
+  // GPT-6 Codex models (gpt-6-astra) advertise the same effort range as GPT-5.6.
+  if (/^gpt-6(?:[.-]|$)/u.test(id) || /^gpt-5\.6(?:-|$)/u.test(id)) {
     return GPT_56_REASONING_EFFORTS;
   }
   if (id === "gpt-5.1-codex-mini") {

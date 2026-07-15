@@ -196,4 +196,67 @@ describe("resolveEffectiveAgentRuntime", () => {
       }),
     ).toBe("ultra");
   });
+
+  it("forces each OpenCode Go candidate to its own highest advertised level", () => {
+    const catalog = [
+      {
+        provider: "opencode-go",
+        id: "muse-spark-1.3-contributor",
+        name: "Muse Spark 1.3 Contributor",
+        reasoning: true,
+        compat: {
+          supportedReasoningEfforts: ["minimal", "low", "medium", "high", "xhigh"],
+        },
+      },
+      {
+        provider: "opencode-go",
+        id: "deepseek-v4.1-flash",
+        name: "DeepSeek V4.1 Flash",
+        reasoning: true,
+        compat: { supportedReasoningEfforts: ["low", "high", "max"] },
+      },
+      {
+        provider: "opencode-go",
+        id: "glm-5.3-flash",
+        name: "GLM 5.3 Flash",
+        reasoning: true,
+        compat: { supportedReasoningEfforts: ["low", "high", "max"] },
+      },
+    ];
+
+    expect(
+      resolveCandidateThinkingLevel({
+        cfg: {},
+        provider: "opencode-go",
+        modelId: "muse-spark-1.3-contributor",
+        level: "off",
+        catalog,
+      }),
+    ).toBe("xhigh");
+    expect(
+      resolveCandidateThinkingLevel({
+        cfg: {},
+        provider: "opencode-go",
+        modelId: "deepseek-v4.1-flash",
+        level: "low",
+        catalog,
+      }),
+    ).toBe("max");
+    expect(
+      resolveCandidateThinkingLevel({
+        cfg: {},
+        provider: "opencode-go",
+        modelId: "glm-5.3-flash",
+        catalog,
+      }),
+    ).toBe("max");
+    expect(
+      resolveCandidateThinkingLevel({
+        cfg: {},
+        provider: "demo",
+        modelId: "demo-model",
+        level: "off",
+      }),
+    ).toBe("off");
+  });
 });

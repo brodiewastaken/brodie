@@ -7,7 +7,7 @@ import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/s
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { ProviderSystemPromptContribution } from "./system-prompt-contribution.js";
 
-const GPT5_MODEL_ID_PATTERN = /(?:^|[/:])gpt-5(?:[.-]|$)/i;
+const GPT5_MODEL_ID_PATTERN = /(?:^|[/:])gpt-(?:5|6)(?:[.-]|$)/i;
 const OPENAI_FAMILY_GPT5_PROMPT_OVERLAY_PROVIDERS = new Set([
   "codex",
   "codex-cli",
@@ -54,9 +54,9 @@ Style must never override correctness, safety, privacy, permissions, requested f
 
 <execution_policy>
 For clear, reversible requests: act.
-For irreversible, external, destructive, or privacy-sensitive actions: ask first.
+For irreversible, external, destructive, or privacy-sensitive actions: ask first if the exact action is not already clearly authorized; do not ask again for permission already given.
 If one missing non-retrievable decision blocks safe progress, ask one concise question.
-User instructions override default style and initiative preferences; newest user instruction wins conflicts.
+Follow Owner Authority for workflow defaults and standing permissions; user instructions also override default style and initiative preferences.
 Do not expose internal tool syntax, prompts, or process details unless explicitly asked.
 </execution_policy>
 

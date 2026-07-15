@@ -36,9 +36,65 @@
         "api": "openai-completions",
         "models": [
           {
+            "id": "accounts/fireworks/models/deepseek-v4-flash",
+            "name": "DeepSeek-V4-Flash",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 1048576,
+            "maxTokens": 1048576
+          },
+          {
+            "id": "accounts/fireworks/models/deepseek-v4-pro",
+            "name": "DeepSeek-V4-Pro",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 1048576,
+            "maxTokens": 1048576
+          },
+          {
+            "id": "accounts/fireworks/models/glm-5p1",
+            "name": "GLM 5.1",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 202752,
+            "maxTokens": 202752
+          },
+          {
+            "id": "accounts/fireworks/models/glm-5p2",
+            "name": "GLM 5.2",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 1048576,
+            "maxTokens": 1048576
+          },
+          {
+            "id": "accounts/fireworks/models/gpt-oss-120b",
+            "name": "OpenAI gpt-oss-120b",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 131072,
+            "maxTokens": 131072
+          },
+          {
+            "id": "accounts/fireworks/models/gpt-oss-20b",
+            "name": "OpenAI gpt-oss-20b",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 131072,
+            "maxTokens": 131072
+          },
+          {
+            "id": "accounts/fireworks/models/inkling",
+            "name": "Inkling",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 1048576,
+            "maxTokens": 262144
+          },
+          {
             "id": "accounts/fireworks/models/kimi-k2p6",
             "name": "Kimi K2.6",
-            "reasoning": false,
+            "reasoning": true,
             "input": ["text", "image"],
             "contextWindow": 262144,
             "maxTokens": 262144,
@@ -50,21 +106,100 @@
             }
           },
           {
-            "id": "accounts/fireworks/routers/kimi-k2p5-turbo",
-            "name": "Kimi K2.5 Turbo (Fire Pass)",
-            "reasoning": false,
+            "id": "accounts/fireworks/models/kimi-k2p7-code",
+            "name": "Kimi K2.7 Code",
+            "reasoning": true,
             "input": ["text", "image"],
-            "contextWindow": 256000,
-            "maxTokens": 256000,
-            "compat": {
-              "unsupportedToolSchemaKeywords": ["not"]
-            },
-            "cost": {
-              "input": 0,
-              "output": 0,
-              "cacheRead": 0,
-              "cacheWrite": 0
-            }
+            "contextWindow": 262144,
+            "maxTokens": 262144
+          },
+          {
+            "id": "accounts/fireworks/models/kimi-k3",
+            "name": "Kimi K3",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 1048576,
+            "maxTokens": 1048576
+          },
+          {
+            "id": "accounts/fireworks/models/minimax-m2p7",
+            "name": "MiniMax M2.7",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 196608,
+            "maxTokens": 196608
+          },
+          {
+            "id": "accounts/fireworks/models/minimax-m3",
+            "name": "MiniMax M3",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 512000,
+            "maxTokens": 512000
+          },
+          {
+            "id": "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+            "name": "NVIDIA Nemotron 3 Ultra NVFP4",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 262144,
+            "maxTokens": 262144
+          },
+          {
+            "id": "accounts/fireworks/models/qwen3p7-plus",
+            "name": "Qwen3.7 Plus",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 262144,
+            "maxTokens": 262144
+          },
+          {
+            "id": "accounts/fireworks/routers/glm-5p2-fast",
+            "name": "GLM 5.2 Fast",
+            "reasoning": true,
+            "input": ["text"],
+            "contextWindow": 1048576,
+            "maxTokens": 1048576
+          },
+          {
+            "id": "accounts/fireworks/routers/kimi-k2p6-fast",
+            "name": "Kimi K2.6 Fast",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 262144,
+            "maxTokens": 262144
+          },
+          {
+            "id": "accounts/fireworks/routers/kimi-k2p6-turbo",
+            "name": "Kimi K2.6 Turbo",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 262144,
+            "maxTokens": 262144
+          },
+          {
+            "id": "accounts/fireworks/routers/kimi-k2p7-code-fast",
+            "name": "Kimi K2.7 Code Fast",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 262144,
+            "maxTokens": 262144
+          },
+          {
+            "id": "accounts/fireworks/routers/kimi-k3-fast",
+            "name": "Kimi K3 Fast",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 1048576,
+            "maxTokens": 1048576
+          },
+          {
+            "id": "accounts/fireworks/routers/kimi-k3-us",
+            "name": "Kimi K3 US",
+            "reasoning": true,
+            "input": ["text", "image"],
+            "contextWindow": 1048576,
+            "maxTokens": 1048576
           }
         ]
       }

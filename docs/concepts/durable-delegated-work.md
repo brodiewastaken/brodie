@@ -18,6 +18,8 @@ Each child reports to exactly one immediate controller. A nested child returns i
 
 Controllers do not poll and there is no `sessions_yield` tool. A controller with live descendants may end its turn naturally. When a child reaches a terminal state, OpenClaw creates one stable completion event and durably admits it to the controller's scheduler lane before waking the controller. Duplicate hooks reuse the same scheduler receipt.
 
+An isolated cron controller retains its execution policy when a child finishes after the initial turn. The exact cron run stores its provider, model, requested reasoning, explicit Fast override, and effective fallback chain before inference. Its late internal completion turn uses that policy instead of the gateway defaults. An explicit empty fallback chain remains empty; configured fallbacks remain available. Implicit Fast defaults remain model-owned. A deliberate live model switch still takes precedence.
+
 Delivery remains pending until the controller handoff records transcript evidence. Cleanup starts only after that evidence and terminal hooks settle, so managed attachments cannot disappear before the controller consumes the result.
 
 ## Restart recovery

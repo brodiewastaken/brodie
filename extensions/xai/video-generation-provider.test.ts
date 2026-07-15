@@ -161,6 +161,158 @@ describe("xai video generation provider", () => {
     expectExplicitVideoGenerationCapabilities(buildXaiVideoGenerationProvider());
   });
 
+  it("advertises current and classic models with model-specific 1080p support", () => {
+    const provider = buildXaiVideoGenerationProvider();
+
+    expect(provider.models).toEqual(["grok-imagine-video-1.5", "grok-imagine-video"]);
+    expect(provider.capabilities.generate?.resolutions).toContain("1080P");
+    expect(
+      provider.resolveModelCapabilities?.({
+        provider: "xai",
+        model: "grok-imagine-video",
+        cfg: {},
+      }),
+    ).toMatchObject({
+      generate: { resolutions: ["480P", "720P"] },
+    });
+    expect(
+      provider.resolveModelCapabilities?.({
+        provider: "xai",
+        model: "grok-imagine-video-1.5",
+        cfg: {},
+        inputImageRoles: ["reference_image"],
+      }),
+    ).toMatchObject({
+      imageToVideo: { resolutions: ["480P", "720P"] },
+    });
+    expect(
+      provider.resolveModelCapabilities?.({
+        provider: "xai",
+        model: "grok-imagine-video-1.5",
+        cfg: {},
+        inputImageRoles: ["first_frame"],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("reports OAuth readiness from the supplied request auth store", () => {
+    const provider = buildXaiVideoGenerationProvider();
+    const authStore = {
+      version: 1 as const,
+      profiles: {
+        "xai:default": {
+          type: "oauth" as const,
+          provider: "xai",
+          access: "oauth-access",
+          refresh: "oauth-refresh",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+
+    expect(provider.isConfigured?.({ cfg: {}, authStore })).toBe(true);
+  });
+
+  it("reports not configured from an empty request auth store", () => {
+    vi.stubEnv("XAI_API_KEY", "");
+    try {
+      const provider = buildXaiVideoGenerationProvider();
+      expect(provider.isConfigured?.({ cfg: {}, authStore: { version: 1, profiles: {} } })).toBe(
+        false,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("applies xAI-owned video defaults to 1.5 generation", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: { json: async () => ({ request_id: "req_defaults" }) },
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_defaults",
+          status: "done",
+          video: { url: "https://cdn.x.ai/defaults.mp4" },
+        }),
+      })
+      .mockResolvedValueOnce({
+        headers: new Headers({ "content-type": "video/mp4" }),
+        arrayBuffer: async () => Buffer.from("video"),
+      });
+
+    const provider = buildXaiVideoGenerationProvider();
+    await provider.generateVideo({
+      provider: "xai",
+      model: "grok-imagine-video-1.5",
+      prompt: "cinematic test",
+      cfg: {
+        plugins: {
+          entries: {
+            xai: {
+              config: {
+                videoGeneration: {
+                  aspectRatio: "16:9",
+                  resolution: "1080P",
+                  durationSeconds: 15,
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(requirePostJsonCall().body).toMatchObject({
+      model: "grok-imagine-video-1.5",
+      aspect_ratio: "16:9",
+      resolution: "1080p",
+      duration: 15,
+    });
+  });
+
+  it("caps configured 1080p to 720p for reference-to-video", async () => {
+    postJsonRequestMock.mockResolvedValue({
+      response: { json: async () => ({ request_id: "req_reference_defaults" }) },
+      release: vi.fn(async () => {}),
+    });
+    fetchWithTimeoutMock
+      .mockResolvedValueOnce({
+        json: async () => ({
+          request_id: "req_reference_defaults",
+          status: "done",
+          video: { url: "https://cdn.x.ai/reference-defaults.mp4" },
+        }),
+      })
+      .mockResolvedValueOnce({
+        headers: new Headers({ "content-type": "video/mp4" }),
+        arrayBuffer: async () => Buffer.from("video"),
+      });
+
+    const provider = buildXaiVideoGenerationProvider();
+    await provider.generateVideo({
+      provider: "xai",
+      model: "grok-imagine-video-1.5",
+      prompt: "reference test",
+      cfg: {
+        plugins: {
+          entries: {
+            xai: {
+              config: {
+                videoGeneration: { resolution: "1080P", durationSeconds: 15 },
+              },
+            },
+          },
+        },
+      },
+      inputImages: [{ url: "https://example.com/reference.png", role: "reference_image" }],
+    });
+
+    expect(requirePostJsonCall().body).toMatchObject({ resolution: "720p", duration: 15 });
+  });
+
   it("creates, polls, and downloads a generated video", async () => {
     postJsonRequestMock.mockResolvedValue({
       response: {

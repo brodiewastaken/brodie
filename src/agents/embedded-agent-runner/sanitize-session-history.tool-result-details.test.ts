@@ -6,6 +6,7 @@ import type { ToolResultMessage, UserMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it, vi } from "vitest";
 import { makeAgentAssistantMessage } from "../test-helpers/agent-message-fixtures.js";
 import { sanitizeSessionHistory } from "./replay-history.js";
+import { mergeHistoricalReplayToolNames } from "./run/attempt.tool-search-run-plan.js";
 
 vi.mock("../../plugins/provider-runtime.js", () => ({
   // Provider plugins are not part of this boundary test; the local sanitizer
@@ -67,6 +68,49 @@ describe("sanitizeSessionHistory toolResult details stripping", () => {
 
     const serialized = JSON.stringify(sanitized);
     expect(serialized).not.toContain("Ignore previous instructions");
+  });
+
+  it("keeps completed write history for a message-only finalizer", async () => {
+    const sm = SessionManager.inMemory();
+    const liveAllowedToolNames = new Set(["message"]);
+    const replayAllowedToolNames = mergeHistoricalReplayToolNames(liveAllowedToolNames, ["write"]);
+    const messages: AgentMessage[] = [
+      makeAgentAssistantMessage({
+        content: [{ type: "toolCall", id: "call_write", name: "write", arguments: {} }],
+        model: "gpt-5.4",
+        stopReason: "toolUse",
+        timestamp: 1,
+      }),
+      {
+        role: "toolResult",
+        toolCallId: "call_write",
+        toolName: "write",
+        isError: false,
+        content: [{ type: "text", text: "saved" }],
+        timestamp: 2,
+      } satisfies ToolResultMessage,
+      {
+        role: "user",
+        content: "original request",
+        timestamp: 3,
+      } satisfies UserMessage,
+    ];
+
+    const sanitized = await sanitizeSessionHistory({
+      messages,
+      modelApi: "anthropic-messages",
+      provider: "anthropic",
+      modelId: "claude-opus-4-6",
+      sessionManager: sm,
+      sessionId: "test",
+      allowedToolNames: replayAllowedToolNames,
+    });
+
+    expect([...liveAllowedToolNames]).toEqual(["message"]);
+    expect(sanitized).toHaveLength(3);
+    expect(sanitized[0]).toMatchObject({ role: "assistant" });
+    expect(sanitized[1]).toMatchObject({ role: "toolResult", toolName: "write" });
+    expect(sanitized.filter((message) => message.role === "user")).toHaveLength(1);
   });
 
   it("normalizes malformed assistant string content before replay sanitization", async () => {

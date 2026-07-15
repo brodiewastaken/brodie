@@ -357,6 +357,7 @@ export interface CronJobs {
   payload_allow_unsafe_external_content: number | null;
   payload_external_content_source_json: string | null;
   payload_fallbacks_json: string | null;
+  payload_fast_mode: string | null;
   payload_kind: string;
   payload_light_context: number | null;
   payload_message: string | null;

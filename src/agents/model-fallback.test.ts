@@ -839,6 +839,36 @@ describe("runWithModelFallback", () => {
     expect(result.attempts[0].reason).toBe("overloaded");
   });
 
+  it("falls back on the OpenAI server_is_overloaded response from a running turn", async () => {
+    const cfg = makeCfg();
+    const overloaded = new Error(
+      JSON.stringify({
+        type: "error",
+        error: {
+          type: "service_unavailable_error",
+          code: "server_is_overloaded",
+          message: "The server is overloaded",
+        },
+      }),
+    );
+    const run = vi.fn().mockRejectedValueOnce(overloaded).mockResolvedValueOnce("ok");
+
+    const result = await runWithModelFallback({
+      cfg,
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      run,
+    });
+
+    expect(result.result).toBe("ok");
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(result.attempts[0]).toMatchObject({
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      reason: "overloaded",
+    });
+  });
+
   it("does not prepare agent harness plugins for forced OpenClaw candidates", async () => {
     const cfg = makeCfg({
       models: {

@@ -289,6 +289,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
       sessionKey: "agent:main:subagent:worker",
       sessionFile: "/tmp/session.jsonl",
       workspaceDir: "/tmp/workspace",
+      senderIsOwner: true,
     });
 
     expect(listRegisteredPluginAgentPromptGuidanceMock).toHaveBeenCalledWith({
@@ -297,6 +298,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
     expect(buildEmbeddedSystemPromptMock).toHaveBeenCalledWith(
       expect.objectContaining({
         promptMode: "minimal",
+        senderIsOwner: true,
         promptSurface: "subagent",
         nativeCommandGuidanceLines: ["Subagent compact command guidance."],
       }),

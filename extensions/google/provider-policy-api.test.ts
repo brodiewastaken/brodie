@@ -190,6 +190,19 @@ describe("google provider policy public artifact", () => {
     });
   });
 
+  it("omits unsupported minimal thinking from Gemini 3.8 Flash profiles", () => {
+    expect(
+      resolveThinkingProfile({
+        provider: "google",
+        modelId: "gemini-3.8-flash",
+        reasoning: true,
+      }),
+    ).toEqual({
+      levels: [{ id: "off" }, { id: "low" }, { id: "medium" }, { id: "adaptive" }, { id: "high" }],
+      preserveWhenCatalogReasoningFalse: true,
+    });
+  });
+
   it("honors catalog reasoning=false for non-Gemini 3 Google models", () => {
     expect(
       resolveThinkingProfile({

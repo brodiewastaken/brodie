@@ -3,6 +3,7 @@ import {
   normalizeOptionalString as trimString,
   uniqueStrings,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
+import type { XaiToolReasoningEffort } from "./tool-config-shared.js";
 import type { XaiWebSearchResponse } from "./web-search-response.types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -35,12 +36,14 @@ export function buildXaiResponsesToolBody(params: {
   inputText: string;
   tools: Array<Record<string, unknown>>;
   maxTurns?: number;
+  reasoningEffort?: XaiToolReasoningEffort;
 }): Record<string, unknown> {
   return {
     model: params.model,
     input: [{ role: "user", content: params.inputText }],
     tools: params.tools,
     ...(params.maxTurns ? { max_turns: params.maxTurns } : {}),
+    ...(params.reasoningEffort ? { reasoning: { effort: params.reasoningEffort } } : {}),
   };
 }
 

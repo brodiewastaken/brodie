@@ -15,6 +15,7 @@ describe("buildCliAgentSystemPrompt", () => {
   it("uses config-backed sub-agent delegation mode", () => {
     const prompt = buildCliAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
+      senderIsOwner: true,
       config: {
         agents: {
           defaults: {
@@ -29,6 +30,7 @@ describe("buildCliAgentSystemPrompt", () => {
       modelDisplay: "test/model",
     });
 
+    expect(prompt).toContain("The runtime verified the current sender as the authenticated owner.");
     expect(prompt).toContain("## Sub-Agent Delegation");
     expect(prompt).toContain("Mode: prefer");
     expect(prompt).not.toContain("For long waits, avoid rapid poll loops");
@@ -175,7 +177,7 @@ describe("buildCliAgentSystemPrompt", () => {
     expect(prompt).not.toContain("### message tool");
   });
 
-  it("requires an explicit message target when the CLI turn policy requires one", () => {
+  it("keeps replies on the source route and requires explicit targets for other routes", () => {
     const prompt = buildCliAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
       tools: [{ name: "message" } as never],
@@ -184,7 +186,10 @@ describe("buildCliAgentSystemPrompt", () => {
       requireExplicitMessageTarget: true,
     });
 
-    expect(prompt).toContain("include `target` and `message`; `target` is required for this turn");
+    expect(prompt).toContain("message(action=reply)");
+    expect(prompt).toContain(
+      "Use `action=send` with explicit `channel` and `target` only for a deliberate different route.",
+    );
     expect(prompt).not.toContain("The target defaults to the current source channel");
   });
 });

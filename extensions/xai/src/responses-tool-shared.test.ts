@@ -10,12 +10,14 @@ describe("xai responses tool helpers", () => {
         inputText: "search for openclaw",
         tools: [{ type: "x_search" }],
         maxTurns: 2,
+        reasoningEffort: "low",
       }),
     ).toEqual({
       model: "grok-4-1-fast",
       input: [{ role: "user", content: "search for openclaw" }],
       tools: [{ type: "x_search" }],
       max_turns: 2,
+      reasoning: { effort: "low" },
     });
   });
 

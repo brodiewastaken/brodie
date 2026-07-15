@@ -30,6 +30,7 @@ export function applyModelOverrideToSessionEntry(params: {
   profileOverrideSource?: "auto" | "user";
   preserveAuthProfileOverride?: boolean;
   selectionSource?: "auto" | "user";
+  explicitSelectionIntent?: boolean;
   markLiveSwitchPending?: boolean;
 }): { updated: boolean } {
   const { entry, selection, profileOverride } = params;
@@ -38,6 +39,18 @@ export function applyModelOverrideToSessionEntry(params: {
   let updated = false;
   let selectionUpdated = false;
   let profileUpdated = false;
+
+  const cronRunContinuationPolicy = entry.cronRunContinuationPolicy;
+  if (
+    selectionSource === "user" &&
+    (params.markLiveSwitchPending === true || params.explicitSelectionIntent === true) &&
+    cronRunContinuationPolicy &&
+    (selection.provider !== cronRunContinuationPolicy.provider ||
+      selection.model !== cronRunContinuationPolicy.model)
+  ) {
+    delete entry.cronRunContinuationPolicy;
+    updated = true;
+  }
 
   if (selection.isDefault) {
     if (entry.providerOverride) {

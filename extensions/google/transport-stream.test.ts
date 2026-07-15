@@ -885,6 +885,31 @@ describe("google transport stream", () => {
     });
   });
 
+  it("retries Gemini 3.8 Flash at low thinking", () => {
+    const retryPayload = buildGoogleGemini3FirstResponseRetryParams({
+      model: buildGeminiModel({ id: "gemini-3.8-flash" }),
+      request: {
+        contents: [{ role: "user", parts: [{ text: "hello" }] }],
+        generationConfig: {
+          temperature: 0.2,
+          topP: 0.9,
+          topK: 40,
+          candidateCount: 2,
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: "HIGH",
+          },
+        },
+      },
+    });
+
+    expect(retryPayload?.generationConfig).toEqual({
+      thinkingConfig: {
+        thinkingLevel: "LOW",
+      },
+    });
+  });
+
   it("rejects non-integer Gemini 3 first-response retry env values", () => {
     const envName = "OPENCLAW_GOOGLE_GEMINI_FIRST_RESPONSE_RETRY_MS";
 
@@ -2020,6 +2045,31 @@ describe("google transport stream", () => {
           },
         ],
       });
+    },
+  );
+
+  it.each([
+    ["default", { temperature: 0.2 }, { thinkingLevel: "LOW" }],
+    ["off", { reasoning: "off", temperature: 0.2 }, { thinkingLevel: "LOW" }],
+    [
+      "minimal",
+      { thinking: { enabled: true, level: "MINIMAL" }, temperature: 0.2 },
+      { includeThoughts: true, thinkingLevel: "LOW" },
+    ],
+  ] as const)(
+    "uses low thinking without sampling parameters for Gemini 3.8 Flash %s",
+    (_name, options, expectedThinkingConfig) => {
+      const params = buildGoogleGenerativeAiParams(
+        buildGeminiModel({ id: "gemini-3.8-flash" }),
+        {
+          messages: [{ role: "user", content: "hello", timestamp: 0 }],
+        } as never,
+        options as never,
+      );
+
+      const generationConfig = requireGenerationConfig(params);
+      expect(requireThinkingConfig(generationConfig)).toEqual(expectedThinkingConfig);
+      expect(generationConfig).not.toHaveProperty("temperature");
     },
   );
 

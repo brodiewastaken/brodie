@@ -6,6 +6,7 @@ import * as mediaStore from "../../media/store.js";
 import * as webMedia from "../../media/web-media.js";
 import * as musicGenerationRuntime from "../../music-generation/runtime.js";
 import * as fetchTimeout from "../../utils/fetch-timeout.js";
+import type { AuthProfileStore } from "../auth-profiles/types.js";
 import { resetRecentMediaGenerationDuplicateGuardsForTests } from "../media-generation-task-status-shared.js";
 import * as musicGenerateBackground from "./music-generate-background.js";
 import { createMusicGenerateTool } from "./music-generate-tool.js";
@@ -350,6 +351,10 @@ describe("createMusicGenerateTool", () => {
   });
 
   it("generates tracks, saves them, and emits MEDIA paths without a session-backed detach", async () => {
+    const authProfileStore: AuthProfileStore = {
+      version: 1,
+      profiles: { request: { type: "api_key", provider: "google", key: "test-request-key" } },
+    };
     taskExecutorMocks.createRunningTaskRun.mockReturnValue({
       taskId: "task-123",
       runtime: "cli",
@@ -385,6 +390,7 @@ describe("createMusicGenerateTool", () => {
     });
 
     const tool = createMusicGenerateTool({
+      authProfileStore,
       config: asConfig({
         agents: {
           defaults: {
@@ -439,6 +445,9 @@ describe("createMusicGenerateTool", () => {
     expect(details.metadata).toEqual({ taskId: "music-task-1" });
     expect(taskExecutorMocks.createRunningTaskRun).not.toHaveBeenCalled();
     expect(taskExecutorMocks.completeTaskRunByRunId).not.toHaveBeenCalled();
+    expect(vi.mocked(musicGenerationRuntime.generateMusic).mock.calls.at(-1)?.[0]?.authStore).toBe(
+      authProfileStore,
+    );
   });
 
   it("raises too-small music timeouts to the provider-safe minimum", async () => {
@@ -549,6 +558,10 @@ describe("createMusicGenerateTool", () => {
   });
 
   it("starts background generation and wakes the session with MEDIA lines", async () => {
+    const authProfileStore: AuthProfileStore = {
+      version: 1,
+      profiles: { request: { type: "api_key", provider: "google", key: "test-request-key" } },
+    };
     taskExecutorMocks.createRunningTaskRun.mockReturnValue({
       taskId: "task-123",
       runtime: "cli",
@@ -588,6 +601,7 @@ describe("createMusicGenerateTool", () => {
     let scheduledWork: (() => Promise<void>) | undefined;
     const onAsyncTaskStarted = vi.fn();
     const tool = createMusicGenerateTool({
+      authProfileStore,
       config: asConfig({
         agents: {
           defaults: {
@@ -662,6 +676,9 @@ describe("createMusicGenerateTool", () => {
         name: "night-drive.mp3",
       },
     ]);
+    expect(vi.mocked(musicGenerationRuntime.generateMusic).mock.calls.at(-1)?.[0]?.authStore).toBe(
+      authProfileStore,
+    );
   });
 
   it("dedupes a recent default-model music request repeated with explicit or model-only override", async () => {

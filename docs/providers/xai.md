@@ -112,11 +112,14 @@ see [legacy compatibility aliases](#legacy-compatibility-aliases).
 | -------------- | ------------------------------------------------------------------------ |
 | Grok Build 0.1 | `grok-build-0.1`                                                         |
 | Grok 4.3       | `grok-4.3`                                                               |
+| Grok 4.5       | `grok-4.5`                                                               |
+| Grok 4.6       | `grok-4.6`                                                               |
 | Grok 4.20 Beta | `grok-4.20-beta-latest-reasoning`, `grok-4.20-beta-latest-non-reasoning` |
 
 <Tip>
-Use `grok-4.3` for general chat and `grok-build-0.1` for build/coding-focused
-workloads unless you need a Grok 4.20 beta alias.
+Use `grok-4.6` for the current general chat route and `grok-build-0.1` for
+build/coding-focused workloads unless you need a pinned family or Grok 4.20
+reasoning mode.
 </Tip>
 
 ## Feature coverage
@@ -190,12 +193,16 @@ Legacy aliases normalize to the canonical bundled ids:
     `video_generate` tool.
 
     - Default video model: `xai/grok-imagine-video`
+    - Additional model: `xai/grok-imagine-video-1.5`
     - Modes: text-to-video, image-to-video, reference-image generation, remote
       video edit, and remote video extension
     - Aspect ratios: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`
-    - Resolutions: `480P`, `720P`
-    - Duration: 1-15 seconds for generation/image-to-video, 1-10 seconds when
-      using `reference_image` roles, 2-10 seconds for extension
+    - Resolutions: `480P`, `720P`; Video 1.5 also supports `1080P` for
+      text-to-video and single-image-to-video
+    - Duration: 1-15 seconds for generation/image-to-video; reference-image
+      generation supports 1-15 seconds on Video 1.5 and 1-10 seconds on the
+      original model; extension supports 2-10 seconds
+    - Reference-image generation, editing, and extension remain capped at `720P`
     - Reference-image generation: set `imageRoles` to `reference_image` for
       every supplied image; xAI accepts up to 7 such images
     - Default operation timeout: 600 seconds unless `video_generate.timeoutMs`
@@ -207,14 +214,27 @@ Legacy aliases normalize to the canonical bundled ids:
     OpenClaw encodes those as data URLs for xAI.
     </Warning>
 
-    To use xAI as the default video provider:
+    To default to Video 1.5 with 15-second, 16:9, 1080p clips:
 
     ```json5
     {
       agents: {
         defaults: {
           videoGenerationModel: {
-            primary: "xai/grok-imagine-video",
+            primary: "xai/grok-imagine-video-1.5",
+          },
+        },
+      },
+      plugins: {
+        entries: {
+          xai: {
+            config: {
+              videoGeneration: {
+                aspectRatio: "16:9",
+                resolution: "1080P",
+                durationSeconds: 15,
+              },
+            },
           },
         },
       },
@@ -222,6 +242,10 @@ Legacy aliases normalize to the canonical bundled ids:
     ```
 
     <Note>
+    Explicit tool arguments override `videoGeneration` defaults. Without
+    configured defaults, generation uses 8 seconds, 16:9, and 720p. Editing
+    and extension retain their input-specific geometry rules.
+
     See [Video Generation](/tools/video-generation) for shared tool
     parameters, provider selection, and failover behavior.
     </Note>
@@ -233,7 +257,7 @@ Legacy aliases normalize to the canonical bundled ids:
     `image_generate` tool.
 
     - Default image model: `xai/grok-imagine-image`
-    - Additional model: `xai/grok-imagine-image-quality`
+    - Additional models: `xai/grok-imagine-image-2.0`, `xai/grok-imagine-image-quality`
     - Modes: text-to-image and reference-image edit
     - Reference inputs: one `image` or up to five `images`
     - Aspect ratios: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `2:3`, `3:2`
@@ -262,10 +286,9 @@ Legacy aliases normalize to the canonical bundled ids:
     ```
 
     <Note>
-    xAI also documents `quality`, `mask`, `user`, and additional native ratios
-    such as `1:2`, `2:1`, `9:20`, and `20:9`. OpenClaw forwards only the shared
-    cross-provider image controls today; these native-only knobs are not
-    exposed through `image_generate`.
+    Run `image_generate action=list` for the complete aspect-ratio catalog,
+    including `1:2`, `2:1`, `9:20`, and `20:9`. Native-only `quality`, `mask`,
+    and `user` controls are not exposed through `image_generate`.
     </Note>
 
   </Accordion>
@@ -406,6 +429,7 @@ Legacy aliases normalize to the canonical bundled ids:
     | `model`           | string  | `grok-4-1-fast-non-reasoning` | Model used for x_search requests     |
     | `baseUrl`         | string  | -                              | xAI Responses base URL override      |
     | `inlineCitations` | boolean | -                              | Include inline citations in results  |
+    | `reasoningEffort` | string  | -                              | Explicit Responses reasoning effort  |
     | `maxTurns`        | number  | -                              | Maximum conversation turns            |
     | `timeoutSeconds`  | number  | `30`                           | Request timeout in seconds            |
     | `cacheTtlMinutes` | number  | `15`                           | Cache time-to-live in minutes         |
@@ -421,6 +445,7 @@ Legacy aliases normalize to the canonical bundled ids:
                 model: "grok-4-1-fast-non-reasoning",
                 baseUrl: "https://api.x.ai/v1",
                 inlineCitations: true,
+                reasoningEffort: "low",
               },
             },
           },
@@ -481,8 +506,8 @@ Legacy aliases normalize to the canonical bundled ids:
     - xAI Realtime voice is not registered as an OpenClaw provider yet. It
       needs a different bidirectional voice session contract than batch STT
       or streaming transcription.
-    - xAI image `quality`, image `mask`, and extra native-only aspect ratios
-      are not exposed until the shared `image_generate` tool has
+    - xAI image `quality` and image `mask` are not exposed until the shared
+      `image_generate` tool has
       corresponding cross-provider controls.
   </Accordion>
 
@@ -493,11 +518,30 @@ Legacy aliases normalize to the canonical bundled ids:
       `agents.defaults.models["xai/<model>"].params.tool_stream` to `false`
       to disable it.
     - The bundled xAI wrapper strips unsupported strict tool-schema flags and
-      reasoning *effort* payload keys before sending native xAI requests. Only
-      `grok-4.3` / `grok-4.3-*` advertise configurable reasoning effort; all
-      other reasoning-capable xAI models still request
-      `include: ["reasoning.encrypted_content"]` so prior encrypted reasoning
-      can be replayed on follow-up turns.
+      reasoning *effort* payload keys before sending native xAI requests.
+      OpenClaw maps its common thinking levels onto each Grok family's native
+      controls:
+
+      | Model family | `off` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max` | Default |
+      | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+      | Grok 4.3 | `none` | `low` | `low` | `medium` | `high` | `high` | `high` | `low` |
+      | Grok 4.5 | `low` | `low` | `low` | `medium` | `high` | `high` | `high` | `high` |
+      | Grok 4.6 | `low` | `low` | `low` | `medium` | `high` | `xhigh` | `xhigh` | `high` |
+      | Grok Build 0.1 | fixed | fixed | fixed | fixed | fixed | fixed | fixed | fixed |
+      | Grok 4.20 reasoning | fixed | fixed | fixed | fixed | fixed | fixed | fixed | fixed |
+      | Grok 4.20 non-reasoning | off | off | off | off | off | off | off | off |
+
+      Grok 4.5 and 4.6 cannot disable reasoning, so `off` maps to their lowest
+      native effort. Grok Build 0.1 and the Grok 4.20 reasoning variant use
+      fixed reasoning because xAI does not publish an adjustable effort for
+      those models; OpenClaw accepts every common level but omits the effort
+      field. The Grok 4.20 non-reasoning variant similarly accepts every
+      common level and keeps reasoning off. Reasoning-capable models still
+      request `include: ["reasoning.encrypted_content"]` so prior encrypted
+      reasoning can be replayed on follow-up turns. See xAI's
+      [reasoning controls](https://docs.x.ai/developers/model-capabilities/text/reasoning),
+      [Grok 4.6](https://docs.x.ai/developers/grok-4-6), and the
+      [Grok 4.3 model card](https://docs.x.ai/developers/models/grok-4.3).
     - `web_search`, `x_search`, and `code_execution` are exposed as OpenClaw
       tools. OpenClaw attaches only the specific xAI built-in each tool needs
       to that tool's request instead of attaching every native tool to every
@@ -509,13 +553,16 @@ Legacy aliases normalize to the canonical bundled ids:
       rather than hardcoded into the core model runtime.
     - `code_execution` is remote xAI sandbox execution, not local
       [`exec`](/tools/exec).
+
   </Accordion>
 </AccordionGroup>
 
 ## Live testing
 
 The xAI media paths are covered by unit tests and opt-in live suites. Export
-`XAI_API_KEY` in the process environment before running live probes.
+`XAI_API_KEY` in the process environment before running API-key live probes.
+Subscription OAuth can be exercised through the normal CLI and gateway infer
+commands after `openclaw models auth login --provider xai --method oauth`.
 
 ```bash
 pnpm test extensions/xai

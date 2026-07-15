@@ -12,7 +12,11 @@ import {
   normalizeGoogleApiBaseUrl,
   normalizeGoogleGenerativeAiBaseUrl,
 } from "./src/google-api-base-url.js";
-import { isGoogleGemini3ProModel, isGoogleGemini3ThinkingLevelModel } from "./thinking-api.js";
+import {
+  isGoogleGemini3ProModel,
+  isGoogleGemini3ThinkingLevelModel,
+  resolveGoogleGemini3ThinkingLevel,
+} from "./thinking-api.js";
 
 export {
   DEFAULT_GOOGLE_API_BASE_URL,
@@ -150,11 +154,17 @@ export function resolveGoogleThinkingProfile({
     return undefined;
   }
 
+  const supportsMinimalThinking =
+    !isGemini3ThinkingModel ||
+    resolveGoogleGemini3ThinkingLevel({
+      modelId: normalizedModelId,
+      thinkingLevel: "minimal",
+    }) === "MINIMAL";
   const levels: ProviderThinkingProfile["levels"] = isGoogleGemini3ProModel(normalizedModelId)
     ? [{ id: "off" }, { id: "low" }, { id: "adaptive" }, { id: "high" }]
     : [
         { id: "off" },
-        { id: "minimal" },
+        ...(supportsMinimalThinking ? [{ id: "minimal" as const }] : []),
         { id: "low" },
         { id: "medium" },
         { id: "adaptive" },

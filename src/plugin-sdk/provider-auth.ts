@@ -1,5 +1,6 @@
 // Provider auth helpers define auth methods, credential resolution, and setup status contracts.
 import path from "node:path";
+import { findNormalizedProviderValue } from "../../packages/model-catalog-core/src/provider-id.js";
 import {
   asDateTimestampMs,
   resolveExpiresAtMsFromEpochSeconds,
@@ -26,6 +27,7 @@ import { resolveEnvApiKey } from "../agents/model-auth-env.js";
 import { readProviderJsonResponse } from "../agents/provider-http-errors.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
+import { hasConfiguredSecretInput as hasConfiguredSecretInputValue } from "../config/types.secrets.js";
 import { loadJsonFile, saveJsonFile } from "../infra/json-file.js";
 import { resolveProviderEndpoint } from "./provider-model-shared.js";
 
@@ -331,18 +333,41 @@ export async function resolveCopilotApiToken(params: {
 }
 
 /**
- * Checks whether a provider has either env auth or matching local auth profiles configured.
+ * Checks configured keys and request or agent auth profiles.
  */
 export function isProviderApiKeyConfigured(params: {
-  /** Provider id to check for env auth or local auth profiles. */
   provider: string;
-  /** Agent directory containing auth profiles. */
+  cfg?: OpenClawConfig;
+  workspaceDir?: string;
   agentDir?: string;
-  /** Optional allowed profile credential types. */
+  store?: AuthProfileStore;
   profileTypes?: readonly AuthProfileCredential["type"][];
 }): boolean {
-  if (resolveEnvApiKey(params.provider)?.apiKey) {
+  const configuredProvider = findNormalizedProviderValue(
+    params.cfg?.models?.providers,
+    params.provider,
+  );
+  if (hasConfiguredSecretInputValue(configuredProvider?.apiKey, params.cfg?.secrets?.defaults)) {
     return true;
+  }
+  if (
+    resolveEnvApiKey(params.provider, undefined, {
+      config: params.cfg,
+      workspaceDir: params.workspaceDir,
+    })?.apiKey
+  ) {
+    return true;
+  }
+  if (params.store) {
+    const profileIds = listProfilesForProvider(params.store, params.provider);
+    if (!params.profileTypes?.length) {
+      return profileIds.length > 0;
+    }
+    const allowedTypes = new Set(params.profileTypes);
+    return profileIds.some((profileId) => {
+      const type = params.store?.profiles[profileId]?.type;
+      return type !== undefined && allowedTypes.has(type);
+    });
   }
   const agentDir = params.agentDir?.trim();
   if (!agentDir) {

@@ -161,7 +161,12 @@ type CapabilityProvider = {
   aliases?: string[];
   defaultModel?: string;
   models?: readonly string[];
-  isConfigured?: (ctx: { cfg?: OpenClawConfig; agentDir?: string }) => boolean;
+  isConfigured?: (ctx: {
+    cfg?: OpenClawConfig;
+    workspaceDir?: string;
+    agentDir?: string;
+    authStore?: AuthProfileStore;
+  }) => boolean;
 };
 
 type CapabilityProviderSource = CapabilityProvider[] | (() => CapabilityProvider[]);
@@ -218,7 +223,9 @@ export function isCapabilityProviderConfigured<T extends CapabilityProvider>(par
   if (provider.isConfigured) {
     return provider.isConfigured({
       cfg: params.cfg,
+      workspaceDir: params.workspaceDir,
       agentDir: params.agentDir,
+      authStore: params.authStore,
     });
   }
   return hasProviderAuthForTool({

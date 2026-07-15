@@ -147,4 +147,54 @@ describe("spawnSubagentDirect runtime model persistence", () => {
     expect(persistedEntry?.modelOverrideFallbackOriginProvider).toBe("openai");
     expect(persistedEntry?.modelOverrideFallbackOriginModel).toBe("gpt-5.4");
   });
+
+  it("persists the resolved subagent Fast mode before starting the run", async () => {
+    const dedicatedUpdateSessionStoreMock = vi.fn();
+    const {
+      resetSubagentRegistryForTests: resetForFastModeTest,
+      spawnSubagentDirect: spawnWithFastMode,
+    } = await loadSubagentSpawnModuleForTest({
+      callGatewayMock,
+      getRuntimeConfig: () =>
+        createSubagentSpawnTestConfig(os.tmpdir(), {
+          agents: {
+            defaults: {
+              workspace: os.tmpdir(),
+              model: { primary: "openai/gpt-4" },
+              models: {
+                "openai/gpt-4": { params: { fastMode: true } },
+              },
+              subagents: {
+                model: "openai/gpt-4",
+                fastMode: false,
+              },
+            },
+          },
+        }),
+      updateSessionStoreMock: dedicatedUpdateSessionStoreMock,
+      pruneLegacyStoreKeysMock,
+      workspaceDir: os.tmpdir(),
+    });
+    resetForFastModeTest();
+    let persistedStore: Record<string, Record<string, unknown>> | undefined;
+    installSessionStoreCaptureMock(dedicatedUpdateSessionStoreMock, {
+      onStore: (store) => {
+        persistedStore = store;
+      },
+    });
+
+    const result = await spawnWithFastMode(
+      {
+        task: "test",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "guildchat",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    const [, persistedEntry] = Object.entries(persistedStore ?? {})[0] ?? [];
+    expect(persistedEntry?.fastMode).toBe(false);
+  });
 });

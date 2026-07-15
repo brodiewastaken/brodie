@@ -128,6 +128,7 @@ describe("video-generation capability overlays", () => {
   });
 
   it("checks reference inputs against overlaid provider capabilities", async () => {
+    let seenInputImageRoles: readonly (string | undefined)[] | undefined;
     const provider: VideoGenerationProvider = {
       id: "openrouter",
       capabilities: {
@@ -136,12 +137,15 @@ describe("video-generation capability overlays", () => {
           maxInputImages: 4,
         },
       },
-      resolveModelCapabilities: async () => ({
-        imageToVideo: {
-          enabled: true,
-          maxInputImages: 1,
-        },
-      }),
+      resolveModelCapabilities: async (ctx) => {
+        seenInputImageRoles = ctx.inputImageRoles;
+        return {
+          imageToVideo: {
+            enabled: true,
+            maxInputImages: 1,
+          },
+        };
+      },
       async generateVideo() {
         throw new Error("should not be called");
       },
@@ -152,8 +156,11 @@ describe("video-generation capability overlays", () => {
       providerId: "openrouter",
       model: "minimax/hailuo-2.3",
       cfg: {} as OpenClawConfig,
+      inputImageRoles: ["reference_image", undefined],
       log: { debug: vi.fn() },
     });
+
+    expect(seenInputImageRoles).toEqual(["reference_image", undefined]);
 
     expect(
       buildReferenceInputCapabilityFailure({

@@ -1,6 +1,8 @@
 // Live session model switch tests cover model changes during isolated cron runs.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LiveSessionModelSwitchError } from "../../agents/live-model-switch-error.js";
+import type { SessionEntry } from "../../config/sessions.js";
+import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import {
   clearFastTestEnv,
   loadRunCronIsolatedAgentTurn,
@@ -193,6 +195,49 @@ describe("runCronIsolatedAgentTurn — LiveSessionModelSwitchError retry (#57206
     expect(cronSession.sessionEntry.modelProvider).toBe("anthropic");
   });
 
+  it("does not recreate continuation policy after an explicit model switch retires it", async () => {
+    const cronSession = makeCronSession({
+      sessionEntry: makeCronSessionEntry({
+        model: undefined,
+        modelProvider: undefined,
+      }),
+      isNewSession: true,
+    });
+    resolveCronSessionMock.mockReturnValue(cronSession);
+    const switchError = new LiveSessionModelSwitchError({
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+    });
+    let callCount = 0;
+    runWithModelFallbackMock.mockImplementation(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        expect(cronSession.sessionEntry.cronRunContinuationPolicy).toMatchObject({
+          provider: "anthropic",
+          model: "claude-sonnet-4-6",
+        });
+        applyModelOverrideToSessionEntry({
+          entry: cronSession.sessionEntry as SessionEntry,
+          selection: {
+            provider: "anthropic",
+            model: "claude-opus-4-6",
+          },
+          markLiveSwitchPending: true,
+        });
+        expect(cronSession.sessionEntry.cronRunContinuationPolicy).toBeUndefined();
+        throw switchError;
+      }
+      expect(cronSession.sessionEntry.cronRunContinuationPolicy).toBeUndefined();
+      return makeSuccessfulRunResult("claude-opus-4-6");
+    });
+
+    const result = await runCronIsolatedAgentTurn(makeParams());
+
+    expect(result.status).toBe("ok");
+    expect(callCount).toBe(2);
+    expect(cronSession.sessionEntry.cronRunContinuationPolicy).toBeUndefined();
+  });
+
   it("retries with switched auth profile state from LiveSessionModelSwitchError", async () => {
     resolveSessionAuthProfileOverrideMock.mockResolvedValue("profile-a");
     const cronSession = makeCronSession({
@@ -217,6 +262,15 @@ describe("runCronIsolatedAgentTurn — LiveSessionModelSwitchError retry (#57206
         request.userTurnTranscriptRecorder?.markRuntimePersisted({
           role: "user",
           content: "run task",
+        });
+        applyModelOverrideToSessionEntry({
+          entry: cronSession.sessionEntry as SessionEntry,
+          selection: {
+            provider: "anthropic",
+            model: "claude-sonnet-4-6",
+          },
+          profileOverride: "profile-b",
+          markLiveSwitchPending: true,
         });
         throw new LiveSessionModelSwitchError({
           provider: "anthropic",
@@ -251,6 +305,10 @@ describe("runCronIsolatedAgentTurn — LiveSessionModelSwitchError retry (#57206
     expect(retryParams.suppressNextUserMessagePersistence).toBe(true);
     expect(cronSession.sessionEntry.authProfileOverride).toBe("profile-b");
     expect(cronSession.sessionEntry.authProfileOverrideSource).toBe("user");
+    expect(cronSession.sessionEntry.cronRunContinuationPolicy).toMatchObject({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    });
   });
 
   it("retries a same-model switch with the runtime carried by the error", async () => {

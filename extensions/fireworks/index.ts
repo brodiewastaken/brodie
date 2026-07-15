@@ -5,9 +5,7 @@ import {
   cloneFirstTemplateModel,
   DEFAULT_CONTEXT_TOKENS,
   normalizeModelCompat,
-  OPENAI_COMPATIBLE_REPLAY_HOOKS,
 } from "openclaw/plugin-sdk/provider-model-shared";
-import { isFireworksKimiModelId } from "./model-id.js";
 import { applyFireworksConfig, FIREWORKS_DEFAULT_MODEL_REF } from "./onboard.js";
 import {
   buildFireworksProvider,
@@ -17,6 +15,10 @@ import {
   FIREWORKS_DEFAULT_MODEL_ID,
   isFireworksCatalogModelId,
 } from "./provider-catalog.js";
+import {
+  buildFireworksReplayPolicy,
+  resolveFireworksDefaultReasoning,
+} from "./reasoning-contract.js";
 import { wrapFireworksProviderStream } from "./stream.js";
 import { resolveFireworksThinkingProfile } from "./thinking-policy.js";
 
@@ -42,7 +44,7 @@ function resolveFireworksDynamicModel(ctx: ProviderResolveDynamicModelContext) {
     return undefined;
   }
 
-  const isKimiModel = isFireworksKimiModelId(modelId);
+  const reasoning = resolveFireworksDefaultReasoning(modelId) ?? true;
   const input = resolveFireworksDynamicInput(modelId);
 
   return (
@@ -53,7 +55,7 @@ function resolveFireworksDynamicModel(ctx: ProviderResolveDynamicModelContext) {
       ctx,
       patch: {
         provider: PROVIDER_ID,
-        reasoning: !isKimiModel,
+        reasoning,
         input,
       },
     }) ??
@@ -63,7 +65,7 @@ function resolveFireworksDynamicModel(ctx: ProviderResolveDynamicModelContext) {
       provider: PROVIDER_ID,
       api: "openai-completions",
       baseUrl: FIREWORKS_BASE_URL,
-      reasoning: !isKimiModel,
+      reasoning,
       input,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: FIREWORKS_DEFAULT_CONTEXT_WINDOW,
@@ -90,6 +92,7 @@ export default defineSingleProviderPluginEntry({
         envVar: "FIREWORKS_API_KEY",
         promptMessage: "Enter Fireworks API key",
         defaultModel: FIREWORKS_DEFAULT_MODEL_REF,
+        preserveExistingPrimary: true,
         applyConfig: (cfg) => applyFireworksConfig(cfg),
       },
     ],
@@ -97,7 +100,7 @@ export default defineSingleProviderPluginEntry({
       buildProvider: buildFireworksProvider,
       allowExplicitBaseUrl: true,
     },
-    ...OPENAI_COMPATIBLE_REPLAY_HOOKS,
+    buildReplayPolicy: (ctx) => buildFireworksReplayPolicy(ctx),
     wrapStreamFn: wrapFireworksProviderStream,
     resolveThinkingProfile: ({ modelId }) => resolveFireworksThinkingProfile(modelId),
     resolveDynamicModel: (ctx) => resolveFireworksDynamicModel(ctx),

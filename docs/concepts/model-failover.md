@@ -84,6 +84,8 @@ When a later probe succeeds and the session returns to the selected primary, Ope
 
 These notices are operational messages, not assistant content. They deliver once per state change, including side-effect-only turns when feasible, but sticky fallback turns do not repeat them. Delivery bypasses normal source-reply suppression, does not consume the first assistant reply slot for threaded channels, and is excluded from text-to-speech and commitment extraction.
 
+Set `agents.defaults.model.fallbackNotice: "silent"` to suppress both user-visible notices while preserving fallback state, lifecycle events, logs, `/status`, the fallback model's reply, and terminal errors when every candidate fails. The default is `"visible"`.
+
 ## Auth storage (keys + OAuth)
 
 OpenClaw uses **auth profiles** for both API keys and OAuth tokens.

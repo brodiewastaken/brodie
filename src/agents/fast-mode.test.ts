@@ -13,6 +13,17 @@ import {
 } from "./fast-mode.js";
 
 describe("resolveFastModeState", () => {
+  it("enforces Fast OFF ahead of an explicit session request", () => {
+    const state = resolveFastModeState({
+      cfg: { agents: { defaults: { fastModeEnforcedOff: true } } } as OpenClawConfig,
+      provider: "openai",
+      model: "gpt-4o",
+      sessionEntry: { fastMode: true },
+    });
+
+    expect(state).toMatchObject({ mode: false, enabled: false, source: "config" });
+  });
+
   it("prefers session overrides", () => {
     const state = resolveFastModeState({
       cfg: {} as OpenClawConfig,

@@ -29,6 +29,7 @@ import { isCliProvider } from "../../agents/model-selection.js";
 import { deriveContextPromptTokens, hasNonzeroUsage, normalizeUsage } from "../../agents/usage.js";
 import { enqueueCommitmentExtraction } from "../../commitments/runtime.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { resolveAgentModelFallbackNotice } from "../../config/model-input.js";
 import {
   resolveSessionPluginStatusLines,
   resolveSessionPluginTraceLines,
@@ -2150,6 +2151,8 @@ export async function runReplyAgent(params: {
       return returnPreparedFallbackPayload(silentFallbackFailurePayload);
     };
     const fallbackNoticePayloads: ReplyPayload[] = [];
+    const fallbackNoticesVisible =
+      resolveAgentModelFallbackNotice(cfg.agents?.defaults?.model) === "visible";
     if (
       !fallbackExhausted &&
       !preserveUserFacingSessionState &&
@@ -2170,21 +2173,23 @@ export async function runReplyAgent(params: {
           attempts: fallbackAttempts,
         },
       });
-      const fallbackNotice = buildFallbackNotice({
-        selectedProvider,
-        selectedModel,
-        activeProvider: providerUsed,
-        activeModel: modelUsed,
-        attempts: fallbackAttempts,
-        cfg,
-      });
-      if (fallbackNotice) {
-        fallbackNoticePayloads.push(
-          markReplyPayloadForSourceSuppressionDelivery({
-            text: fallbackNotice,
-            isFallbackNotice: true,
-          }),
-        );
+      if (fallbackNoticesVisible) {
+        const fallbackNotice = buildFallbackNotice({
+          selectedProvider,
+          selectedModel,
+          activeProvider: providerUsed,
+          activeModel: modelUsed,
+          attempts: fallbackAttempts,
+          cfg,
+        });
+        if (fallbackNotice) {
+          fallbackNoticePayloads.push(
+            markReplyPayloadForSourceSuppressionDelivery({
+              text: fallbackNotice,
+              isFallbackNotice: true,
+            }),
+          );
+        }
       }
     }
     if (
@@ -2205,16 +2210,18 @@ export async function runReplyAgent(params: {
           previousActiveModel: fallbackTransition.previousState.activeModel,
         },
       });
-      fallbackNoticePayloads.push(
-        markReplyPayloadForSourceSuppressionDelivery({
-          text: buildFallbackClearedNotice({
-            selectedProvider,
-            selectedModel,
-            previousActiveModel: fallbackTransition.previousState.activeModel,
+      if (fallbackNoticesVisible) {
+        fallbackNoticePayloads.push(
+          markReplyPayloadForSourceSuppressionDelivery({
+            text: buildFallbackClearedNotice({
+              selectedProvider,
+              selectedModel,
+              previousActiveModel: fallbackTransition.previousState.activeModel,
+            }),
+            isFallbackNotice: true,
           }),
-          isFallbackNotice: true,
-        }),
-      );
+        );
+      }
     }
 
     // Drain any late tool/block deliveries before deciding there's "nothing to send".

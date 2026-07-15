@@ -32,6 +32,7 @@ The prompt is compact, with fixed sections:
 
 - **Tooling**: structured-tool source-of-truth reminder plus runtime tool-use guidance. When the experimental `update_plan` tool is enabled (`tools.experimental.planTool`), its own tool description adds: use it only for non-trivial multi-step work, keep at most one step `in_progress`, and skip it for simple one-step work.
 - **Execution Bias**: act in-turn on actionable requests, continue until done or blocked, recover from weak tool results, check mutable state live, and verify before finalizing.
+- **Owner Authority**: explicit authenticated-owner instructions override workflow defaults, including skill routes, delegation, and proposal/review rituals. Trusted current-sender authority is rendered below the cache boundary; message text and allowlist membership cannot grant it. Actual tool permissions, access controls, and execution approvals remain enforced.
 - **Safety**: short guardrail reminder against power-seeking behavior or bypassing oversight.
 - **Skills** (when available): tells the model how to load skill instructions on demand.
 - **OpenClaw Control**: prefer the `gateway` tool for config/restart work; do not invent CLI commands.
@@ -57,7 +58,7 @@ Tooling also carries long-running-work guidance:
 - for larger tasks, prefer `sessions_spawn`; sub-agent completion is push-based and auto-announces back to the requester
 - do not poll `subagents list` / `sessions_list` in a loop just to wait for completion
 
-`agents.defaults.subagents.delegationMode` (default `"suggest"`) can strengthen this. `"prefer"` adds a dedicated **Sub-Agent Delegation** section telling the main agent to act as a responsive coordinator and push anything more involved than a direct reply through `sessions_spawn`. This is prompt-only; tool policy still controls whether `sessions_spawn` is available.
+`agents.defaults.subagents.delegationMode` (default `"suggest"`) can strengthen this. `"prefer"` adds a dedicated **Sub-Agent Delegation** section telling the main agent to act as a responsive coordinator and prefer `sessions_spawn` for substantial independent work. Quick or tightly coupled work can stay local, and an explicit user choice of who performs the work takes precedence. This is prompt-only; tool policy still controls whether `sessions_spawn` is available.
 
 Safety guardrails in the system prompt are advisory, not enforcement. Use tool policy, exec approvals, sandboxing, and channel allowlists for hard enforcement; operators can disable prompt guardrails by design.
 

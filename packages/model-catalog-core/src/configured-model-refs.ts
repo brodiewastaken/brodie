@@ -26,6 +26,12 @@ export const AGENT_MODEL_CONFIG_KEYS = [
   "pdfModel",
 ] as const;
 
+/** Read the model from a channel override string or structured entry. */
+export function readChannelModelOverrideRef(value: unknown): string | undefined {
+  const raw = typeof value === "string" ? value : isRecord(value) ? value.model : undefined;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
 /** Collect configured model references from agents, channels, hooks, and message config. */
 export function collectConfiguredModelRefs(
   config: unknown,
@@ -97,7 +103,10 @@ export function collectConfiguredModelRefs(
         continue;
       }
       for (const [targetId, modelRef] of Object.entries(channelMap)) {
-        pushModelRef(`channels.modelByChannel.${channelId}.${targetId}`, modelRef);
+        pushModelRef(
+          `channels.modelByChannel.${channelId}.${targetId}`,
+          readChannelModelOverrideRef(modelRef),
+        );
       }
     }
   }

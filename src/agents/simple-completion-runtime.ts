@@ -1,11 +1,15 @@
 import { supportsOpenAIReasoningEffort } from "@openclaw/ai/internal/openai";
-import { resolveClaudeSonnet5ModelIdentity } from "@openclaw/llm-core";
+import {
+  resolveClaudeOpus5ModelIdentity,
+  resolveClaudeSonnet5ModelIdentity,
+} from "@openclaw/llm-core";
 /**
  * Simple completion runtime preparation.
  *
  * Resolves agent model selection, auth, runtime policy, and missing-auth errors before simple completions run.
  */
 import type { ThinkLevel } from "../auto-reply/thinking.js";
+import { isModelThinkingFormat } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { completeSimple } from "../llm/stream.js";
@@ -31,6 +35,7 @@ import {
   getApiKeyForModel,
   type ResolvedProviderAuth,
 } from "./model-auth.js";
+import type { ModelCatalogEntry } from "./model-catalog.types.js";
 import { splitTrailingAuthProfile } from "./model-ref-profile.js";
 import {
   buildModelAliasIndex,
@@ -43,7 +48,9 @@ import {
   protectPreparedProviderRuntimeAuth,
   unwrapSecretSentinelsForProviderEgress,
 } from "./provider-secret-egress.js";
+import { isBrodieMaximumThinkingProvider } from "./run-policy.js";
 import { prepareModelForSimpleCompletion } from "./simple-completion-transport.js";
+import { resolveCandidateThinkingLevel } from "./thinking-runtime.js";
 
 type SimpleCompletionAuthStorage = {
   setRuntimeApiKey: (provider: string, apiKey: string) => void;
@@ -392,12 +399,67 @@ export async function completeWithPreparedSimpleCompletionModel(params: {
 }): Promise<AssistantMessage> {
   const completionModel = prepareModelForSimpleCompletion({ model: params.model, cfg: params.cfg });
   const { reasoning: rawReasoning, ...options } = params.options ?? {};
-  const reasoning = normalizeSimpleCompletionReasoning(rawReasoning, completionModel);
+  const requestedReasoning = isBrodieMaximumThinkingProvider(completionModel.provider)
+    ? resolveCandidateThinkingLevel({
+        cfg: params.cfg,
+        provider: completionModel.provider,
+        modelId: completionModel.id,
+        level: rawReasoning,
+        catalog: [
+          {
+            provider: completionModel.provider,
+            id: completionModel.id,
+            api: completionModel.api,
+            reasoning: completionModel.reasoning,
+            params: completionModel.params,
+            compat: resolveSimpleCompletionCatalogCompat(completionModel),
+          },
+        ],
+      })
+    : rawReasoning;
+  const reasoning = normalizeSimpleCompletionReasoning(requestedReasoning, completionModel);
   return await completeSimple(completionModel, params.context, {
     ...options,
     ...(reasoning ? { reasoning } : {}),
     apiKey: params.auth.apiKey,
   });
+}
+
+function resolveSimpleCompletionCatalogCompat(
+  model: Model,
+): ModelCatalogEntry["compat"] | undefined {
+  const compat = model.compat;
+  if (!compat) {
+    return undefined;
+  }
+  const supportsReasoningEffort =
+    "supportsReasoningEffort" in compat && typeof compat.supportsReasoningEffort === "boolean"
+      ? compat.supportsReasoningEffort
+      : undefined;
+  const supportedReasoningEfforts =
+    "supportedReasoningEfforts" in compat && Array.isArray(compat.supportedReasoningEfforts)
+      ? compat.supportedReasoningEfforts.filter(
+          (effort): effort is string => typeof effort === "string",
+        )
+      : undefined;
+  const thinkingFormat =
+    "thinkingFormat" in compat &&
+    typeof compat.thinkingFormat === "string" &&
+    isModelThinkingFormat(compat.thinkingFormat)
+      ? compat.thinkingFormat
+      : undefined;
+  if (
+    supportsReasoningEffort === undefined &&
+    supportedReasoningEfforts === undefined &&
+    thinkingFormat === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(supportsReasoningEffort !== undefined ? { supportsReasoningEffort } : {}),
+    ...(supportedReasoningEfforts ? { supportedReasoningEfforts } : {}),
+    ...(thinkingFormat ? { thinkingFormat } : {}),
+  };
 }
 
 function normalizeSimpleCompletionReasoning(
@@ -408,15 +470,27 @@ function normalizeSimpleCompletionReasoning(
     case undefined:
       return undefined;
     case "off":
-      return resolveClaudeSonnet5ModelIdentity(model) ? "off" : undefined;
+      return resolveClaudeOpus5ModelIdentity(model) || resolveClaudeSonnet5ModelIdentity(model)
+        ? "off"
+        : undefined;
     case "adaptive":
       return "medium";
     case "ultra":
     case "max":
-      return isOpenAIProvider(model.provider) && supportsOpenAIReasoningEffort(model, "max")
-        ? "max"
-        : "xhigh";
+      return supportsNativeMaxReasoning(model) ? "max" : "xhigh";
     default:
       return reasoning;
   }
+}
+
+function supportsNativeMaxReasoning(model: Model): boolean {
+  if (!isBrodieMaximumThinkingProvider(model.provider)) {
+    return isOpenAIProvider(model.provider) && supportsOpenAIReasoningEffort(model, "max");
+  }
+  const supportedReasoningEfforts =
+    resolveSimpleCompletionCatalogCompat(model)?.supportedReasoningEfforts;
+  return (
+    model.thinkingLevelMap?.max === "max" ||
+    supportedReasoningEfforts?.some((effort) => effort.trim().toLowerCase() === "max") === true
+  );
 }

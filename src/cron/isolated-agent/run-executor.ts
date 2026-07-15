@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { BootstrapContextMode } from "../../agents/bootstrap-files.js";
-import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
+import { isFastModeEnforcedOff, type FastModeAutoProgressState } from "../../agents/fast-mode.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "../../agents/harness/hook-helpers.js";
 import type { ModelCatalogEntry } from "../../agents/model-catalog.types.js";
 import { resolveCliRuntimeExecutionProvider } from "../../agents/model-runtime-aliases.js";
@@ -509,7 +509,9 @@ export function createCronPromptExecutor(params: {
               sessionEntry: params.cronSession.sessionEntry,
             });
             return {
-              fastMode: fastModeState.mode,
+              fastMode: isFastModeEnforcedOff(params.cfgWithAgentDefaults)
+                ? false
+                : (params.agentPayload?.fastMode ?? fastModeState.mode),
               fastModeAutoOnSeconds: fastModeState.fastAutoOnSeconds,
               fastModeStartedAtMs,
               fastModeAutoProgressState,

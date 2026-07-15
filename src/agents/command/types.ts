@@ -104,7 +104,7 @@ export type AgentCommandOpts = {
   approvalReviewerDeviceId?: string;
   /** Internal trusted exec approval follow-up elevated defaults. */
   bashElevated?: ExecElevatedDefaults;
-  /** Trusted sender identity bit for command/channel-action auth; defaults true for local CLI calls. */
+  /** Trusted owner; local CLI defaults true. */
   senderIsOwner?: boolean;
   /** Whether this caller is authorized to use provider/model per-run overrides. */
   allowModelOverride?: boolean;
@@ -178,7 +178,7 @@ export type AgentCommandIngressOpts = Omit<
   AgentCommandOpts,
   "senderIsOwner" | "allowModelOverride" | "resultMetaOverrides"
 > & {
-  /** Trusted sender identity bit for command/channel-action auth; defaults false for ingress. */
+  /** Trusted owner; ingress defaults false. */
   senderIsOwner?: boolean;
   /** Ingress callsites must always pass explicit model-override authorization state. */
   allowModelOverride: boolean;

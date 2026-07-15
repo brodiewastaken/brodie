@@ -47,8 +47,9 @@ import {
 } from "./anthropic-auth-headers.js";
 import {
   applyClaudeRequestContract,
-  prepareClaudeSonnet5RequestContext,
+  prepareClaudeNoPrefillRequestContext,
   resolveClaudeNativeThinkingLevelMap,
+  resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
   requiresClaudeAdaptiveThinking,
   supportsClaudeAdaptiveThinking,
@@ -113,7 +114,7 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.75";
+const claudeCodeVersion = "2.1.258";
 const claudeCodeBillingSystemBlock = `x-anthropic-billing-header: cc_version=${claudeCodeVersion}; cc_entrypoint=sdk-cli;`;
 
 // Claude Code 2.x tool names (canonical casing)
@@ -504,7 +505,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
   options?: AnthropicOptions,
 ) => {
   const stream = new AssistantMessageEventStream();
-  const requestContext = prepareClaudeSonnet5RequestContext(model, context);
+  const requestContext = prepareClaudeNoPrefillRequestContext(model, context);
   const requestOptions = normalizeAnthropicThinkingOptions(model, options);
 
   void (async () => {
@@ -1064,7 +1065,7 @@ export const streamSimpleAnthropic: StreamFunction<
         ? "low"
         : "high"
       : options?.reasoning;
-  if (resolveClaudeSonnet5ModelIdentity(model)) {
+  if (resolveClaudeOpus5ModelIdentity(model) || resolveClaudeSonnet5ModelIdentity(model)) {
     return streamAnthropic(model, context, {
       ...base,
       thinkingEnabled: true,
@@ -1671,14 +1672,11 @@ function buildAnthropicSystemBlocks(
   const blocks: TextBlockParam[] = [];
   if (isOAuthTokenResult) {
     // Anthropic uses this first system block to route Claude subscription OAuth billing.
+    // The billing block alone routes the subscription, so no Claude Code identity
+    // line sits between it and the agent's own system prompt.
     blocks.push({
       type: "text",
       text: claudeCodeBillingSystemBlock,
-    });
-    blocks.push({
-      type: "text",
-      text: "You are Claude Code, Anthropic's official CLI for Claude.",
-      ...(cacheControl ? { cache_control: cacheControl } : {}),
     });
   }
   if (systemPrompt) {

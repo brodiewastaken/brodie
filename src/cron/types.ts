@@ -254,6 +254,8 @@ type CronAgentTurnPayloadFields = {
   /** Optional per-job fallback models; overrides agent/global fallbacks when defined. */
   fallbacks?: string[];
   thinking?: string;
+  /** Per-job fast-mode override. Boolean forces; omission inherits. */
+  fastMode?: boolean;
   timeoutSeconds?: number;
   allowUnsafeExternalContent?: boolean;
   /** Immutable external hook provenance for async dispatch. */

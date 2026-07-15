@@ -127,6 +127,10 @@ individual [provider pages](#related) for details.
 Run `video_generate action=list` to inspect available providers, models, and
 runtime modes at runtime.
 
+The model list combines provider-advertised models with configured video-generation
+primary and fallback models. Added overrides are marked `source: "configured"`;
+provider readiness uses the same request auth store as generation.
+
 ### Capability matrix
 
 The explicit mode contract used by `video_generate`, contract tests, and

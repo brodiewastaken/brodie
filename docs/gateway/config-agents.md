@@ -363,6 +363,7 @@ Time format in system prompt. Default: `auto` (OS preference).
       model: {
         primary: "anthropic/claude-opus-4-6",
         fallbacks: ["minimax/MiniMax-M2.7"],
+        fallbackNotice: "visible", // visible | silent
       },
       utilityModel: "openai/gpt-5.4-mini",
       imageModel: {
@@ -398,9 +399,10 @@ Time format in system prompt. Default: `auto` (OS preference).
 }
 ```
 
-- `model`: accepts either a string (`"provider/model"`) or an object (`{ primary, fallbacks }`).
+- `model`: accepts either a string (`"provider/model"`) or an object (`{ primary, fallbacks, fallbackNotice }`).
   - String form sets only the primary model.
   - Object form sets primary plus ordered failover models.
+  - `fallbackNotice` defaults to `"visible"`. Set it to `"silent"` to preserve fallback state, diagnostics, `/status`, normal fallback replies, and exhausted-fallback errors without sending transition or recovery banners to the conversation.
 - `utilityModel`: optional `provider/model` ref or alias for short internal tasks. It currently powers generated Control UI session titles, Telegram DM topic titles, and Discord auto-thread titles. These tasks fall back to the agent's primary model when unset; `agents.list[].utilityModel` overrides the default, and an operation-specific model override wins over both. Utility tasks make separate model calls and send task-specific content to the selected model provider. Dashboard title generation sends at most the first 1,000 characters of the first non-command message. Choose a provider that matches your cost and data-handling requirements.
 - `imageModel`: accepts either a string (`"provider/model"`) or an object (`{ primary, fallbacks }`).
   - Used by the `image` tool path as its vision-model config.
@@ -484,14 +486,14 @@ Time format in system prompt. Default: `auto` (OS preference).
 - Runtime precedence is exact model policy first (`agents.list[].models["provider/model"]`, `agents.defaults.models["provider/model"]`, or `models.providers.<provider>.models[]`), then `agents.list[]` / `agents.defaults.models["provider/*"]`, then provider-wide policy at `models.providers.<provider>.agentRuntime`.
 - Whole-agent runtime keys are legacy. `agents.defaults.agentRuntime`, `agents.list[].agentRuntime`, session runtime pins, and `OPENCLAW_AGENT_RUNTIME` are ignored by runtime selection. Run `openclaw doctor --fix` to remove stale values.
 - OpenAI agent models use the Codex harness by default; provider/model `agentRuntime.id: "codex"` remains valid when you want to make that explicit.
-- For Claude CLI deployments, prefer `model: "anthropic/claude-opus-4-8"` plus model-scoped `agentRuntime.id: "claude-cli"`. Legacy `claude-cli/<model>` refs still work for compatibility, but new config should keep provider/model selection canonical and put the execution backend in provider/model runtime policy.
+- For Claude CLI deployments, prefer `model: "anthropic/claude-opus-5"` plus model-scoped `agentRuntime.id: "claude-cli"`. Pin `anthropic/claude-opus-4-8` when that exact generation is required. Legacy `claude-cli/<model>` refs still work for compatibility, but new config should keep provider/model selection canonical and put the execution backend in provider/model runtime policy.
 - This only controls text agent-turn execution. Media generation, vision, PDF, music, video, and TTS still use their provider/model settings.
 
 **Built-in alias shorthands** (only apply when the model is in `agents.defaults.models`):
 
 | Alias               | Model                           |
 | ------------------- | ------------------------------- |
-| `opus`              | `anthropic/claude-opus-4-8`     |
+| `opus`              | `anthropic/claude-opus-5`       |
 | `sonnet`            | `anthropic/claude-sonnet-4-6`   |
 | `gpt`               | `openai/gpt-5.4`                |
 | `gpt-mini`          | `openai/gpt-5.4-mini`           |

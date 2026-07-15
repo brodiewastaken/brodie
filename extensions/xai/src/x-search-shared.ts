@@ -10,6 +10,8 @@ import {
   coerceXaiToolConfig,
   resolveNormalizedXaiToolModel,
   resolvePositiveIntegerToolConfig,
+  resolveXaiToolReasoningEffort,
+  type XaiToolReasoningEffort,
 } from "./tool-config-shared.js";
 import type { XaiWebSearchResponse } from "./web-search-shared.js";
 
@@ -21,6 +23,7 @@ type XaiXSearchConfig = {
   model?: unknown;
   inlineCitations?: unknown;
   maxTurns?: unknown;
+  reasoningEffort?: unknown;
 };
 
 export type XaiXSearchOptions = {
@@ -60,6 +63,12 @@ export function resolveXaiXSearchInlineCitations(config?: Record<string, unknown
 
 export function resolveXaiXSearchMaxTurns(config?: Record<string, unknown>): number | undefined {
   return resolvePositiveIntegerToolConfig(config, "maxTurns");
+}
+
+export function resolveXaiXSearchReasoningEffort(
+  config?: Record<string, unknown>,
+): XaiToolReasoningEffort | undefined {
+  return resolveXaiToolReasoningEffort(config);
 }
 
 function buildXSearchTool(options: XaiXSearchOptions): Record<string, unknown> {
@@ -117,6 +126,7 @@ export async function requestXaiXSearch(params: {
   timeoutSeconds: number;
   inlineCitations: boolean;
   maxTurns?: number;
+  reasoningEffort?: XaiToolReasoningEffort;
   options: XaiXSearchOptions;
 }): Promise<XaiXSearchResult> {
   return await postTrustedWebToolsJson(
@@ -129,6 +139,7 @@ export async function requestXaiXSearch(params: {
         inputText: params.options.query,
         tools: [buildXSearchTool(params.options)],
         maxTurns: params.maxTurns,
+        reasoningEffort: params.reasoningEffort,
       }),
       errorLabel: "xAI",
     },

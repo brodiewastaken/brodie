@@ -720,6 +720,10 @@ export function isGoogleGemini3ThinkingLevelModel(modelId: string): boolean {
   return isGoogleGemini3ProModel(modelId) || isGoogleGemini3FlashModel(modelId);
 }
 
+export function isGoogleGemini38FlashModel(modelId: string): boolean {
+  return /(?:^|\/)gemini-3\.8-flash(?:-|$)/.test(normalizeLowercaseStringOrEmpty(modelId));
+}
+
 /**
  * Maps legacy numeric/semantic thinking input onto Gemini 3's provider enum.
  * @deprecated Google provider-owned stream helper; do not use from third-party plugins.
@@ -759,10 +763,11 @@ export function resolveGoogleGemini3ThinkingLevel(params: {
   if (!isGoogleGemini3FlashModel(params.modelId)) {
     return undefined;
   }
+  const minimumThinkingLevel = isGoogleGemini38FlashModel(params.modelId) ? "LOW" : "MINIMAL";
   switch (params.thinkingLevel) {
     case "off":
     case "minimal":
-      return "MINIMAL";
+      return minimumThinkingLevel;
     case "low":
       return "LOW";
     case "medium":
@@ -783,7 +788,7 @@ export function resolveGoogleGemini3ThinkingLevel(params: {
     return undefined;
   }
   if (params.thinkingBudget <= 0) {
-    return "MINIMAL";
+    return minimumThinkingLevel;
   }
   if (params.thinkingBudget <= 2048) {
     return "LOW";
@@ -887,6 +892,12 @@ function sanitizeGoogleThinkingConfigContainer(params: {
     return;
   }
   const configObj = params.container as Record<string, unknown>;
+  if (typeof params.modelId === "string" && isGoogleGemini38FlashModel(params.modelId)) {
+    // Gemini 3.8 rejects legacy sampling controls before inference.
+    for (const key of ["temperature", "topP", "topK", "candidateCount"]) {
+      delete configObj[key];
+    }
+  }
   const thinkingConfig = configObj.thinkingConfig;
   if (!thinkingConfig || typeof thinkingConfig !== "object") {
     return;
@@ -950,6 +961,12 @@ function sanitizeGoogleThinkingConfigContainer(params: {
   }
 
   if (typeof params.modelId === "string" && isGoogleGemini3ThinkingLevelModel(params.modelId)) {
+    if (
+      isGoogleGemini38FlashModel(params.modelId) &&
+      normalizeLowercaseStringOrEmpty(thinkingConfigObj.thinkingLevel) === "minimal"
+    ) {
+      thinkingConfigObj.thinkingLevel = "LOW";
+    }
     const mappedLevel = resolveGoogleGemini3ThinkingLevel({
       modelId: params.modelId,
       thinkingLevel: params.thinkingLevel,

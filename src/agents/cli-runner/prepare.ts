@@ -239,7 +239,8 @@ async function resolveCliSkillsPrompt(params: {
 }
 
 const CLAUDE_CLI_CONTEXT_MODEL_ALIASES: Record<string, string> = {
-  opus: "claude-opus-4-8",
+  opus: "claude-opus-5",
+  "opus-5": "claude-opus-5",
   "opus-4.8": "claude-opus-4-8",
   "opus-4-8": "claude-opus-4-8",
   "opus-4.7": "claude-opus-4-7",
@@ -414,6 +415,18 @@ export async function prepareCliRunContext(
     bindingExtraSystemPromptStatic !== undefined
       ? hashCliSessionText(bindingExtraSystemPromptStatic.trim() || undefined)
       : hashCliSessionText(extraSystemPrompt);
+  // Sender authority changes resumable system context. Bind an established
+  // owner/non-owner result into the existing content-drift hash so first-only
+  // CLI backends refresh the prompt instead of retaining stale authority.
+  const authorityBoundExtraSystemPromptHash =
+    params.senderIsOwner === undefined
+      ? baseExtraSystemPromptHash
+      : hashCliSessionText(
+          JSON.stringify([
+            baseExtraSystemPromptHash ?? null,
+            { senderIsOwner: params.senderIsOwner },
+          ]),
+        );
   const requireExplicitMessageTarget =
     params.requireExplicitMessageTarget ?? isSubagentSessionKey(params.sessionKey);
   const hasCliSessionBindingFacts = bindingFacts !== undefined;
@@ -531,8 +544,10 @@ export async function prepareCliRunContext(
   // so entering or leaving bootstrap refreshes first-only CLI system prompts.
   const extraSystemPromptHash =
     bootstrapMode === "none"
-      ? baseExtraSystemPromptHash
-      : hashCliSessionText(JSON.stringify([baseExtraSystemPromptHash ?? null, bootstrapMode]));
+      ? authorityBoundExtraSystemPromptHash
+      : hashCliSessionText(
+          JSON.stringify([authorityBoundExtraSystemPromptHash ?? null, bootstrapMode]),
+        );
   // Ring-zero Crestodian runs replace the bundle MCP surface entirely: no
   // loopback server, no plugin/user servers. The generated MCP config carries
   // only the crestodian stdio server, so the CLI harness sees exactly one
@@ -726,24 +741,43 @@ export async function prepareCliRunContext(
       bundleMcpEnabled && mcpLoopbackRuntime
         ? hashCliSessionText(JSON.stringify(promptTools.map((tool) => tool.name).toSorted()))
         : undefined;
+    const forceReuseSessionId =
+      params.cliSessionBinding?.forceReuse === true
+        ? params.cliSessionBinding.sessionId.trim()
+        : "";
+    const forceReuseNeedsPromptRefresh =
+      forceReuseSessionId.length > 0 &&
+      params.cliSessionBinding?.extraSystemPromptHash !== extraSystemPromptHash;
     const reusableCliSessionCandidate: CliReusableSession = isSideQuestion
       ? { mode: "none" }
-      : params.cliSessionBinding
-        ? resolveCliSessionReuse({
-            binding: params.cliSessionBinding,
-            authProfileId: effectiveAuthProfileId,
-            authEpoch,
-            authEpochVersion: CLI_AUTH_EPOCH_VERSION,
-            extraSystemPromptHash,
-            messageToolPolicyHash,
-            promptToolNamesHash,
-            cwdHash,
-            mcpConfigHash: preparedBackendFinal.mcpConfigHash,
-            mcpResumeHash: preparedBackendFinal.mcpResumeHash,
-          })
-        : params.cliSessionId
-          ? { mode: "reuse", sessionId: params.cliSessionId }
-          : { mode: "none" };
+      : forceReuseNeedsPromptRefresh
+        ? {
+            mode: "reuse-with-drift",
+            sessionId: forceReuseSessionId,
+            drift: { reasons: ["system-prompt"] },
+          }
+        : params.cliSessionBinding
+          ? resolveCliSessionReuse({
+              binding: params.cliSessionBinding,
+              authProfileId: effectiveAuthProfileId,
+              authEpoch,
+              authEpochVersion: CLI_AUTH_EPOCH_VERSION,
+              extraSystemPromptHash,
+              messageToolPolicyHash,
+              promptToolNamesHash,
+              cwdHash,
+              mcpConfigHash: preparedBackendFinal.mcpConfigHash,
+              mcpResumeHash: preparedBackendFinal.mcpResumeHash,
+            })
+          : params.cliSessionId
+            ? {
+                // A bare legacy session id has no persisted prompt fingerprint.
+                // Keep its history, but resend current authority before resuming.
+                mode: "reuse-with-drift",
+                sessionId: params.cliSessionId,
+                drift: { reasons: ["system-prompt"] },
+              }
+            : { mode: "none" };
     const backendReusableCliSession: CliReusableSession =
       reusableCliSessionCandidate.mode === "reuse-with-drift" &&
       !canTransportSystemPrompt(preparedBackendFinal.backend)
@@ -844,6 +878,7 @@ export async function prepareCliRunContext(
           runtimeChatType: params.sessionEntry?.chatType,
           runtimeCapabilities,
           ownerNumbers: params.ownerNumbers,
+          senderIsOwner: params.senderIsOwner,
           heartbeatPrompt,
           docsPath: openClawReferences.docsPath ?? undefined,
           sourcePath: openClawReferences.sourcePath ?? undefined,

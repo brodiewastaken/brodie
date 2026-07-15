@@ -5,6 +5,7 @@
  */
 import type { ConversationRoute } from "../routing/conversation-route.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
+import type { RunPolicy } from "./run-policy.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
 import type { SubagentLifecycleEndedReason } from "./subagent-lifecycle-events.js";
 import type { SpawnSubagentContextMode, SpawnSubagentMode } from "./subagent-spawn.types.js";
@@ -121,7 +122,7 @@ export type SubagentRunRecord = {
   runTimeoutSeconds?: number;
   spawnMode?: SpawnSubagentMode;
   contextMode?: SpawnSubagentContextMode;
-  resolvedRunPolicy?: Record<string, unknown>;
+  resolvedRunPolicy?: RunPolicy;
   descendantTaskRunIds?: string[];
   completionEventId?: string;
   schedulerReceiptId?: string;

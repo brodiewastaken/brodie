@@ -2,6 +2,7 @@
 import {
   normalizeAgentModelMapForConfig,
   normalizeAgentModelRefForConfig,
+  patchAgentDefaultModelConfig,
 } from "../config/model-input.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 
@@ -23,10 +24,10 @@ export function applyPrimaryModel(cfg: OpenClawConfig, model: string): OpenClawC
       ...cfg.agents,
       defaults: {
         ...defaults,
-        model: {
+        model: patchAgentDefaultModelConfig(existingModel, {
           ...(fallbacks ? { fallbacks } : undefined),
           primary: normalizedModel,
-        },
+        }),
         models: {
           ...existingModels,
           [normalizedModel]: existingModels?.[normalizedModel] ?? {},

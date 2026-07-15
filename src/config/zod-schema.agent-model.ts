@@ -12,6 +12,18 @@ export const AgentModelSchema = z.union([
     .strict(),
 ]);
 
+/** Default model schema with process-wide fallback notice presentation policy. */
+export const AgentDefaultModelSchema = z.union([
+  z.string(),
+  z
+    .object({
+      primary: z.string().optional(),
+      fallbacks: z.array(z.string()).optional(),
+      fallbackNotice: z.enum(["visible", "silent"]).optional(),
+    })
+    .strict(),
+]);
+
 export const AgentToolModelSchema = z.union([
   z.string(),
   z

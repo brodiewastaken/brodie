@@ -131,7 +131,6 @@ export function createApplyPatchTool(
       return {
         content: [{ type: "text", text: result.text }],
         details: { summary: result.summary },
-        ...(result.noOp ? { terminate: true } : {}),
       };
     },
   };

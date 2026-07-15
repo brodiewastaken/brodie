@@ -634,6 +634,13 @@ describe("gateway sessions patch", () => {
       modelOverride: ANTHROPIC_SONNET_ID,
       modelOverrideSource: "user",
       liveModelSwitchPending: true,
+      cronRunContinuationPolicy: {
+        provider: "anthropic",
+        model: ANTHROPIC_SONNET_ID,
+        thinking: "high",
+        fastMode: false,
+        fallbacks: [],
+      },
     });
     const entry = await applyMainModelPatch({
       store,
@@ -644,6 +651,7 @@ describe("gateway sessions patch", () => {
     expectModelSelection(entry, undefined, undefined);
     expect(entry.modelOverrideSource).toBeUndefined();
     expect(entry.liveModelSwitchPending).toBeUndefined();
+    expect(entry.cronRunContinuationPolicy).toBeUndefined();
   });
 
   test.each([

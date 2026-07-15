@@ -603,6 +603,7 @@ export async function projectSessionsPatchEntry(params: {
         }),
       });
       delete next.liveModelSwitchPending;
+      delete next.cronRunContinuationPolicy;
     } else if (raw !== undefined) {
       const trimmed = normalizeOptionalString(raw) ?? "";
       if (!trimmed) {

@@ -45,8 +45,14 @@ function requireFirstMockCall<T>(mock: { mock: { calls: T[][] } }, label: string
 
 async function runFastModeCase(params: {
   configFastMode: boolean | "auto";
+  configuredFallbacks?: string[];
+  enforceFastModeOff?: boolean;
+  cronFastMode?: boolean;
+  payloadFallbacks?: string[];
   configFastAutoOnSeconds?: number;
   expectedFastMode: boolean | "auto";
+  expectedContinuationFastMode?: boolean | "auto";
+  expectedContinuationFallbacks?: string[];
   expectedFastModeAutoOnSeconds?: number;
   expectedCleanupBundleMcpOnRunEnd?: boolean;
   expectedRetiredSessionId?: string;
@@ -57,17 +63,16 @@ async function runFastModeCase(params: {
   sessionTarget?: string;
 }) {
   const baseSession = makeCronSession();
-  resolveCronSessionMock.mockReturnValue(
-    makeCronSession({
-      ...baseSession,
-      ...(params.previousSessionId ? { previousSessionId: params.previousSessionId } : {}),
-      sessionEntry: {
-        ...baseSession.sessionEntry,
-        ...(params.sessionId ? { sessionId: params.sessionId } : {}),
-        ...(params.sessionFastMode === undefined ? {} : { fastMode: params.sessionFastMode }),
-      },
-    }),
-  );
+  const cronSession = makeCronSession({
+    ...baseSession,
+    ...(params.previousSessionId ? { previousSessionId: params.previousSessionId } : {}),
+    sessionEntry: {
+      ...baseSession.sessionEntry,
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+      ...(params.sessionFastMode === undefined ? {} : { fastMode: params.sessionFastMode }),
+    },
+  });
+  resolveCronSessionMock.mockReturnValue(cronSession);
   mockSuccessfulModelFallback();
   resolveFastModeStateMock.mockImplementation(({ cfg, sessionEntry }) => {
     const sessionFastMode = sessionEntry?.fastMode;
@@ -87,12 +92,39 @@ async function runFastModeCase(params: {
       fastAutoOnSeconds: params.configFastAutoOnSeconds ?? 60,
     };
   });
+  const expectedContinuationPolicy = {
+    provider: "openai",
+    model: EXPECTED_OPENAI_MODEL,
+    ...(params.expectedContinuationFastMode !== undefined
+      ? { fastMode: params.expectedContinuationFastMode }
+      : {}),
+    fallbacks: params.expectedContinuationFallbacks ?? [],
+  };
+  runEmbeddedAgentMock.mockImplementation(async () => {
+    // The callback runs after the persisted preflight and before inference returns.
+    expect(cronSession.sessionEntry.cronRunContinuationPolicy).toMatchObject(
+      expectedContinuationPolicy,
+    );
+    expect(cronSession.sessionEntry.cronRunContinuationPolicy?.fastMode).toBe(
+      params.expectedContinuationFastMode,
+    );
+    return { payloads: [{ text: "test output" }], meta: { agentMeta: {} } };
+  });
 
   const result = await runCronIsolatedAgentTurn(
     makeIsolatedAgentParamsFixture({
       cfg: {
         agents: {
           defaults: {
+            ...(params.enforceFastModeOff ? { fastModeEnforcedOff: true } : {}),
+            ...(params.configuredFallbacks
+              ? {
+                  model: {
+                    primary: OPENAI_GPT4_MODEL,
+                    fallbacks: params.configuredFallbacks,
+                  },
+                }
+              : {}),
             models: {
               [OPENAI_GPT4_MODEL]: {
                 params: {
@@ -112,17 +144,22 @@ async function runFastModeCase(params: {
           kind: "agentTurn",
           message: params.message,
           model: OPENAI_GPT4_MODEL,
+          ...(params.cronFastMode === undefined ? {} : { fastMode: params.cronFastMode }),
+          ...(params.payloadFallbacks === undefined ? {} : { fallbacks: params.payloadFallbacks }),
         },
       }),
     }),
   );
 
-  expect(result.status).toBe("ok");
+  expect(result.status, JSON.stringify(result)).toBe("ok");
   expect(runEmbeddedAgentMock).toHaveBeenCalledOnce();
   const [embeddedRunParams] = requireFirstMockCall(runEmbeddedAgentMock, "embedded run");
   expect(embeddedRunParams.provider).toBe("openai");
   expect(embeddedRunParams.model).toBe(EXPECTED_OPENAI_MODEL);
   expect(embeddedRunParams.fastMode).toBe(params.expectedFastMode);
+  expect(cronSession.sessionEntry.cronRunContinuationPolicy).toMatchObject(
+    expectedContinuationPolicy,
+  );
   expect(embeddedRunParams.fastModeAutoOnSeconds).toBe(params.expectedFastModeAutoOnSeconds ?? 60);
   expect(embeddedRunParams.cleanupBundleMcpOnRunEnd).toBe(
     params.expectedCleanupBundleMcpOnRunEnd ?? true,
@@ -220,6 +257,60 @@ describe("runCronIsolatedAgentTurn — fast mode", () => {
       configFastMode: true,
       expectedFastMode: true,
       message: "test fast mode",
+    });
+  });
+
+  it("freezes inherited configured fallbacks when the cron override is undefined", async () => {
+    await runFastModeCase({
+      configFastMode: false,
+      configuredFallbacks: ["anthropic/claude-sonnet-4-6"],
+      expectedFastMode: false,
+      expectedContinuationFallbacks: ["anthropic/claude-sonnet-4-6"],
+      message: "test inherited cron fallbacks",
+    });
+  });
+
+  it("freezes an explicit empty cron fallback chain", async () => {
+    await runFastModeCase({
+      configFastMode: false,
+      configuredFallbacks: ["anthropic/claude-sonnet-4-6"],
+      payloadFallbacks: [],
+      expectedFastMode: false,
+      expectedContinuationFallbacks: [],
+      message: "test empty cron fallbacks",
+    });
+  });
+
+  it("freezes an explicit nonempty cron fallback chain", async () => {
+    await runFastModeCase({
+      configFastMode: false,
+      payloadFallbacks: ["xai/grok-4.6"],
+      expectedFastMode: false,
+      expectedContinuationFallbacks: ["xai/grok-4.6"],
+      message: "test explicit cron fallbacks",
+    });
+  });
+
+  it("lets an explicit cron Fast policy override session and model policy", async () => {
+    await runFastModeCase({
+      configFastMode: true,
+      cronFastMode: false,
+      expectedFastMode: false,
+      expectedContinuationFastMode: false,
+      message: "test explicit cron fast mode",
+      sessionFastMode: true,
+    });
+  });
+
+  it("enforces Fast OFF over an explicit cron request", async () => {
+    await runFastModeCase({
+      configFastMode: true,
+      cronFastMode: true,
+      enforceFastModeOff: true,
+      expectedFastMode: false,
+      expectedContinuationFastMode: false,
+      message: "test enforced Fast OFF",
+      sessionFastMode: true,
     });
   });
 

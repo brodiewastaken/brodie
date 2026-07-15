@@ -23,6 +23,7 @@ import {
   type WebSearchProviderSetupContext,
   writeCache,
 } from "openclaw/plugin-sdk/provider-web-search";
+import type { XaiToolReasoningEffort } from "./tool-config-shared.js";
 import {
   buildXaiWebSearchPayload,
   extractXaiWebSearchContent,
@@ -30,6 +31,7 @@ import {
   resolveXaiInlineCitations,
   resolveXaiWebSearchEndpoint,
   resolveXaiWebSearchModel,
+  resolveXaiWebSearchReasoningEffort,
 } from "./web-search-shared.js";
 import { resolveEffectiveXSearchConfig, setPluginXSearchConfigValue } from "./x-search-config.js";
 import { XAI_DEFAULT_X_SEARCH_MODEL } from "./x-search-shared.js";
@@ -136,9 +138,10 @@ function runXaiWebSearch(params: {
   timeoutSeconds: number;
   inlineCitations: boolean;
   cacheTtlMs: number;
+  reasoningEffort?: XaiToolReasoningEffort;
 }): Promise<Record<string, unknown>> {
   const cacheKey = normalizeCacheKey(
-    `grok:${params.endpoint}:${params.model}:${String(params.inlineCitations)}:${params.query}`,
+    `grok:${params.endpoint}:${params.model}:${params.reasoningEffort ?? "default"}:${String(params.inlineCitations)}:${params.query}`,
   );
   const cached = readCache(XAI_WEB_SEARCH_CACHE, cacheKey);
   if (cached) {
@@ -154,6 +157,7 @@ function runXaiWebSearch(params: {
       endpoint: params.endpoint,
       timeoutSeconds: params.timeoutSeconds,
       inlineCitations: params.inlineCitations,
+      reasoningEffort: params.reasoningEffort,
     });
     const payload = buildXaiWebSearchPayload({
       query: params.query,
@@ -384,6 +388,7 @@ export async function executeXaiWebSearchProviderTool(
     endpoint: resolveXaiWebSearchEndpoint(searchConfig),
     timeoutSeconds: resolveXaiWebSearchTimeoutSeconds(searchConfig),
     inlineCitations: resolveXaiInlineCitations(searchConfig),
+    reasoningEffort: resolveXaiWebSearchReasoningEffort(searchConfig),
     cacheTtlMs: resolveCacheTtlMs(searchConfig?.cacheTtlMinutes, DEFAULT_CACHE_TTL_MINUTES),
   };
   try {
@@ -427,6 +432,7 @@ export const testing = {
   resolveXaiWebSearchCredential,
   resolveXaiWebSearchEndpoint,
   resolveXaiWebSearchModel,
+  resolveXaiWebSearchReasoningEffort,
   resolveXaiWebSearchTimeoutSeconds,
   requestXaiWebSearch,
 };

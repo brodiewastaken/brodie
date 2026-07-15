@@ -3918,6 +3918,19 @@ describe("runPreparedReply media-only handling", () => {
     expect(call.followupRun.run.fastMode).toBe("auto");
   });
 
+  it("forwards a channel fast-mode default as an explicit queued-run override", async () => {
+    await runPreparedReply(
+      baseParams({
+        resolvedFastMode: false,
+        resolvedFastModeOverride: true,
+      }),
+    );
+
+    const call = requireRunReplyAgentCall();
+    expect(call.followupRun.run.fastMode).toBe(false);
+    expect(call.followupRun.run.fastModeOverride).toBe(true);
+  });
+
   it("forwards a channel reasoning override into the followup run", async () => {
     await runPreparedReply(
       baseParams({

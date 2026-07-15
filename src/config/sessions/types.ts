@@ -22,6 +22,15 @@ export type SessionChannelId = ChannelId;
 
 export type SessionChatType = ChatType;
 
+/** Immutable route snapshot used only to resume a completed isolated cron run. */
+export type CronRunContinuationPolicy = {
+  provider: string;
+  model: string;
+  thinking?: string;
+  fastMode?: FastMode;
+  fallbacks: string[];
+};
+
 export type SessionOrigin = {
   label?: string;
   provider?: string;
@@ -333,6 +342,8 @@ export type SessionEntry = {
   chatType?: SessionChatType;
   thinkingLevel?: string;
   fastMode?: FastMode;
+  /** Original execution policy for late internal completion controllers. */
+  cronRunContinuationPolicy?: CronRunContinuationPolicy;
   verboseLevel?: string;
   traceLevel?: string;
   reasoningLevel?: string;

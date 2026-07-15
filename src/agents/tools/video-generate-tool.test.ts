@@ -603,6 +603,10 @@ describe("createVideoGenerateTool", () => {
   });
 
   it("generates videos, saves them, and emits MEDIA paths without a session-backed detach", async () => {
+    const authProfileStore: AuthProfileStore = {
+      version: 1,
+      profiles: { request: { type: "api_key", provider: "google", key: "test-request-key" } },
+    };
     taskExecutorMocks.createRunningTaskRun.mockReturnValue({
       taskId: "task-123",
       runtime: "cli",
@@ -638,6 +642,7 @@ describe("createVideoGenerateTool", () => {
     });
 
     const tool = createVideoGenerateTool({
+      authProfileStore,
       config: asConfig({
         agents: {
           defaults: {
@@ -684,6 +689,9 @@ describe("createVideoGenerateTool", () => {
     expect(details.metadata).toEqual({ taskId: "task-1" });
     expect(taskExecutorMocks.createRunningTaskRun).not.toHaveBeenCalled();
     expect(taskExecutorMocks.completeTaskRunByRunId).not.toHaveBeenCalled();
+    expect(vi.mocked(videoGenerationRuntime.generateVideo).mock.calls.at(-1)?.[0]?.authStore).toBe(
+      authProfileStore,
+    );
   });
 
   it("uses configured timeoutMs for video generation and lets calls override it", async () => {
@@ -869,6 +877,10 @@ describe("createVideoGenerateTool", () => {
   });
 
   it("starts background generation and wakes the session with url-only MEDIA lines", async () => {
+    const authProfileStore: AuthProfileStore = {
+      version: 1,
+      profiles: { request: { type: "api_key", provider: "google", key: "test-request-key" } },
+    };
     taskExecutorMocks.createRunningTaskRun.mockReturnValue({
       taskId: "task-123",
       runtime: "cli",
@@ -903,6 +915,7 @@ describe("createVideoGenerateTool", () => {
     let scheduledWork: (() => Promise<void>) | undefined;
     const onAsyncTaskStarted = vi.fn();
     const tool = createVideoGenerateTool({
+      authProfileStore,
       config: asConfig({
         agents: {
           defaults: {
@@ -971,6 +984,9 @@ describe("createVideoGenerateTool", () => {
     ]);
     expect(wake.result).toContain('mediaUrl="https://example.com/generated-lobster.mp4"');
     expect(wake.result).not.toContain("MEDIA:");
+    expect(vi.mocked(videoGenerationRuntime.generateVideo).mock.calls.at(-1)?.[0]?.authStore).toBe(
+      authProfileStore,
+    );
   });
 
   it("surfaces provider generation failures inline when there is no detached session", async () => {

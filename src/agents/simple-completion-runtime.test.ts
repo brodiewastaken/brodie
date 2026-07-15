@@ -764,6 +764,89 @@ describe("completeWithPreparedSimpleCompletionModel", () => {
     },
   );
 
+  it.each([
+    ["muse-spark-1.3-contributor", ["minimal", "low", "medium", "high", "xhigh"], "xhigh"],
+    ["deepseek-v4.1-flash", ["low", "high", "max"], "max"],
+    ["glm-5.3-flash", ["low", "high", "max"], "max"],
+  ] as const)(
+    "forces OpenCode Go %s simple completions to the highest native level",
+    async (modelId, supportedReasoningEfforts, expectedReasoning) => {
+      const model = {
+        provider: "opencode-go",
+        id: modelId,
+        name: modelId,
+        api: modelId.startsWith("muse-") ? "openai-responses" : "openai-completions",
+        baseUrl: "https://opencode.ai/zen/go/v1",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1_000_000,
+        maxTokens: 131_072,
+        compat: {
+          supportsReasoningEffort: true,
+          supportedReasoningEfforts: [...supportedReasoningEfforts],
+        },
+      } satisfies Model;
+
+      await completeWithPreparedSimpleCompletionModel({
+        model,
+        auth: {
+          apiKey: "sk-test",
+          source: "env:OPENCODE_API_KEY",
+          mode: "api-key",
+        },
+        context: {
+          messages: [{ role: "user", content: "pong", timestamp: 1 }],
+        },
+        options: { reasoning: "off" },
+      });
+
+      expect(hoisted.completeMock).toHaveBeenCalledWith(
+        model,
+        {
+          messages: [{ role: "user", content: "pong", timestamp: 1 }],
+        },
+        {
+          reasoning: expectedReasoning,
+          apiKey: "sk-test",
+        },
+      );
+    },
+  );
+
+  it("does not apply advertised non-OpenAI max support outside OpenCode Go", async () => {
+    const model = {
+      provider: "demo",
+      id: "reasoning-model",
+      name: "Reasoning Model",
+      api: "openai-completions",
+      baseUrl: "https://example.com/v1",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 4_096,
+      thinkingLevelMap: { max: "max" },
+      compat: {
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ["max"],
+      },
+    } satisfies Model<"openai-completions">;
+
+    await completeWithPreparedSimpleCompletionModel({
+      model,
+      auth: { apiKey: "sk-test", source: "test", mode: "api-key" },
+      context: { messages: [{ role: "user", content: "pong", timestamp: 1 }] },
+      options: { reasoning: "max" },
+    });
+
+    expect(hoisted.completeMock).toHaveBeenCalledWith(
+      model,
+      { messages: [{ role: "user", content: "pong", timestamp: 1 }] },
+      { reasoning: "xhigh", apiKey: "sk-test" },
+    );
+  });
+
   it("omits reasoning for local simple completion when thinking is off", async () => {
     const model = {
       provider: "openai",

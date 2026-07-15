@@ -3,8 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { retireSessionMcpRuntime } from "../../agents/agent-bundle-mcp-tools.js";
 import { hasAnyAuthProfileStoreSource } from "../../agents/auth-profiles/source-check.js";
+import { isFastModeEnforcedOff } from "../../agents/fast-mode.js";
 import { findModelInCatalog } from "../../agents/model-catalog-lookup.js";
 import type { ModelCatalogEntry } from "../../agents/model-catalog.types.js";
+import { resolveModelCandidateChain } from "../../agents/model-fallback.js";
 import { listOpenAIAuthProfileProvidersForAgentRuntime } from "../../agents/openai-routing.js";
 import { createAgentRunRestartAbortError } from "../../agents/run-termination.js";
 import { expandToolGroups, normalizeToolName } from "../../agents/tool-policy.js";
@@ -76,7 +78,10 @@ import {
 } from "./helpers.js";
 import { resolveCronModelSelection } from "./model-selection.js";
 import { buildCronAgentDefaultsConfig, resolveCronActiveRuntimeConfig } from "./run-config.js";
-import { resolveCronPreflightCandidates } from "./run-fallback-policy.js";
+import {
+  resolveCronFallbacksOverride,
+  resolveCronPreflightCandidates,
+} from "./run-fallback-policy.js";
 import {
   adoptCronRunSessionMetadata,
   CronSessionLifecycleClaimError,
@@ -837,6 +842,36 @@ async function prepareCronRunContext(params: {
   // `timeoutSeconds` happens to numerically equal `agents.defaults.timeoutSeconds`.
   const runTimeoutOverrideMs = resolveCronRunTimeoutOverrideMs(explicitTimeoutSeconds);
   const agentPayload = input.job.payload.kind === "agentTurn" ? input.job.payload : null;
+  const cronFallbacksOverride =
+    modelFallbacksOverride ??
+    resolveCronFallbacksOverride({
+      cfg: cfgWithAgentDefaults,
+      job: input.job,
+      agentId,
+      useSubagentFallbacks,
+      inheritDefaultFallbacksForAgentStringModel,
+    });
+  const continuationCandidates = resolveModelCandidateChain({
+    cfg: cfgWithAgentDefaults,
+    provider,
+    model,
+    fallbacksOverride: cronFallbacksOverride,
+  });
+  const fastModeOverride = isFastModeEnforcedOff(cfgWithAgentDefaults)
+    ? false
+    : agentPayload?.fastMode;
+  // This row becomes visible on the first cron persistence. Create the
+  // continuation policy before that generation is born so later user model
+  // changes always have a persisted policy to retire.
+  cronSession.sessionEntry.cronRunContinuationPolicy = {
+    provider,
+    model,
+    ...(requestedThinkLevel ? { thinking: requestedThinkLevel } : {}),
+    ...(fastModeOverride !== undefined ? { fastMode: fastModeOverride } : {}),
+    fallbacks: continuationCandidates
+      .slice(1)
+      .map((candidate) => `${candidate.provider}/${candidate.model}`),
+  };
   const configuredProvider = cfgWithAgentDefaults.models?.providers?.[provider];
   const modelApi =
     findModelInCatalog(thinkingCatalog, provider, model)?.api ??
@@ -1037,7 +1072,7 @@ async function prepareCronRunContext(params: {
         liveSelection,
         useSubagentFallbacks,
         inheritDefaultFallbacksForAgentStringModel,
-        modelFallbacksOverride,
+        modelFallbacksOverride: cronFallbacksOverride,
         thinkLevel: requestedThinkLevel,
         thinkingCatalog,
         timeoutMs,

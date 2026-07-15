@@ -15,6 +15,7 @@ import {
   SELF_HOSTED_DEFAULT_COST,
   SELF_HOSTED_DEFAULT_MAX_TOKENS,
 } from "../agents/self-hosted-provider-defaults.js";
+import { patchAgentDefaultModelConfig } from "../config/model-input.js";
 import type { ModelDefinitionConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 // Builds setup metadata for self-hosted provider plugins.
@@ -288,10 +289,10 @@ export function applyProviderDefaultModel(cfg: OpenClawConfig, modelRef: string)
       ...cfg.agents,
       defaults: {
         ...cfg.agents?.defaults,
-        model: {
+        model: patchAgentDefaultModelConfig(existingModel, {
           ...(fallbacks ? { fallbacks } : undefined),
           primary: modelRef,
-        },
+        }),
       },
     },
   };

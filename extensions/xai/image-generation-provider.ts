@@ -16,7 +16,24 @@ import { XAI_BASE_URL, XAI_DEFAULT_IMAGE_MODEL, XAI_IMAGE_MODELS } from "./model
 
 const DEFAULT_TIMEOUT_MS = 600_000;
 
-const XAI_SUPPORTED_ASPECT_RATIOS = ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2"] as const;
+const XAI_SUPPORTED_ASPECT_RATIOS = [
+  "auto",
+  "1:1",
+  "16:9",
+  "9:16",
+  "4:3",
+  "3:4",
+  "2:3",
+  "3:2",
+  "2:1",
+  "1:2",
+  "19.5:9",
+  "9:19.5",
+  "20:9",
+  "9:20",
+  "21:9",
+  "5:2",
+] as const;
 
 function resolveImageForEdit(
   input: (ImageGenerationSourceImage & { url?: string }) | undefined,

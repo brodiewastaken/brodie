@@ -172,6 +172,7 @@ export async function generateVideo(
       cfg: params.cfg,
       agentDir: params.agentDir,
       authStore: params.authStore,
+      inputImageRoles: params.inputImages?.map((input) => input.role),
       timeoutMs: MODEL_CAPABILITY_LOOKUP_TIMEOUT_MS,
       log: logger,
     });

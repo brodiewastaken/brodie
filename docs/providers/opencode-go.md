@@ -93,6 +93,17 @@ Bundled rows:
 | `opencode-go/qwen3.7-max`       | Qwen3.7 Max       | 1M        | 65,536     | No          |
 | `opencode-go/qwen3.7-plus`      | Qwen3.7 Plus      | 1M        | 65,536     | Yes         |
 
+## Reasoning
+
+The provider exposes model-specific thinking levels before execution, including levels from
+configured `compat.supportedReasoningEfforts`. Capability ordering does not change their rank,
+and models marked non-reasoning expose only `off`.
+
+In brodie's runtime, every OpenCode Go candidate uses its highest supported level, even when a
+caller requests a lower level. Muse Spark 1.3 Contributor uses `xhigh`; DeepSeek V4.1 Flash and
+GLM 5.3 Flash use `max`. Fallbacks resolve their own level. Fixed or unavailable reasoning
+controls remain fixed or unavailable. See [unified run policy](/concepts/unified-run-policy).
+
 ## Advanced configuration
 
 <AccordionGroup>

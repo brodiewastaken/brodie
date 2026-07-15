@@ -202,6 +202,33 @@ describe("resolveChannelModelOverride", () => {
     expect(resolved?.matchSource).toBe("wildcard");
   });
 
+  it("resolves a channel model with its default thinking level", () => {
+    const resolved = resolveChannelModelOverride({
+      cfg: {
+        channels: {
+          modelByChannel: {
+            slack: {
+              "*": {
+                model: "anthropic/claude-fable-5",
+                thinking: "low",
+              },
+            },
+          },
+        },
+      } as unknown as OpenClawConfig,
+      channel: "slack",
+      groupId: "C12345",
+      groupChatType: "channel",
+    });
+
+    expect(resolved).toMatchObject({
+      model: "anthropic/claude-fable-5",
+      thinking: "low",
+      matchKey: "*",
+      matchSource: "wildcard",
+    });
+  });
+
   it("prefers parent conversation ids over channel-name fallbacks", () => {
     const resolved = resolveChannelModelOverride({
       cfg: {
@@ -284,6 +311,150 @@ describe("resolveChannelModelOverride", () => {
 
     expect(resolved?.model).toBe("demo-provider/demo-slack-dm-model");
     expect(resolved?.matchKey).toBe("user:U12345");
+  });
+
+  it("matches a typed Slack user override from the live origin.from candidate alone", () => {
+    const resolved = resolveChannelModelOverride({
+      cfg: {
+        channels: {
+          modelByChannel: {
+            slack: {
+              "user:U12345": "demo-provider/demo-slack-dm-model",
+              "*": "demo-provider/demo-wildcard-model",
+            },
+          },
+        },
+      } as unknown as OpenClawConfig,
+      channel: "slack",
+      groupChatType: "direct",
+      directUserIds: ["slack:U12345"],
+    });
+
+    expect(resolved?.model).toBe("demo-provider/demo-slack-dm-model");
+    expect(resolved?.matchKey).toBe("user:U12345");
+    expect(resolved?.matchSource).toBe("direct");
+  });
+
+  it("matches a typed Slack user override from a fresh assistant-thread sender", () => {
+    const resolved = resolveChannelModelOverride({
+      cfg: {
+        channels: {
+          modelByChannel: {
+            slack: {
+              "user:U12345": "demo-provider/demo-slack-dm-model",
+              "*": "demo-provider/demo-wildcard-model",
+            },
+          },
+        },
+      } as unknown as OpenClawConfig,
+      channel: "slack",
+      groupId: "D12345",
+      groupChatType: "direct",
+      directUserIds: ["U12345", "channel:D12345"],
+    });
+
+    expect(resolved?.model).toBe("demo-provider/demo-slack-dm-model");
+    expect(resolved?.matchKey).toBe("user:U12345");
+    expect(resolved?.matchSource).toBe("direct");
+  });
+
+  it("does not reinterpret raw direct-user IDs as typed Slack users on other channels", () => {
+    const resolved = resolveChannelModelOverride({
+      cfg: {
+        channels: {
+          modelByChannel: {
+            telegram: {
+              "user:12345": "demo-provider/demo-typed-model",
+              "*": "demo-provider/demo-wildcard-model",
+            },
+          },
+        },
+      } as unknown as OpenClawConfig,
+      channel: "telegram",
+      groupChatType: "direct",
+      directUserIds: ["12345"],
+    });
+
+    expect(resolved?.model).toBe("demo-provider/demo-wildcard-model");
+    expect(resolved?.matchKey).toBe("*");
+    expect(resolved?.matchSource).toBe("wildcard");
+  });
+
+  it.each([
+    {
+      name: "keeps the designated Slack channel on Fable",
+      groupId: "C0BBZBFMZ3Q",
+      groupChatType: "channel",
+      directUserIds: undefined,
+      expectedModel: "anthropic/claude-fable-5",
+      expectedMatchKey: "C0BBZBFMZ3Q",
+      expectedMatchSource: "direct",
+    },
+    {
+      name: "keeps the owner Slack DM on Fable",
+      groupId: "D0BBLPKUNHK",
+      groupChatType: "direct",
+      directUserIds: ["slack:U0BBN3R2JTY", "user:U0BBN3R2JTY"],
+      expectedModel: "anthropic/claude-fable-5",
+      expectedMatchKey: "user:U0BBN3R2JTY",
+      expectedMatchSource: "direct",
+    },
+    {
+      name: "routes every other Slack channel to Sol",
+      groupId: "C0OTHER",
+      groupChatType: "channel",
+      directUserIds: undefined,
+      expectedModel: "openai/gpt-5.6-sol",
+      expectedMatchKey: "*",
+      expectedMatchSource: "wildcard",
+    },
+    {
+      name: "routes every other Slack DM to Sol",
+      groupId: "D0OTHER",
+      groupChatType: "direct",
+      directUserIds: ["user:U0OTHER"],
+      expectedModel: "openai/gpt-5.6-sol",
+      expectedMatchKey: "*",
+      expectedMatchSource: "wildcard",
+    },
+  ] as const)("$name", (testCase) => {
+    const resolved = resolveChannelModelOverride({
+      cfg: {
+        channels: {
+          modelByChannel: {
+            slack: {
+              C0BBZBFMZ3Q: {
+                model: "anthropic/claude-fable-5",
+                thinking: "high",
+                fastMode: false,
+              },
+              "user:U0BBN3R2JTY": {
+                model: "anthropic/claude-fable-5",
+                thinking: "high",
+                fastMode: false,
+              },
+              "*": {
+                model: "openai/gpt-5.6-sol",
+                thinking: "high",
+                fastMode: false,
+              },
+            },
+          },
+        },
+      } as unknown as OpenClawConfig,
+      channel: "slack",
+      groupId: testCase.groupId,
+      groupChatType: testCase.groupChatType,
+      directUserIds: testCase.directUserIds,
+    });
+
+    expect(resolved).toMatchObject({
+      model: testCase.expectedModel,
+      thinking: "high",
+      fastMode: false,
+      matchKey: testCase.expectedMatchKey,
+      matchSource: testCase.expectedMatchSource,
+    });
   });
 
   it("ignores directUserId when a groupId is present (group takes precedence)", () => {

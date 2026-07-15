@@ -298,4 +298,41 @@ describe("hasGenerationToolAvailability", () => {
       }),
     ).toBe(true);
   });
+
+  it("passes request auth context to provider-specific readiness hooks", () => {
+    const cfg: OpenClawConfig = {};
+    const authStore = {
+      version: 1 as const,
+      profiles: {
+        "xai:default": {
+          provider: "xai",
+          type: "oauth" as const,
+          access: "test-access",
+          refresh: "test-refresh",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+    const isConfigured = vi.fn(
+      (ctx: { authStore?: typeof authStore }) => ctx.authStore === authStore,
+    );
+    const provider = { id: "xai", defaultModel: "grok-imagine-video", isConfigured };
+
+    expect(
+      isCapabilityProviderConfigured({
+        providers: [provider],
+        provider,
+        cfg,
+        workspaceDir: "/tmp/workspace",
+        agentDir: "/tmp/agent",
+        authStore,
+      }),
+    ).toBe(true);
+    expect(isConfigured).toHaveBeenCalledWith({
+      cfg,
+      workspaceDir: "/tmp/workspace",
+      agentDir: "/tmp/agent",
+      authStore,
+    });
+  });
 });

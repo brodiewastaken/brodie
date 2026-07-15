@@ -7,6 +7,7 @@ import {
   shouldCreateBundleLspRuntimeForAttempt,
   shouldCreateBundleMcpRuntimeForAttempt,
 } from "./attempt-tool-construction-plan.js";
+import { mergeHistoricalReplayToolNames } from "./attempt.tool-search-run-plan.js";
 
 type EmbeddedAttemptToolConstructionPlan = ReturnType<
   typeof resolveEmbeddedAttemptToolConstructionPlan
@@ -81,6 +82,40 @@ describe("applyEmbeddedAttemptToolsAllow", () => {
     expect(
       applyEmbeddedAttemptToolsAllow(tools, [" cron ", "READ"]).map((tool) => tool.name),
     ).toEqual(["cron", "read"]);
+  });
+
+  it("filters an attempted finalization down to the bound message tool", () => {
+    const tools = [
+      { name: "exec" },
+      { name: "read" },
+      { name: "write" },
+      { name: "web_search" },
+      { name: "message" },
+    ];
+    const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow([], { forceMessageTool: true });
+
+    expect(toolsAllow).toEqual(["message"]);
+    expect(applyEmbeddedAttemptToolsAllow(tools, toolsAllow)).toEqual([{ name: "message" }]);
+    expectConstructionPlan(resolveEmbeddedAttemptToolConstructionPlan({ toolsAllow }), {
+      constructTools: true,
+      includeCoreTools: true,
+      runtimeToolAllowlist: ["message"],
+      coding: {
+        includeBaseCodingTools: false,
+        includeShellTools: false,
+        includeOpenClawTools: true,
+        includePluginTools: false,
+      },
+    });
+  });
+
+  it("preserves completed write history without widening the finalizer tool surface", () => {
+    const tools = [{ name: "write" }, { name: "message" }];
+    const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow([], { forceMessageTool: true });
+    const historicalReplayToolNames = mergeHistoricalReplayToolNames(toolsAllow, ["write"]);
+
+    expect([...historicalReplayToolNames]).toEqual(["message", "write"]);
+    expect(applyEmbeddedAttemptToolsAllow(tools, toolsAllow)).toEqual([{ name: "message" }]);
   });
 
   it("honors wildcard and group allowlists in the final filter", () => {

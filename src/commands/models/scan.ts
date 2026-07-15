@@ -11,7 +11,7 @@ import { type ModelScanResult, scanOpenRouterModels } from "../../agents/model-s
 import { formatCliCommand } from "../../cli/command-format.js";
 import { withProgressTotals } from "../../cli/progress.js";
 import { logConfigUpdated } from "../../config/logging.js";
-import { toAgentModelListLike } from "../../config/model-input.js";
+import { patchAgentDefaultModelConfig, toAgentModelListLike } from "../../config/model-input.js";
 import {
   parseStrictFiniteNumber,
   parseStrictPositiveInteger,
@@ -384,11 +384,11 @@ export async function modelsScanCommand(
     const existingModel = toAgentModelListLike(cfg.agents?.defaults?.model);
     const defaults = {
       ...cfg.agents?.defaults,
-      model: {
+      model: patchAgentDefaultModelConfig(cfg.agents?.defaults?.model, {
         ...(existingModel?.primary ? { primary: existingModel.primary } : undefined),
         fallbacks: selected,
         ...(opts.setDefault ? { primary: selected[0] } : {}),
-      },
+      }),
       ...(nextImageModel ? { imageModel: nextImageModel } : {}),
       models: nextModels,
     } satisfies NonNullable<NonNullable<typeof cfg.agents>["defaults"]>;

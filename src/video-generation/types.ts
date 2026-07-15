@@ -56,7 +56,9 @@ export type VideoGenerationSourceAsset = {
 
 export type VideoGenerationProviderConfiguredContext = {
   cfg?: OpenClawConfig;
+  workspaceDir?: string;
   agentDir?: string;
+  authStore?: AuthProfileStore;
 };
 
 export type VideoGenerationRequest = {
@@ -88,6 +90,7 @@ export type VideoGenerationModelCapabilitiesContext = {
   cfg: OpenClawConfig;
   agentDir?: string;
   authStore?: AuthProfileStore;
+  inputImageRoles?: readonly VideoGenerationSourceAsset["role"][];
   timeoutMs?: number;
 };
 

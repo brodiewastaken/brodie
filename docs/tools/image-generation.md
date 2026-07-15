@@ -116,6 +116,10 @@ Use `action: "list"` to inspect available providers and models at runtime:
 /tool image_generate action=list
 ```
 
+The model list combines provider-advertised models with configured image-generation
+primary and fallback models. Added overrides are marked `source: "configured"`;
+provider readiness uses the same request auth store as generation.
+
 Use `action: "status"` to inspect the active image-generation task for the
 current session:
 

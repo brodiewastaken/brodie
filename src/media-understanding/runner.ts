@@ -721,12 +721,6 @@ function resolveImageModelFromAgentDefaults(params: {
   return entries;
 }
 
-function hasExplicitImageUnderstandingConfig(params: {
-  config?: MediaUnderstandingConfig;
-}): boolean {
-  return (params.config?.models?.length ?? 0) > 0;
-}
-
 function isMinimaxNativeVisionModel(params: { provider: string; model?: string }): boolean {
   // MiniMax M2.x catalog rows may advertise image input but still need the
   // MiniMax-VL-01 media-understanding path; only M3/M3.x is native vision here.
@@ -1080,13 +1074,7 @@ export async function runCapability(params: {
   // Skip image understanding when the primary model supports vision natively.
   // The image will be injected directly into the model context instead.
   const activeProvider = params.activeModel?.provider?.trim();
-  if (
-    capability === "image" &&
-    activeProvider &&
-    !hasExplicitImageUnderstandingConfig({
-      config,
-    })
-  ) {
+  if (capability === "image" && activeProvider) {
     if (await activeModelSupportsNativeVision({ cfg, activeModel: params.activeModel })) {
       if (shouldLogVerbose()) {
         logVerbose("Skipping image understanding: primary model supports vision natively");

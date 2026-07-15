@@ -54,6 +54,23 @@ describe("google thinking policy", () => {
   });
 
   it.each([
+    ["off", "LOW"],
+    ["minimal", "LOW"],
+    ["low", "LOW"],
+    ["medium", "MEDIUM"],
+    ["adaptive", undefined],
+    ["high", "HIGH"],
+    ["xhigh", "HIGH"],
+  ] as const)("maps Gemini 3.8 Flash thinking level %s to %s", (thinkingLevel, expected) => {
+    expect(
+      resolveGoogleGemini3ThinkingLevel({
+        modelId: "gemini-3.8-flash",
+        thinkingLevel,
+      }),
+    ).toBe(expected);
+  });
+
+  it.each([
     [-1, undefined],
     [0, "MINIMAL"],
     [2048, "LOW"],

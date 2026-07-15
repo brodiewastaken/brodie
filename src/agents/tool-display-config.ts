@@ -576,6 +576,11 @@ export const TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
       title: "Image",
       detailKeys: ["path", "paths", "url", "urls", "prompt", "model"],
     },
+    video: {
+      emoji: "🎞️",
+      title: "Video",
+      detailKeys: ["path", "paths", "url", "urls", "prompt", "model"],
+    },
     image_generate: {
       emoji: "🎨",
       title: "Image Generation",

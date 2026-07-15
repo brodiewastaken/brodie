@@ -27,6 +27,7 @@ export function buildEmbeddedSystemPrompt(params: {
   reasoningLevel?: ReasoningLevel;
   extraSystemPrompt?: string;
   ownerNumbers?: string[];
+  senderIsOwner?: boolean;
   ownerDisplay?: "raw" | "hash";
   ownerDisplaySecret?: string;
   reasoningTagHint: boolean;
@@ -99,6 +100,7 @@ export function buildEmbeddedSystemPrompt(params: {
     reasoningLevel: params.reasoningLevel,
     extraSystemPrompt: params.extraSystemPrompt,
     ownerNumbers: params.ownerNumbers,
+    senderIsOwner: params.senderIsOwner,
     ownerDisplay: params.ownerDisplay,
     ownerDisplaySecret: params.ownerDisplaySecret,
     reasoningTagHint: params.reasoningTagHint,

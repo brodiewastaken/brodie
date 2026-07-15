@@ -31,6 +31,7 @@ describe("buildEmbeddedSystemPrompt", () => {
   it("forwards provider prompt contributions into the embedded prompt", () => {
     const prompt = buildEmbeddedSystemPrompt({
       workspaceDir: "/tmp/openclaw",
+      senderIsOwner: true,
       reasoningTagHint: false,
       runtimeInfo: {
         host: "local",
@@ -48,6 +49,7 @@ describe("buildEmbeddedSystemPrompt", () => {
       },
     });
 
+    expect(prompt).toContain("The runtime verified the current sender as the authenticated owner.");
     expect(prompt).toContain("## Embedded Stable\n\nStable provider guidance.");
   });
 

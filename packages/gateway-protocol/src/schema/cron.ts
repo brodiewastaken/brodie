@@ -24,6 +24,7 @@ function cronAgentTurnPayloadSchema(params: {
       model: Type.Optional(params.model),
       fallbacks: Type.Optional(params.fallbacks),
       thinking: Type.Optional(params.thinking),
+      fastMode: Type.Optional(Type.Boolean()),
       timeoutSeconds: Type.Optional(Type.Number({ minimum: 0 })),
       allowUnsafeExternalContent: Type.Optional(Type.Boolean()),
       lightContext: Type.Optional(Type.Boolean()),

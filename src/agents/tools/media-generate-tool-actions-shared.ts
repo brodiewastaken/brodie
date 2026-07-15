@@ -1,3 +1,5 @@
+import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
+import { findCapabilityProviderById } from "../../../packages/media-generation-core/src/capability-model-ref.js";
 /**
  * Shared media generation list/status actions.
  *
@@ -8,10 +10,12 @@ import {
   synthesizeMediaGenerationCatalogEntries,
   type MediaGenerationCatalogKind,
 } from "../../../packages/media-generation-core/src/catalog.js";
+import { parseGenerationModelRef } from "../../../packages/media-generation-core/src/model-ref.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { getProviderEnvVars } from "../../secrets/provider-env-vars.js";
 import type { AuthProfileStore } from "../auth-profiles/types.js";
 import { isCapabilityProviderConfigured } from "./media-tool-shared.js";
+import { coerceToolModelConfig } from "./model-config.helpers.js";
 
 type MediaGenerateActionResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -41,6 +45,24 @@ type MediaGenerateListProviderDetails<TProvider extends MediaGenerateProvider> =
   catalog: ReturnType<typeof synthesizeMediaGenerationCatalogEntries<TProvider["capabilities"]>>;
 };
 
+function parseConfiguredMediaModelRefs(
+  kind: MediaGenerationCatalogKind,
+  cfg: OpenClawConfig | undefined,
+) {
+  const defaults = cfg?.agents?.defaults;
+  const configured =
+    kind === "image_generation"
+      ? defaults?.imageGenerationModel
+      : kind === "video_generation"
+        ? defaults?.videoGenerationModel
+        : defaults?.musicGenerationModel;
+  const modelConfig = coerceToolModelConfig(configured);
+  return [modelConfig.primary, ...(modelConfig.fallbacks ?? [])].flatMap((ref) => {
+    const parsed = ref ? parseGenerationModelRef(ref) : null;
+    return parsed ? [parsed] : [];
+  });
+}
+
 /** Common tool result shape for media generation list/status actions. */
 export type { MediaGenerateActionResult };
 
@@ -66,10 +88,42 @@ export function createMediaGenerateProviderListActionResult<
     };
   }
 
+  const configuredRefs = parseConfiguredMediaModelRefs(params.kind, params.cfg);
   const providerDetails: Array<MediaGenerateListProviderDetails<TProvider>> = params.providers.map(
     (provider) => {
       const modes = params.listModes(provider);
-      const models = listMediaGenerationProviderModels(provider);
+      const staticModels = listMediaGenerationProviderModels(provider);
+      const configuredModels = configuredRefs
+        .filter(
+          (ref) =>
+            findCapabilityProviderById({
+              providers: params.providers,
+              providerId: ref.provider,
+              normalizeProviderId,
+            }) === provider,
+        )
+        .map((ref) => ref.model)
+        .filter((model, index, models) => models.indexOf(model) === index);
+      const models = [
+        ...staticModels,
+        ...configuredModels.filter((model) => !staticModels.includes(model)),
+      ];
+      const staticCatalog = synthesizeMediaGenerationCatalogEntries({
+        kind: params.kind,
+        provider,
+        modes,
+      });
+      const configuredCatalog: typeof staticCatalog = configuredModels
+        .filter((model) => !staticModels.includes(model))
+        .map((model) => ({
+          kind: params.kind,
+          provider: provider.id,
+          model,
+          source: "configured",
+          configured: true,
+          capabilities: provider.capabilities,
+          modes,
+        }));
       return {
         id: provider.id,
         ...(provider.label ? { label: provider.label } : {}),
@@ -87,11 +141,7 @@ export function createMediaGenerateProviderListActionResult<
         authEnvVars: getProviderEnvVars(provider.id),
         capabilities: provider.capabilities,
         // Catalog entries are generated for model browser/search without invoking provider code.
-        catalog: synthesizeMediaGenerationCatalogEntries({
-          kind: params.kind,
-          provider,
-          modes,
-        }),
+        catalog: [...staticCatalog, ...configuredCatalog],
       };
     },
   );
@@ -109,7 +159,7 @@ export function createMediaGenerateProviderListActionResult<
       `  models: ${modelLine}`,
       `  configured: ${details.configured ? "yes" : "no"}`,
       ...(authHint ? [`  auth: ${authHint}`] : []),
-      "  source: static",
+      `  source: ${details.catalog.some((entry) => entry.source === "configured") ? "static + configured" : "static"}`,
       ...(capabilities ? [`  capabilities: ${capabilities}`] : []),
     ];
   });

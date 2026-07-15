@@ -2334,6 +2334,23 @@ describe("handleDirectiveOnly model persist behavior (fixes #1435)", () => {
     expect(sessionEntry.fastMode).toBeUndefined();
   });
 
+  it("rejects Fast-on directives without persisting them when Fast is locked off", async () => {
+    const sessionEntry = createSessionEntry({ fastMode: false });
+    const sessionStore = { [sessionKey]: sessionEntry };
+
+    const reply = await handleDirectiveOnly(
+      createHandleParams({
+        cfg: { agents: { defaults: { fastModeEnforcedOff: true } } } as OpenClawConfig,
+        directives: parseInlineDirectives("/fast on"),
+        sessionEntry,
+        sessionStore,
+      }),
+    );
+
+    expect(reply?.text).toContain("Fast mode is permanently disabled");
+    expect(sessionEntry.fastMode).toBe(false);
+  });
+
   it("persists and reports elevated-mode directives when allowed", async () => {
     const sessionEntry = createSessionEntry();
     const sessionStore = { [sessionKey]: sessionEntry };

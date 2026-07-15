@@ -2306,7 +2306,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         expect(second.promptToolNamesHash).toBe(first.promptToolNamesHash);
         if (expectedStrongPrompt) {
           expect(first.systemPrompt).toContain(
-            "use `message(action=send)` for visible source-channel output",
+            "Visible source-channel output goes through the `message` tool: `reply` answers the current conversation, `send` is only for a deliberate different route.",
           );
         } else {
           expect(first.systemPrompt).toContain("final text normally routes to the source channel");
@@ -2412,7 +2412,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
     }
   });
 
-  it("reuses CLI session bindings across owner sender flips with stable prompt tool scope", async () => {
+  it("refreshes CLI session prompts across owner sender flips without changing tool scope", async () => {
     const { dir, sessionFile } = createSessionFile();
     try {
       const getActiveMcpLoopbackRuntime = vi.fn(() => ({
@@ -2512,8 +2512,76 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         },
         config: createCliBackendConfig({ bundleMcp: true }),
       });
+      const forced = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionKey: "agent:main:telegram:group:chat123",
+        sessionFile,
+        workspaceDir: dir,
+        prompt: "forced follow-up ask",
+        provider: "native-cli",
+        model: "test-model",
+        timeoutMs: 1_000,
+        runId: "run-test-owner-tool-scope-forced",
+        extraSystemPrompt: "volatile non-owner forced turn",
+        currentMessageId: "non-owner-forced-message",
+        senderIsOwner: false,
+        cliSessionBindingFacts,
+        cliSessionBinding: {
+          sessionId: "cli-session",
+          forceReuse: true,
+          extraSystemPromptHash: first.extraSystemPromptHash,
+          messageToolPolicyHash: first.messageToolPolicyHash,
+          promptToolNamesHash: first.promptToolNamesHash,
+          cwdHash: hashCliSessionText(dir),
+          mcpConfigHash: first.preparedBackend.mcpConfigHash,
+          mcpResumeHash: first.preparedBackend.mcpResumeHash,
+        },
+        config: createCliBackendConfig({ bundleMcp: true }),
+      });
+      const restoredOwner = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionKey: "agent:main:telegram:group:chat123",
+        sessionFile,
+        workspaceDir: dir,
+        prompt: "owner follow-up ask",
+        provider: "native-cli",
+        model: "test-model",
+        timeoutMs: 1_000,
+        runId: "run-test-owner-tool-scope-restored",
+        extraSystemPrompt: "volatile restored owner turn",
+        currentMessageId: "restored-owner-message",
+        senderIsOwner: true,
+        cliSessionBindingFacts,
+        cliSessionBinding: {
+          sessionId: "cli-session",
+          extraSystemPromptHash: second.extraSystemPromptHash,
+          messageToolPolicyHash: second.messageToolPolicyHash,
+          promptToolNamesHash: second.promptToolNamesHash,
+          cwdHash: hashCliSessionText(dir),
+          mcpConfigHash: second.preparedBackend.mcpConfigHash,
+          mcpResumeHash: second.preparedBackend.mcpResumeHash,
+        },
+        config: createCliBackendConfig({ bundleMcp: true }),
+      });
+      const unbound = await prepareCliRunContext({
+        sessionId: "session-test",
+        sessionKey: "agent:main:telegram:group:chat123",
+        sessionFile,
+        workspaceDir: dir,
+        prompt: "unbound follow-up ask",
+        provider: "native-cli",
+        model: "test-model",
+        timeoutMs: 1_000,
+        runId: "run-test-owner-tool-scope-unbound",
+        extraSystemPrompt: "volatile unbound non-owner turn",
+        currentMessageId: "unbound-non-owner-message",
+        senderIsOwner: false,
+        cliSessionBindingFacts,
+        cliSessionId: "legacy-cli-session",
+        config: createCliBackendConfig({ bundleMcp: true }),
+      });
 
-      expect(resolveMcpLoopbackScopedTools).toHaveBeenCalledTimes(2);
+      expect(resolveMcpLoopbackScopedTools).toHaveBeenCalledTimes(5);
       expect(resolveMcpLoopbackScopedTools).toHaveBeenNthCalledWith(
         1,
         expect.objectContaining({
@@ -2530,8 +2598,54 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
           sourceReplyDeliveryMode: "message_tool_only",
         }),
       );
+      expect(resolveMcpLoopbackScopedTools).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({
+          senderIsOwner: undefined,
+          currentMessageId: undefined,
+          sourceReplyDeliveryMode: "message_tool_only",
+        }),
+      );
+      expect(resolveMcpLoopbackScopedTools).toHaveBeenNthCalledWith(
+        4,
+        expect.objectContaining({
+          senderIsOwner: undefined,
+          currentMessageId: undefined,
+          sourceReplyDeliveryMode: "message_tool_only",
+        }),
+      );
+      expect(resolveMcpLoopbackScopedTools).toHaveBeenNthCalledWith(
+        5,
+        expect.objectContaining({
+          senderIsOwner: undefined,
+          currentMessageId: undefined,
+          sourceReplyDeliveryMode: "message_tool_only",
+        }),
+      );
+      expect(second.extraSystemPromptHash).not.toBe(first.extraSystemPromptHash);
+      expect(forced.extraSystemPromptHash).toBe(second.extraSystemPromptHash);
+      expect(restoredOwner.extraSystemPromptHash).toBe(first.extraSystemPromptHash);
       expect(second.promptToolNamesHash).toBe(first.promptToolNamesHash);
-      expect(second.reusableCliSession).toEqual({ mode: "reuse", sessionId: "cli-session" });
+      expect(forced.promptToolNamesHash).toBe(first.promptToolNamesHash);
+      expect(restoredOwner.promptToolNamesHash).toBe(first.promptToolNamesHash);
+      expect(second.systemPrompt).toContain("does not establish owner authority for this turn");
+      expect(forced.systemPrompt).toContain("does not establish owner authority for this turn");
+      expect(unbound.systemPrompt).toContain("does not establish owner authority for this turn");
+      expect(restoredOwner.systemPrompt).toContain(
+        "The runtime verified the current sender as the authenticated owner.",
+      );
+      expect(second.reusableCliSession).toEqual({
+        mode: "reuse-with-drift",
+        sessionId: "cli-session",
+        drift: { reasons: ["system-prompt"] },
+      });
+      expect(forced.reusableCliSession).toEqual(second.reusableCliSession);
+      expect(restoredOwner.reusableCliSession).toEqual(second.reusableCliSession);
+      expect(unbound.reusableCliSession).toEqual({
+        mode: "reuse-with-drift",
+        sessionId: "legacy-cli-session",
+        drift: { reasons: ["system-prompt"] },
+      });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -2990,7 +3104,10 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
         }),
       );
       expect(context.systemPrompt).toContain(
-        "include `target` and `message`; `target` is required for this turn",
+        "Reply in current session → use `message(action=reply)` for visible output",
+      );
+      expect(context.systemPrompt).toContain(
+        "Use `action=send` with explicit `channel` and `target` only for a deliberate different route.",
       );
       expect(context.systemPrompt).not.toContain(
         "The target defaults to the current source channel",

@@ -92,6 +92,7 @@ type SubagentAnnounceDeliveryDeps = {
     isActive: boolean;
   };
   getSubagentRunByChildSessionKey: typeof getSubagentRunByChildSessionKey;
+  loadRequesterSessionEntry: typeof loadRequesterSessionEntryFromStore;
   isRequesterSessionAbandoned: (requesterSessionKey: string, sessionId?: string) => boolean;
   queueEmbeddedAgentMessageWithOutcome: (
     sessionId: string,
@@ -114,6 +115,7 @@ const defaultSubagentAnnounceDeliveryDeps: SubagentAnnounceDeliveryDeps = {
     };
   },
   getSubagentRunByChildSessionKey,
+  loadRequesterSessionEntry: loadRequesterSessionEntryFromStore,
   isRequesterSessionAbandoned: (requesterSessionKey, sessionId) =>
     isEmbeddedRunAbandoned({ sessionKey: requesterSessionKey, sessionId }),
   queueEmbeddedAgentMessageWithOutcome: queueEmbeddedAgentMessageWithOutcomeAsync,
@@ -182,6 +184,7 @@ async function runAnnounceAgentCall(params: {
   agentParams: Record<string, unknown>;
   expectFinal?: boolean;
   timeoutMs?: number;
+  allowModelOverride?: boolean;
 }): Promise<unknown> {
   return await subagentAnnounceDeliveryDeps.dispatchGatewayMethodInProcess(
     "agent",
@@ -191,6 +194,7 @@ async function runAnnounceAgentCall(params: {
       forceSyntheticClient: shouldPreserveUserFacingSessionStateForInputProvenance(
         params.agentParams.inputProvenance,
       ),
+      ...(params.allowModelOverride ? { allowSyntheticModelOverride: true } : {}),
       timeoutMs: params.timeoutMs,
     },
   );
@@ -698,7 +702,7 @@ export async function resolveSubagentCompletionOrigin(params: {
   }
 }
 
-export function loadRequesterSessionEntry(requesterSessionKey: string) {
+function loadRequesterSessionEntryFromStore(requesterSessionKey: string) {
   const cfg = subagentAnnounceDeliveryDeps.getRuntimeConfig();
   const canonicalKey = resolveRequesterStoreKey(cfg, requesterSessionKey);
   const agentId = resolveAgentIdFromSessionKey(canonicalKey);
@@ -706,6 +710,10 @@ export function loadRequesterSessionEntry(requesterSessionKey: string) {
   const store = loadSessionStore(storePath);
   const entry = store[canonicalKey];
   return { cfg, entry, canonicalKey };
+}
+
+export function loadRequesterSessionEntry(requesterSessionKey: string) {
+  return subagentAnnounceDeliveryDeps.loadRequesterSessionEntry(requesterSessionKey);
 }
 
 export function loadSessionEntryByKey(sessionKey: string) {
@@ -1514,9 +1522,27 @@ async function sendSubagentAnnounceDirectly(params: {
       : sessionOnlyOriginChannel
         ? stringifyRouteThreadId(sessionOnlyOrigin?.threadId)
         : undefined;
+    // The active wake above can outlive the requester run or apply a deliberate
+    // model switch. Re-read the entry before starting a replacement controller.
+    // Reaching this handoff already means active steering was unavailable or
+    // failed, so an activity snapshot cannot safely govern the replacement's
+    // execution policy.
+    const directRequesterEntry = loadRequesterSessionEntry(canonicalRequesterSessionKey).entry;
+    const cronRunContinuationPolicy =
+      isSubagentCompletion &&
+      params.expectsCompletionMessage &&
+      isCronRunSessionKey(canonicalRequesterSessionKey)
+        ? directRequesterEntry?.cronRunContinuationPolicy
+        : undefined;
     const directAgentParams: Record<string, unknown> = {
       sessionKey: canonicalRequesterSessionKey,
       message: params.triggerMessage,
+      ...(cronRunContinuationPolicy
+        ? {
+            provider: cronRunContinuationPolicy.provider,
+            model: cronRunContinuationPolicy.model,
+          }
+        : {}),
       deliver: shouldDeliverAgentFinal,
       bestEffortDeliver: params.bestEffortDeliver,
       internalEvents: params.internalEvents,
@@ -1559,6 +1585,7 @@ async function sendSubagentAnnounceDirectly(params: {
         run: async () =>
           await runAnnounceAgentCall({
             agentParams: directAgentParams,
+            allowModelOverride: cronRunContinuationPolicy !== undefined,
             // Subagent completion ownership transfers to the scheduler as soon
             // as the gateway returns the accepted controller run id. Waiting
             // here would turn a healthy long-running controller into a timeout

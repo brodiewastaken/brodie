@@ -43,6 +43,7 @@ function normalizeModelSelectionForTest(value: unknown): string | undefined {
 
 export const buildWorkspaceSkillSnapshotMock = createMock();
 export const resolveAgentConfigMock = createMock();
+export const resolveAgentDirMock = createMock();
 export const resolveEffectiveModelFallbacksMock = createMock();
 export const resolveSubagentModelFallbacksOverrideMock = createMock();
 export const resolveAgentModelFallbacksOverrideMock = createMock();
@@ -116,7 +117,7 @@ const getRemoteSkillEligibilityMock = createMock();
 
 vi.mock("./run.runtime.js", async () => ({
   resolveAgentConfig: resolveAgentConfigMock,
-  resolveAgentDir: vi.fn().mockReturnValue("/tmp/agent-dir"),
+  resolveAgentDir: resolveAgentDirMock,
   resolveAgentModelFallbacksOverride: resolveAgentModelFallbacksOverrideMock,
   resolveAgentWorkspaceDir: vi.fn().mockReturnValue("/tmp/workspace"),
   resolveDefaultAgentId: vi.fn().mockReturnValue("default"),
@@ -446,6 +447,7 @@ function resetRunConfigMocks(): void {
     version: 42,
   });
   resolveAgentConfigMock.mockReturnValue(undefined);
+  resolveAgentDirMock.mockReturnValue("/tmp/agent-dir");
   resolveEffectiveModelFallbacksMock.mockReset();
   resolveEffectiveModelFallbacksMock.mockImplementation(
     ({ cfg, agentId, hasSessionModelOverride, modelOverrideSource }) => {

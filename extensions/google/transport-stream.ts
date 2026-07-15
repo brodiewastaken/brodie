@@ -42,9 +42,11 @@ import { stripGoogleProviderPrefix } from "./model-id.js";
 import { normalizeGoogleApiBaseUrl } from "./provider-policy.js";
 import {
   isGoogleGemini25ThinkingBudgetModel,
+  isGoogleGemini38FlashModel,
   isGoogleGemini3FlashModel,
   isGoogleGemini3ProModel,
   resolveGoogleGemini3ThinkingLevel,
+  sanitizeGoogleThinkingPayload,
   stripInvalidGoogleThinkingBudget,
   type GoogleThinkingInputLevel,
   type GoogleThinkingLevel,
@@ -740,6 +742,9 @@ export function buildGoogleGenerativeAiParams(
   if (thinkingConfig) {
     generationConfig.thinkingConfig = thinkingConfig;
   }
+  if (isGoogleGemini38FlashModel(model.id)) {
+    sanitizeGoogleThinkingPayload({ payload: { generationConfig }, modelId: model.id });
+  }
 
   const params: GoogleGenerateContentRequest = {
     contents: convertGoogleMessages(model, context),
@@ -910,7 +915,7 @@ function resolveGoogleGemini3RetryThinkingLevel(modelId: string): GoogleThinking
     return "LOW";
   }
   if (isGoogleGemini3FlashModel(modelId)) {
-    return "MINIMAL";
+    return resolveGoogleGemini3ThinkingLevel({ modelId, thinkingLevel: "minimal" });
   }
   return undefined;
 }
@@ -948,6 +953,9 @@ export function buildGoogleGemini3FirstResponseRetryParams(params: {
   delete thinkingConfig.includeThoughts;
   thinkingConfig.thinkingLevel = thinkingLevel;
   generationConfig.thinkingConfig = thinkingConfig;
+  if (isGoogleGemini38FlashModel(params.model.id)) {
+    sanitizeGoogleThinkingPayload({ payload: { generationConfig }, modelId: params.model.id });
+  }
   retryRequest.generationConfig = generationConfig;
   return retryRequest;
 }

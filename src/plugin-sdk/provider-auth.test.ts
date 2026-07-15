@@ -85,6 +85,52 @@ describe("provider auth profile helpers", () => {
     vi.resetModules();
   });
 
+  it("checks a supplied request auth store without rereading an agent directory", async () => {
+    const { isProviderApiKeyConfigured } = await import("./provider-auth.js");
+    const store: AuthProfileStore = {
+      version: 1,
+      profiles: {
+        "xai:default": {
+          type: "oauth",
+          provider: "xai",
+          access: "oauth-access",
+          refresh: "oauth-refresh",
+          expires: Date.now() + 60_000,
+        },
+      },
+    };
+
+    expect(isProviderApiKeyConfigured({ provider: "xai", store })).toBe(true);
+    expect(isProviderApiKeyConfigured({ provider: "xai", store, profileTypes: ["api_key"] })).toBe(
+      false,
+    );
+  });
+
+  it("counts a configured provider SecretRef as readiness", async () => {
+    const { isProviderApiKeyConfigured } = await import("./provider-auth.js");
+
+    expect(
+      isProviderApiKeyConfigured({
+        provider: "google",
+        cfg: {
+          models: {
+            providers: {
+              GOOGLE: {
+                baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+                apiKey: {
+                  source: "env",
+                  provider: "default",
+                  id: "OPENCLAW_BRODIE_SECRET_GOOGLE",
+                },
+                models: [],
+              },
+            },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
   it("resolves API keys from the fallback store that supplied usable profile ids", () => {
     expect(fallbackStoreCase.profileIds).toEqual(["openai:default"]);
     expect(fallbackStoreCase.resolvedKey).toBe("fallback-key");

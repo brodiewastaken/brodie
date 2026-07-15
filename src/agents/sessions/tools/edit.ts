@@ -443,13 +443,10 @@ export function createEditToolDefinition(
           realEdits = editSets.realEdits;
           validateNoOpEditTargets(normalizedContent, noOpEdits, realEdits, path);
           if (realEdits.length === 0) {
-            return {
-              ...textResult(
-                `No changes made to ${path}. The replacement text is identical to the original.`,
-                undefined,
-              ),
-              terminate: true,
-            };
+            return textResult(
+              `No changes made to ${path}. The replacement text is identical to the original.`,
+              undefined,
+            );
           }
           const { baseContent, newContent } = applyEditsToNormalizedContent(
             normalizedContent,
@@ -503,15 +500,12 @@ export function createEditToolDefinition(
           if (normalizedError.message.includes(EDIT_MISMATCH_MESSAGE)) {
             throw appendMismatchHint(normalizedError, currentContent);
           }
-          // Terminal no-op: the edit matched but produced identical content.
+          // The edit matched but produced identical content.
           if (normalizedError instanceof EditNoChangeError) {
-            return {
-              ...textResult(
-                `No changes made to ${path}. The replacement produced identical content.`,
-                undefined,
-              ),
-              terminate: true,
-            };
+            return textResult(
+              `No changes made to ${path}. The replacement produced identical content.`,
+              undefined,
+            );
           }
           throw normalizedError;
         }

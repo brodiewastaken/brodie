@@ -123,7 +123,7 @@ describe("write tool", () => {
     await expect(fs.readFile(filePath, "utf-8")).resolves.toBe("finished\n");
   });
 
-  it("returns terminal no-op when writing identical content to existing file", async () => {
+  it("returns a non-terminal no-op when writing identical content to an existing file", async () => {
     const filePath = await createTempPath("identical.txt");
     await fs.writeFile(filePath, "hello\n", "utf-8");
     const tool = createWriteTool(tmpDir);
@@ -136,7 +136,7 @@ describe("write tool", () => {
 
     const tc0 = result.content[0];
     expect("text" in tc0 ? tc0.text : "").toContain("No changes made");
-    expect((result as any).terminate).toBe(true);
+    expect(result.terminate).toBeUndefined();
     await expect(fs.readFile(filePath, "utf-8")).resolves.toBe("hello\n");
   });
 

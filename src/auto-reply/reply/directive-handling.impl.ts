@@ -7,6 +7,7 @@ import {
   formatFastModeCommandOptions,
   formatFastModeCurrentStatus,
   formatFastModeValue,
+  isFastModeEnforcedOff,
   resolveFastModeState,
 } from "../../agents/fast-mode.js";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox.js";
@@ -188,6 +189,13 @@ export async function handleDirectiveOnly(
     agentId: activeAgentId,
     sessionEntry: directives.clearFastMode ? undefined : sessionEntry,
   });
+  if (
+    isFastModeEnforcedOff(params.cfg) &&
+    directives.hasFastDirective &&
+    (directives.fastMode === true || directives.fastMode === "auto")
+  ) {
+    return { text: formatDirectiveAck("Fast mode is permanently disabled for this deployment.") };
+  }
   const effectiveFastMode =
     directives.fastMode ??
     (directives.clearFastMode ? fastModeState.mode : currentFastMode) ??

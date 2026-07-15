@@ -179,6 +179,12 @@ Gemini 3, Gemini 3.1, and `gemini-*-latest` alias reasoning controls to
 `thinkingLevel` so default/low-latency runs do not send disabled
 `thinkingBudget` values.
 
+Gemini 3.8 Flash supports `low`, `medium`, and `high`, but rejects `minimal`.
+OpenClaw maps `off`, `minimal`, and zero-budget requests to `LOW` for this model,
+including first-response retries. Its native requests omit the deprecated
+`temperature`, `topP`, `topK`, and `candidateCount` sampling fields. Older Flash
+models retain their supported `MINIMAL` behavior.
+
 `/think adaptive` keeps Google's dynamic thinking semantics instead of choosing
 a fixed OpenClaw level. Gemini 3 and Gemini 3.1 omit a fixed `thinkingLevel` so
 Google can choose the level; Gemini 2.5 sends Google's dynamic sentinel

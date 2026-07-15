@@ -200,6 +200,7 @@ two-party event loops that do not go through the shared inbound reply runner.
       purpose: "my-plugin.summary",
       maxTokens: 512,
       temperature: 0.2,
+      reasoning: "low",
     });
     ```
 
@@ -208,7 +209,10 @@ two-party event loops that do not go through the shared inbound reply runner.
     receive a session-bound `llm.complete` capability, so model calls use the
     active session's agent and do not silently fall back to the default agent. The
     result includes provider/model/agent attribution plus normalized token,
-    cache, and estimated cost usage when available.
+    cache, and estimated cost usage when available. The optional `reasoning`
+    setting uses the selected model's normal reasoning normalization. Provider
+    errors and aborted completions reject the call instead of returning empty
+    successful text.
 
     <Warning>
     Model overrides require operator opt-in via `plugins.entries.<id>.llm.allowModelOverride: true` in config. Use `plugins.entries.<id>.llm.allowedModels` to restrict trusted plugins to specific canonical `provider/model` targets. Cross-agent completions require `plugins.entries.<id>.llm.allowAgentIdOverride: true`.

@@ -1,5 +1,6 @@
 import {
   isThinkingLevelSupported,
+  listThinkingLevels,
   resolveSupportedThinkingLevel,
   type ThinkLevel,
   type ThinkingCatalogEntry,
@@ -9,6 +10,8 @@ import type { SessionEntry } from "../config/sessions.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveAgentHarnessPolicy } from "./harness/policy.js";
 import { resolveAutoAgentHarnessId } from "./harness/support.js";
+import { buildConfiguredModelCatalog } from "./model-selection-shared.js";
+import { isBrodieMaximumThinkingProvider } from "./run-policy.js";
 import { resolveSessionRuntimeOverrideForProvider } from "./session-runtime-compat.js";
 
 /** Convert residual auto policy into the built-in fallback when no registry selection is needed. */
@@ -66,7 +69,8 @@ export function resolveCandidateThinkingLevel(params: {
   /** Concrete harness already selected by the caller, when selection is pinned. */
   agentRuntime?: string | null;
 }): ThinkLevel | undefined {
-  if (!params.level) {
+  const maximumThinkingRequired = isBrodieMaximumThinkingProvider(params.provider);
+  if (!params.level && !maximumThinkingRequired) {
     return undefined;
   }
   const concreteRuntime = params.agentRuntime?.trim().toLowerCase();
@@ -81,12 +85,25 @@ export function resolveCandidateThinkingLevel(params: {
           sessionKey: params.sessionKey,
           sessionEntry: params.sessionEntry,
         });
+  const catalog =
+    params.catalog ??
+    (maximumThinkingRequired && params.cfg
+      ? buildConfiguredModelCatalog({ cfg: params.cfg })
+      : undefined);
+  const requestedLevel = maximumThinkingRequired
+    ? (listThinkingLevels(params.provider, params.modelId, catalog, agentRuntime).findLast(
+        (level) => level !== "off",
+      ) ?? "off")
+    : params.level;
+  if (!requestedLevel) {
+    return undefined;
+  }
   const policy = {
     provider: params.provider,
     model: params.modelId,
-    level: params.level,
-    catalog: params.catalog,
+    level: requestedLevel,
+    catalog,
     agentRuntime,
   };
-  return isThinkingLevelSupported(policy) ? params.level : resolveSupportedThinkingLevel(policy);
+  return isThinkingLevelSupported(policy) ? requestedLevel : resolveSupportedThinkingLevel(policy);
 }

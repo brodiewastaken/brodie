@@ -674,6 +674,7 @@ describe("isPrioritizedHighSignalLiveModelRef", () => {
 
   it("lists priority refs as provider/id pairs", () => {
     expect(listPrioritizedHighSignalLiveModelRefs()).toStrictEqual([
+      { provider: "anthropic", id: "claude-opus-5" },
       { provider: "anthropic", id: "claude-opus-4-8" },
       { provider: "anthropic", id: "claude-sonnet-5" },
       { provider: "anthropic", id: "claude-sonnet-4-6" },
@@ -685,6 +686,7 @@ describe("isPrioritizedHighSignalLiveModelRef", () => {
       { provider: "deepseek", id: "deepseek-v4-flash" },
       { provider: "deepseek", id: "deepseek-v4-pro" },
       { provider: "minimax", id: "minimax-m3" },
+      { provider: "openai", id: "gpt-6-astra" },
       { provider: "openai", id: "gpt-5.6" },
       { provider: "openrouter", id: "openai/gpt-5.2-chat" },
       { provider: "openrouter", id: "minimax/minimax-m2.7" },

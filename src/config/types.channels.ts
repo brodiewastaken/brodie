@@ -1,3 +1,4 @@
+import type { AgentDefaultsConfig } from "./types.agent-defaults.js";
 // Defines channel configuration types shared by channel plugins.
 import type { ContextVisibilityMode, GroupPolicy } from "./types.base.js";
 import type { ChannelBotLoopProtectionConfig } from "./types.bot-loop-protection.js";
@@ -33,8 +34,19 @@ export type ChannelDefaultsConfig = {
   botLoopProtection?: ChannelBotLoopProtectionConfig;
 };
 
+export type ChannelModelOverrideConfig =
+  | string
+  | {
+      model: string;
+      thinking?: AgentDefaultsConfig["thinkingDefault"];
+      fastMode?: boolean;
+    };
+
 /** Provider/channel/target model override map used by channel dispatch. Keys are channel-specific group IDs, thread IDs, channel names, or DM peer identifiers (see docs/gateway/config-channels.md). */
-export type ChannelModelByChannelConfig = Record<string, Record<string, string>>;
+export type ChannelModelByChannelConfig = Record<
+  string,
+  Record<string, ChannelModelOverrideConfig>
+>;
 
 export type ExtensionNestedPolicyConfig = {
   /** Channel/plugin-owned nested policy mode, such as dm/group allowlist policy. */

@@ -10,6 +10,7 @@ import { normalizeProviderId } from "../agents/model-selection.js";
 import {
   normalizeAgentModelMapForConfig,
   normalizeAgentModelRefForConfig,
+  patchAgentDefaultModelConfig,
 } from "../config/model-input.js";
 import { normalizeProviderConfigForConfigDefaults } from "../config/provider-policy.js";
 import type { AgentModelConfig } from "../config/types.agents-shared.js";
@@ -408,13 +409,13 @@ export function applyDefaultModel(
       defaults: {
         ...cfg.agents?.defaults,
         models,
-        model: {
+        model: patchAgentDefaultModelConfig(existingModel, {
           ...(existingFallbacks ? { fallbacks: existingFallbacks } : undefined),
           primary:
             opts?.preserveExistingPrimary === true
               ? (normalizedExistingPrimary ?? normalizedModel)
               : normalizedModel,
-        },
+        }),
       },
     },
   });

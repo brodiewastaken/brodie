@@ -149,6 +149,9 @@ describe("resolveCommandsSystemPromptBundle", () => {
 
   it("opts command tool builds into gateway subagent binding", async () => {
     await resolveCommandsSystemPromptBundle(makeParams());
+    expect(vi.mocked(buildAgentSystemPrompt)).toHaveBeenCalledWith(
+      expect.objectContaining({ senderIsOwner: true }),
+    );
 
     const toolParams = requireFirstArg(
       vi.mocked(createOpenClawCodingTools),

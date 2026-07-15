@@ -1,15 +1,17 @@
 /**
- * Tests shared provider model id normalization helpers.
+ * Tests shared provider model helpers.
  */
 import { describe, expect, it } from "vitest";
 import {
   ANTHROPIC_BY_MODEL_REPLAY_HOOKS,
   buildProviderReplayFamilyHooks,
+  modelCostsEqual,
   NATIVE_ANTHROPIC_REPLAY_HOOKS,
   OPENAI_COMPATIBLE_REPLAY_HOOKS,
   PASSTHROUGH_GEMINI_REPLAY_HOOKS,
   resolveClaudeFable5ModelIdentity,
   resolveClaudeMythos5ModelIdentity,
+  resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
   resolveClaudeThinkingProfile,
   requiresClaudeDefaultSampling,
@@ -17,6 +19,8 @@ import {
   supportsClaudeNativeMaxEffort,
   supportsClaudeNativeXhighEffort,
 } from "./provider-model-shared.js";
+
+const EXPECTED_COST = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
 
 function expectFields(value: unknown, expected: Record<string, unknown>): void {
   if (!value || typeof value !== "object") {
@@ -63,9 +67,26 @@ describe("Claude model contracts", () => {
     expect(requiresClaudeDefaultSampling({ id: "claude-mythos-5" })).toBe(true);
   });
 
+  it("recognizes Claude Opus 5 as adaptive-default with the full effort range", () => {
+    expect(resolveClaudeOpus5ModelIdentity({ id: "claude-opus-5" })).toBe("claude-opus-5");
+    expect(resolveClaudeOpus5ModelIdentity({ id: "us.anthropic.claude-opus-5" })).toBe(
+      "claude-opus-5",
+    );
+    expect(resolveClaudeOpus5ModelIdentity({ id: "claude-opus-4-8" })).toBeUndefined();
+    expect(supportsClaudeAdaptiveThinking({ id: "claude-opus-5" })).toBe(true);
+    expect(supportsClaudeNativeMaxEffort({ id: "claude-opus-5" })).toBe(true);
+    expect(supportsClaudeNativeXhighEffort({ id: "claude-opus-5" })).toBe(true);
+    expect(requiresClaudeDefaultSampling({ id: "claude-opus-5" })).toBe(true);
+    const profile = resolveClaudeThinkingProfile("claude-opus-5");
+    expectLevelIdsInclude(profile, ["off", "adaptive", "xhigh", "max"]);
+    expectFields(profile, { defaultLevel: "high" });
+  });
+
   it("does not classify later numeric model versions as supported aliases", () => {
     expect(supportsClaudeAdaptiveThinking({ id: "claude-sonnet-4-60" })).toBe(false);
     expect(supportsClaudeAdaptiveThinking({ id: "claude-sonnet-50" })).toBe(false);
+    expect(supportsClaudeAdaptiveThinking({ id: "claude-opus-50" })).toBe(false);
+    expect(resolveClaudeOpus5ModelIdentity({ id: "claude-opus-50" })).toBeUndefined();
     expect(supportsClaudeAdaptiveThinking({ id: "claude-mythos-50" })).toBe(false);
     expect(supportsClaudeNativeXhighEffort({ id: "claude-opus-4-80" })).toBe(false);
     expect(requiresClaudeDefaultSampling({ id: "claude-opus-4-8" })).toBe(true);
@@ -78,6 +99,14 @@ describe("Claude model contracts", () => {
       "medium",
       "high",
     ]);
+  });
+});
+
+describe("modelCostsEqual", () => {
+  it("matches complete flat rates and rejects missing or stale metadata", () => {
+    expect(modelCostsEqual(EXPECTED_COST, EXPECTED_COST)).toBe(true);
+    expect(modelCostsEqual(undefined, EXPECTED_COST)).toBe(false);
+    expect(modelCostsEqual({ ...EXPECTED_COST, output: 15 }, EXPECTED_COST)).toBe(false);
   });
 });
 

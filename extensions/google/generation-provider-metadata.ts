@@ -16,12 +16,13 @@ export const GOOGLE_VIDEO_MIN_DURATION_SECONDS = GOOGLE_VIDEO_ALLOWED_DURATION_S
 export const GOOGLE_VIDEO_MAX_DURATION_SECONDS =
   GOOGLE_VIDEO_ALLOWED_DURATION_SECONDS[GOOGLE_VIDEO_ALLOWED_DURATION_SECONDS.length - 1];
 
-function isGoogleProviderConfigured(
-  ctx: { agentDir?: string } | VideoGenerationProviderConfiguredContext,
-): boolean {
+function isGoogleProviderConfigured(ctx: VideoGenerationProviderConfiguredContext): boolean {
   return isProviderApiKeyConfigured({
     provider: "google",
+    cfg: ctx.cfg,
+    workspaceDir: ctx.workspaceDir,
     agentDir: ctx.agentDir,
+    store: ctx.authStore,
   });
 }
 

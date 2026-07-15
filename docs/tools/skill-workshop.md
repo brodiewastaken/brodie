@@ -17,6 +17,14 @@ skill only when applied.
 Skill Workshop writes workspace skills only. It never touches bundled,
 plugin, ClawHub, extra-root, managed, personal-agent, or system skills.
 
+The Workshop route is a workflow default, not a restriction on owner-authorized
+skill maintenance. When the owner requests direct edits or an update to a
+shared/global skill outside Workshop's scope, the agent uses the appropriate
+file tools, CLI, or coding agent and verifies the result. Workshop proposal
+records still use Workshop lifecycle actions. An instruction to implement or
+ship an agreed change authorizes the action without another conversational
+confirmation; any execution approval required by the tool still applies.
+
 ## How it works
 
 - **Proposal first:** generated content is stored as `PROPOSAL.md`, not

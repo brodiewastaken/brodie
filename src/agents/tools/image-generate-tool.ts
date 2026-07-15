@@ -733,6 +733,7 @@ async function executeImageGenerationJob(params: {
   effectiveCfg: OpenClawConfig;
   prompt: string;
   agentDir?: string;
+  authStore?: AuthProfileStore;
   model?: string;
   size?: string;
   aspectRatio?: string;
@@ -761,6 +762,7 @@ async function executeImageGenerationJob(params: {
     cfg: params.effectiveCfg,
     prompt: params.prompt,
     agentDir: params.agentDir,
+    authStore: params.authStore,
     modelOverride: params.model,
     autoProviderFallback: params.autoProviderFallback,
     size: params.size,
@@ -1123,6 +1125,7 @@ export function createImageGenerateTool(options?: {
               effectiveCfg,
               prompt,
               agentDir: options?.agentDir,
+              authStore: options?.authProfileStore,
               model,
               size,
               aspectRatio,
@@ -1181,6 +1184,7 @@ export function createImageGenerateTool(options?: {
           effectiveCfg,
           prompt,
           agentDir: options?.agentDir,
+          authStore: options?.authProfileStore,
           model,
           size,
           aspectRatio,
