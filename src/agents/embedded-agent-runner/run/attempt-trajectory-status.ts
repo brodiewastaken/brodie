@@ -1,3 +1,4 @@
+import type { ConversationalOutcome } from "../../../infra/outbound/conversational-action.js";
 /**
  * Resolves terminal attempt trajectory status and assistant-visible text.
  */
@@ -5,6 +6,10 @@ import {
   hasAcceptedSessionSpawn,
   type AcceptedSessionSpawn,
 } from "../../accepted-session-spawn.js";
+import type {
+  MessageToolDeliveryState,
+  MessageToolSourceReplyDeliveryState,
+} from "../../embedded-agent-messaging.types.js";
 
 type AttemptTrajectoryTerminalStatus = "success" | "error" | "interrupted";
 
@@ -32,6 +37,8 @@ export type ResolveAttemptTrajectoryTerminalParams = {
     asyncTaskId?: string;
   }>;
   didSendViaMessagingTool: boolean;
+  messageToolDeliveryState?: MessageToolDeliveryState;
+  messageToolSourceReplyDeliveryState?: MessageToolSourceReplyDeliveryState;
   didSendDeterministicApprovalPrompt: boolean;
   messagingToolSentTexts: string[];
   messagingToolSentMediaUrls: string[];
@@ -45,6 +52,7 @@ export type ResolveAttemptTrajectoryTerminalParams = {
   lastToolError?: unknown;
   silentExpected?: boolean;
   emptyAssistantReplyIsSilent?: boolean;
+  conversationOutcome?: ConversationalOutcome;
   lastAssistantStopReason?: string;
   hasTerminalOutput?: boolean;
 };
@@ -80,9 +88,25 @@ function hasNonEmptyString(values: string[]): boolean {
 function hasCommittedMessagingDeliveryEvidence(
   params: Pick<
     ResolveAttemptTrajectoryTerminalParams,
-    "messagingToolSentTexts" | "messagingToolSentMediaUrls" | "messagingToolSentTargets"
+    | "messageToolDeliveryState"
+    | "messageToolSourceReplyDeliveryState"
+    | "messagingToolSentTexts"
+    | "messagingToolSentMediaUrls"
+    | "messagingToolSentTargets"
   >,
 ): boolean {
+  if (
+    params.messageToolDeliveryState === "provisional" ||
+    params.messageToolSourceReplyDeliveryState === "provisional"
+  ) {
+    return false;
+  }
+  if (
+    params.messageToolDeliveryState === "terminal" ||
+    params.messageToolSourceReplyDeliveryState === "terminal"
+  ) {
+    return true;
+  }
   return (
     hasNonEmptyString(params.messagingToolSentTexts) ||
     hasNonEmptyString(params.messagingToolSentMediaUrls) ||
@@ -92,6 +116,22 @@ function hasCommittedMessagingDeliveryEvidence(
 
 function hasAsyncStartedToolActivity(toolMetas?: readonly { asyncStarted?: boolean }[]): boolean {
   return (toolMetas ?? []).some((entry) => entry.asyncStarted === true);
+}
+
+export function hasCommittedConversationalOutcome(outcome?: ConversationalOutcome): boolean {
+  return outcome === "sent" || outcome === "reacted" || outcome === "deliberate_silence";
+}
+
+function hasProvisionalMessagingDeliveryState(
+  params: Pick<
+    ResolveAttemptTrajectoryTerminalParams,
+    "messageToolDeliveryState" | "messageToolSourceReplyDeliveryState"
+  >,
+): boolean {
+  return (
+    params.messageToolDeliveryState === "provisional" ||
+    params.messageToolSourceReplyDeliveryState === "provisional"
+  );
 }
 
 /**
@@ -118,6 +158,9 @@ export function resolveAttemptTrajectoryTerminal(
     params.emptyAssistantReplyIsSilent === true ||
     params.didSendDeterministicApprovalPrompt ||
     hasCommittedMessagingDeliveryEvidence(params) ||
+    (params.conversationOutcome === "sent"
+      ? !hasProvisionalMessagingDeliveryState(params)
+      : hasCommittedConversationalOutcome(params.conversationOutcome)) ||
     hasAcceptedSessionSpawn(params.acceptedSessionSpawns) ||
     params.heartbeatToolResponse !== undefined ||
     (params.clientToolCalls?.length ?? 0) > 0 ||

@@ -86,8 +86,10 @@ async function sendCoreMessage(params: {
   threadId?: string | number;
   queuePolicy: NonNullable<SendMessageParams["queuePolicy"]>;
   payloads?: SendMessageParams["payloads"];
+  singleNativePost?: boolean;
 }): Promise<MessageSendResult> {
   return await sendMessage({
+    singleNativePost: params.singleNativePost,
     cfg: params.ctx.cfg,
     to: params.to,
     content: params.message,
@@ -244,6 +246,7 @@ export async function executeSendAction(params: {
   bestEffort?: boolean;
   replyToId?: string;
   threadId?: string | number;
+  singleNativePost?: boolean;
 }): Promise<{
   handledBy: "plugin" | "core";
   payload: unknown;

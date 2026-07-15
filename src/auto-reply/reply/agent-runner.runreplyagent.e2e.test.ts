@@ -1,5 +1,5 @@
 // E2E tests for run-reply-agent execution and generated session artifacts.
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ import {
   type ReplyOptionsWithHeartbeatRunScope,
 } from "../../infra/heartbeat-run-scope.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
+import { getReplyPayloadMetadata } from "../reply-payload.js";
 import type { TemplateContext } from "../templating.js";
 import type { GetReplyOptions } from "../types.js";
 import {
@@ -216,6 +217,7 @@ function createMinimalRun(params?: {
   currentInboundEventKind?: FollowupRun["currentInboundEventKind"];
   sessionCtx?: Partial<TemplateContext>;
   runOverrides?: Partial<FollowupRun["run"]>;
+  replyOperation?: ReturnType<typeof createReplyOperation>;
 }) {
   const typing = createMockTypingController();
   const opts = params?.opts;
@@ -288,6 +290,7 @@ function createMinimalRun(params?: {
         resolvedBlockStreamingBreak: "message_end",
         shouldInjectGroupIntro: false,
         typingMode: params?.typingMode ?? "instant",
+        replyOperation: params?.replyOperation,
       });
     },
   };
@@ -1811,6 +1814,274 @@ describe("runReplyAgent typing (heartbeat)", () => {
     const result = await run();
 
     expect(result).toBeUndefined();
+  });
+
+  it("surfaces a terminal failure after only a provisional source acknowledgement", async () => {
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      meta: {
+        error: {
+          kind: "tool_result_mismatch",
+          message: "Agent run crashed after a provisional acknowledgement.",
+        },
+      },
+      didSendViaMessagingTool: true,
+      didDeliverSourceReplyViaMessageTool: true,
+      messageToolSourceReplyDeliveryState: "provisional",
+      messagingToolSentTexts: ["one sec"],
+      messagingToolSentTargets: [{ tool: "message", provider: "whatsapp", text: "one sec" }],
+    });
+
+    const { run } = createMinimalRun({
+      opts: { sourceReplyDeliveryMode: "message_tool_only" },
+    });
+    const result = await run();
+    const payloads = Array.isArray(result) ? result : [result];
+
+    expect(payloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+          isError: true,
+          isAgentRunFailure: true,
+        }),
+      ]),
+    );
+    expect(
+      getReplyPayloadMetadata(
+        payloads.find((payload) => payload?.text === GENERIC_EXTERNAL_RUN_FAILURE_TEXT) as object,
+      )?.deliverDespiteSourceReplySuppression,
+    ).toBe(true);
+  });
+
+  it("surfaces a terminal failure after only a generic provisional send", async () => {
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      // The embedded attempt classifier records the real provider failure even
+      // when no error payload or assistant stop reason survives aggregation.
+      meta: {
+        trajectoryTerminalStatus: "error",
+        trajectoryTerminalError: "non_deliverable_terminal_turn",
+      },
+      didSendViaMessagingTool: true,
+      messagingToolSentTexts: ["one sec"],
+      messagingToolSentTargets: [
+        {
+          tool: "message",
+          provider: "discord",
+          to: "channel:other",
+          text: "one sec",
+          messageToolDeliveryState: "provisional",
+        },
+      ],
+    });
+
+    const replyOperation = createReplyOperation({
+      sessionKey: "main",
+      sessionId: "session",
+      resetTriggered: false,
+    });
+    replyOperation.retainFailureUntilComplete();
+    const { run } = createMinimalRun({
+      replyOperation,
+      sessionCtx: { ChatType: "group" },
+      runOverrides: { sourceReplyDeliveryMode: "message_tool_only" },
+    });
+    const result = await run();
+    const payloads = Array.isArray(result) ? result : [result];
+
+    expect(payloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+          isError: true,
+          isAgentRunFailure: true,
+        }),
+      ]),
+    );
+    expect(
+      getReplyPayloadMetadata(
+        payloads.find((payload) => payload?.text === GENERIC_EXTERNAL_RUN_FAILURE_TEXT) as object,
+      )?.deliverDespiteSourceReplySuppression,
+    ).toBe(true);
+  });
+
+  it("surfaces an aborted run failure after only a generic provisional send", async () => {
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [],
+      meta: {
+        aborted: true,
+      },
+      didSendViaMessagingTool: true,
+      messagingToolSentTexts: ["one sec"],
+      messagingToolSentTargets: [
+        {
+          tool: "message",
+          provider: "whatsapp",
+          to: "group:test",
+          text: "one sec",
+          messageToolDeliveryState: "provisional",
+        },
+      ],
+    });
+
+    const { run } = createMinimalRun({
+      opts: { sourceReplyDeliveryMode: "message_tool_only" },
+      sessionCtx: { ChatType: "group" },
+    });
+    const result = await run();
+    const payloads = Array.isArray(result) ? result : [result];
+
+    expect(payloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+          isError: true,
+          isAgentRunFailure: true,
+        }),
+      ]),
+    );
+  });
+
+  it.each(["completed", "end_turn", "stop"])(
+    "delivers a recovered %s answer from an aborted run without a failure bubble",
+    async (stopReason) => {
+      const recoveredText = `Recovered terminal answer for ${stopReason}.`;
+      state.runEmbeddedAgentMock.mockResolvedValueOnce({
+        payloads: [{ text: recoveredText }],
+        meta: {
+          aborted: true,
+          stopReason,
+          trajectoryTerminalStatus: "interrupted",
+        },
+      });
+      const replyOperation = createReplyOperation({
+        sessionKey: "main",
+        sessionId: "session",
+        resetTriggered: false,
+      });
+      const { run } = createMinimalRun({ replyOperation });
+
+      const result = await run();
+      const payloads = Array.isArray(result) ? result : [result];
+
+      expect(payloads).toEqual([expect.objectContaining({ text: recoveredText })]);
+      expect(
+        payloads.some(
+          (payload) =>
+            payload?.isError === true ||
+            payload?.isAgentRunFailure === true ||
+            payload?.text === GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+        ),
+      ).toBe(false);
+      expect(replyOperation.result?.kind).not.toBe("failed");
+    },
+  );
+
+  it("surfaces a terminal failure when the runner throws after a persisted provisional send", async () => {
+    const sessionRoot = await mkdtemp(join(tmpdir(), "openclaw-provisional-failure-"));
+    const sessionFile = join(sessionRoot, "session.jsonl");
+    const storePath = join(sessionRoot, "sessions.json");
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      sessionFile,
+      updatedAt: Date.now(),
+    };
+    const sessionStore = { main: sessionEntry };
+    const timestamp = new Date().toISOString();
+    await writeFile(
+      sessionFile,
+      [
+        {
+          type: "session",
+          version: 3,
+          id: "session",
+          timestamp,
+          cwd: sessionRoot,
+        },
+        {
+          type: "message",
+          id: "user",
+          parentId: null,
+          timestamp,
+          message: { role: "user", content: [{ type: "text", text: "hello" }] },
+        },
+        {
+          type: "message",
+          id: "tool",
+          parentId: "user",
+          timestamp,
+          message: {
+            role: "toolResult",
+            toolCallId: "call",
+            toolName: "message",
+            content: [{ type: "text", text: "sent" }],
+            details: { status: "sent", messageToolDeliveryState: "provisional" },
+          },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n") + "\n",
+      "utf8",
+    );
+    await saveSessionStore(storePath, sessionStore, { skipMaintenance: true });
+    state.runEmbeddedAgentMock.mockRejectedValue(
+      new Error("500 forced acceptance failure after provisional acknowledgement"),
+    );
+    const replyOperation = createReplyOperation({
+      sessionKey: "main",
+      sessionId: "session",
+      resetTriggered: false,
+    });
+    replyOperation.retainFailureUntilComplete();
+    const onObservedReplyDelivery = vi.fn();
+
+    try {
+      const { run } = createMinimalRun({
+        opts: {
+          sourceReplyDeliveryMode: "message_tool_only",
+          onObservedReplyDelivery,
+        },
+        sessionCtx: {
+          Provider: "whatsapp",
+          OriginatingChannel: "whatsapp",
+          OriginatingTo: "120363424071859049@g.us",
+          AccountId: "brodie",
+          ChatType: "group",
+        },
+        sessionEntry,
+        sessionStore,
+        sessionKey: "main",
+        storePath,
+        replyOperation,
+        runOverrides: {
+          sessionFile,
+          sourceReplyDeliveryMode: "message_tool_only",
+        },
+      });
+      const result = await run();
+
+      expect(result).toMatchObject({
+        text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+        isError: true,
+        isAgentRunFailure: true,
+      });
+      expect(getReplyPayloadMetadata(result as object)?.deliverDespiteSourceReplySuppression).toBe(
+        true,
+      );
+      expect(onObservedReplyDelivery).not.toHaveBeenCalled();
+      replyOperation.complete();
+      await vi.waitFor(() => {
+        const stored = requireStoredSessionEntry(storePath);
+        expect(stored.restartRecoveryDeliveryContext).toBeUndefined();
+        expect(stored.restartRecoveryDeliveryRunId).toBeUndefined();
+      });
+      const stored = requireStoredSessionEntry(storePath);
+      expect(stored.restartRecoveryDeliveryContext).toBeUndefined();
+      expect(stored.restartRecoveryDeliveryRunId).toBeUndefined();
+    } finally {
+      await rm(sessionRoot, { recursive: true, force: true });
+    }
   });
 
   it("does not persist active fallback state for internal subagent announce fallback", async () => {

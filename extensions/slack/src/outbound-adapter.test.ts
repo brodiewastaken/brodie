@@ -192,4 +192,36 @@ describe("slackOutbound", () => {
       }),
     );
   });
+
+  it("forwards requireSinglePost so the sender rejects a multi-post package before posting", async () => {
+    sendMessageSlackMock.mockResolvedValueOnce({ messageId: "m-single" });
+
+    await slackOutbound.sendText!({
+      cfg,
+      to: "user:U123",
+      text: "complete handoff",
+      accountId: "default",
+      requireSinglePost: true,
+    });
+
+    expect(sendMessageSlackMock).toHaveBeenCalledWith(
+      "user:U123",
+      "complete handoff",
+      expect.objectContaining({ requireSinglePost: true }),
+    );
+  });
+
+  it("leaves native chunking available when no single-post requirement is set", async () => {
+    sendMessageSlackMock.mockResolvedValueOnce({ messageId: "m-chunked" });
+
+    await slackOutbound.sendText!({
+      cfg,
+      to: "C123",
+      text: "ordinary text",
+      accountId: "default",
+    });
+
+    const opts = sendMessageSlackMock.mock.calls[0]?.[2] as Record<string, unknown>;
+    expect(opts).not.toHaveProperty("requireSinglePost");
+  });
 });

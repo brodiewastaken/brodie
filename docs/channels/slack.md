@@ -906,7 +906,7 @@ Status snapshot behavior:
   required pair is `botTokenStatus` + `appTokenStatus`.
 
 <Tip>
-For actions/directory reads, user token can be preferred when configured. For writes, bot token remains preferred; user-token writes are only allowed when `userTokenReadOnly: false` and bot token is unavailable.
+For actions/directory reads, user token can be preferred when configured. For writes, bot token remains preferred; user-token writes are only allowed when `userTokenReadOnly: false` and bot token is unavailable. The selected user token needs the scopes for each read action, including `files:read` for downloads; a bot token with that scope does not repair a missing scope on the preferred user token.
 </Tip>
 
 ## Actions and gates
@@ -923,7 +923,18 @@ Available action groups in current Slack tooling:
 | memberInfo | enabled |
 | emojiList  | enabled |
 
-Current Slack message actions include `send`, `upload-file`, `download-file`, `read`, `edit`, `delete`, `pin`, `unpin`, `list-pins`, `member-info`, and `emoji-list`. `download-file` accepts Slack file IDs shown in inbound file placeholders and returns image previews for images or local file metadata for other file types.
+Current Slack message actions include `send`, `upload-file`, `download-file`, `read`, `edit`, `delete`, `pin`, `unpin`, `list-pins`, `member-info`, and `emoji-list`. `download-file` accepts Slack file IDs shown in inbound file placeholders and returns image previews for images or local file metadata for other file types. Slack Canvas files retain their Quip document metadata and download as HTML. HTML returned for other declared binary attachments is still rejected.
+
+Conversational `send` calls to Slack accept at most one `visibleMessages` item
+for rooms and DMs. Put a complete handoff in that item so a receiving agent
+cannot start from only its first part. Multiple items are rejected before any
+message is sent. Use separate calls for intentionally independent posts;
+ordinary bound `reply` calls still support multiple conversational items.
+
+A `download-file` OAuth scope failure identifies `files.info`, the selected
+account and known principal type, and Slack's required/provided scopes when
+available. Canvas sharing cannot grant a missing token scope. Recheck the
+actual file after reauthorization.
 
 ## Access control and routing
 
@@ -1067,17 +1078,27 @@ Reply threading controls:
 - `channels.slack.replyToModeByChatType`: per `direct|group|channel`
 - legacy fallback for direct chats: `channels.slack.dm.replyToMode`
 
-Manual reply tags are supported:
+The conversational `message` tool uses `reply` for its bound conversation and
+`quoteReply` for exact message anchoring. Legacy reply tags are literal text;
+raw `threadId` and `replyTo` fields are not conversational tool parameters.
 
-- `[[reply_to_current]]`
-- `[[reply_to:<id>]]`
+Set `replyBroadcast: true` on a text or Block Kit `send` when `quoteReply`
+selects an existing Slack message or the send inherits the bound Slack thread.
+Slack also shows that thread reply in the parent channel. This does not select
+a cross-route thread and does not apply to media or file uploads.
 
-For explicit Slack thread replies from the `message` tool, set `replyBroadcast: true` with `action: "send"` and `threadId` or `replyTo` to ask Slack to also broadcast the thread reply to the parent channel. This maps to Slack's `chat.postMessage` `reply_broadcast` flag and is only supported for text or Block Kit sends, not media uploads.
+A cross-route `send` (a `message` tool send whose destination is not the bound
+Slack conversation, or a `topLevel: true` parent-channel post) must arrive as
+one native Slack post. Core delivery hands the whole package to the Slack sender
+with `requireSinglePost`; if the rendered mrkdwn would need more than one
+`chat.postMessage`, the send fails before `conversations.open`, media upload, or
+the first post. Shorten the package or attach one artifact. A bound `reply`
+keeps normal Slack chunking.
 
-When a `message` tool call runs inside a Slack thread and targets the same channel, OpenClaw normally inherits the current Slack thread according to the effective account, chat-type, or per-channel `replyToMode`. Automatic replies and same-channel `send` or `upload-file` calls use the same per-channel override. Set `topLevel: true` on `action: "send"` or `action: "upload-file"` to force a new parent-channel message instead. `threadId: null` is accepted as the same top-level opt-out.
+When a `message` tool call runs inside a Slack thread and targets the same channel, OpenClaw normally inherits the current Slack thread according to the effective account, chat-type, or per-channel `replyToMode`. Automatic replies and same-channel `send` or `upload-file` calls use the same per-channel override. Set `topLevel: true` on `action: "send"` or `action: "upload-file"` to force a new parent-channel message instead. Omit it for a different destination, which already posts at that destination's root.
 
 <Note>
-`replyToMode="off"` disables outbound Slack reply threading, including explicit `[[reply_to_*]]` tags. It does not flatten inbound Slack thread sessions: messages already posted inside a Slack thread still route to the `:thread:<threadTs>` session. This differs from Telegram, where explicit tags are still honored in `"off"` mode. Slack threads hide messages from the channel while Telegram replies stay visible inline.
+`replyToMode="off"` disables automatic outbound Slack reply threading. It does not flatten inbound Slack thread sessions: messages already posted inside a Slack thread still route to the `:thread:<threadTs>` session. Slack threads hide messages from the channel while Telegram replies stay visible inline.
 </Note>
 
 ## Ack reactions

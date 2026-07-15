@@ -267,7 +267,11 @@ describe("Slack message tools", () => {
 
     expect(schema.actions).toEqual(["send"]);
     expect(property.description).toContain('action="send"');
-    expect(property.description).toContain("threadId");
+    expect(property.description).toContain("quoteReply");
+    expect(property.description).toContain("current bound Slack thread");
+    expect(property.description).toContain("does not select a cross-route thread");
+    expect(property.description).not.toContain("threadId");
+    expect(property.description).not.toContain("replyTo");
     expect(property.description).toContain("Not supported for media or upload-file");
   });
 
@@ -287,7 +291,28 @@ describe("Slack message tools", () => {
     expect(schema.actions).toEqual(["send"]);
     expect(property.description).toContain('action="send"');
     expect(property.description).toContain("parent-channel");
-    expect(property.description).toContain("threadId: null");
+    expect(property.description).toContain("different destination");
+    expect(property.description).not.toContain("threadId");
+  });
+
+  it("declares the destination-selected single-package Slack send limit", () => {
+    const discovery = describeSlackMessageTool({
+      cfg: {
+        channels: {
+          slack: {
+            botToken: "xoxb-test",
+          },
+        },
+      },
+    });
+
+    const { schema, property } = requireSchemaProperty(discovery, "visibleMessages");
+
+    expect(schema.actions).toEqual(["send"]);
+    expect(property.maxItems).toBe(9);
+    expect(property["x-openclaw-destination-max-items"]).toBe(1);
+    expect(property.description).toContain("complete handoff");
+    expect(property.description).toContain("separate message tool calls");
   });
 
   it("omits Slack file and message id schemas when those actions are disabled", () => {

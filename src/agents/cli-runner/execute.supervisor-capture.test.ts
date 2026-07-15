@@ -1919,6 +1919,7 @@ describe("executePreparedCliRun supervisor output capture", () => {
         args: {
           action: "reply",
           message: "done",
+          endTurn: false,
         },
         result: { ok: true },
         isError: false,
@@ -1946,6 +1947,7 @@ describe("executePreparedCliRun supervisor output capture", () => {
         to: "chat123",
       }),
     ]);
+    expect(result.messageToolDeliveryState).toBe("provisional");
   });
 
   it("preserves text and media evidence for confirmed implicit message sends", async () => {
@@ -1961,6 +1963,7 @@ describe("executePreparedCliRun supervisor output capture", () => {
           action: "send",
           message: "implicit reply",
           mediaUrl: "https://example.com/implicit.png",
+          endTurn: false,
         },
         result: {
           ok: true,
@@ -1982,6 +1985,7 @@ describe("executePreparedCliRun supervisor output capture", () => {
           action: "send",
           message: "implicit reply",
           mediaUrl: "https://example.com/implicit.png",
+          endTurn: false,
         },
         result: {
           ok: true,
@@ -2016,6 +2020,8 @@ describe("executePreparedCliRun supervisor output capture", () => {
     expect(result.messagingToolSentMediaUrls).toEqual(["https://example.com/implicit.png"]);
     expect(result.messagingToolSentTargets).toBeUndefined();
     expect(result.didDeliverSourceReplyViaMessageTool).toBe(true);
+    expect(result.messageToolDeliveryState).toBe("provisional");
+    expect(result.messageToolSourceReplyDeliveryState).toBe("provisional");
     expect(result.messagingToolSourceReplyPayloads).toEqual([
       {
         text: "implicit reply",

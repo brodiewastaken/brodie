@@ -334,7 +334,7 @@ describe("createBlockReplyDeliveryHandler", () => {
     expect(normalized.payload.replyToCurrent).toBeUndefined();
   });
 
-  it("normalizes reaction directives into Telegram channel data", () => {
+  it("keeps retired reaction directives literal", () => {
     const normalized = normalizeReplyPayloadDirectives({
       payload: { text: "[[react_to_current:✅]]" },
       currentMessageId: "msg-123",
@@ -343,19 +343,11 @@ describe("createBlockReplyDeliveryHandler", () => {
     });
 
     expect(normalized.payload).toMatchObject({
-      text: undefined,
-      replyToId: "msg-123",
-      replyToCurrent: true,
-      channelData: {
-        telegram: {
-          reaction: {
-            emoji: "✅",
-            replyToCurrent: true,
-            replyToId: "msg-123",
-          },
-        },
-      },
+      text: "[[react_to_current:✅]]",
+      replyToId: undefined,
+      replyToCurrent: undefined,
     });
+    expect(normalized.payload.channelData).toBeUndefined();
   });
 
   it("passes structured media block replies through media path normalization", async () => {
@@ -395,7 +387,7 @@ describe("createBlockReplyDeliveryHandler", () => {
     });
   });
 
-  it("suppresses generated media-failure warning text for silent structured block replies", async () => {
+  it("does not treat retired silence text as a silent structured block reply", async () => {
     const blockReplyPipeline = {
       enqueue: vi.fn(),
     } as unknown as BlockReplyPipelineLike;
@@ -423,7 +415,7 @@ describe("createBlockReplyDeliveryHandler", () => {
     await handler({ text: "NO_REPLY", mediaUrls: ["./missing.png", "./survived.png"] });
 
     expect(blockReplyPipeline.enqueue).toHaveBeenCalledWith({
-      text: undefined,
+      text: "⚠️ Media failed.",
       mediaUrl: absPath,
       mediaUrls: [absPath],
       replyToId: undefined,

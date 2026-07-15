@@ -89,6 +89,7 @@ function createTestContext(): {
       messagingToolSentTextsNormalized: [],
       messagingToolSentMediaUrls: [],
       messagingToolSourceReplyPayloads: [],
+      messageToolSourceReplyDeliveryState: undefined,
       messageToolOnlySourceReplyDelivered: false,
       messagingToolSentTargets: [],
       successfulCronAdds: 0,
@@ -1314,14 +1315,82 @@ describe("handleToolExecutionEnd mutating failure recovery", () => {
     expect(ctx.state.messagingToolSentTexts).toEqual(["rewritten delivery"]);
     expect(ctx.state.messagingToolSentMediaUrls).toEqual(["/tmp/rewritten.png"]);
     expect(ctx.state.messagingToolSentTargets).toEqual([
-      {
+      expect.objectContaining({
         tool: "message",
         provider: "telegram",
         to: "chat-rewritten",
-        threadId: undefined,
+        messageToolDeliveryState: "terminal",
         text: "rewritten delivery",
         mediaUrls: ["/tmp/rewritten.png"],
+      }),
+    ]);
+  });
+
+  it("uses result delivery metadata when adjusted message args omit authored controls", async () => {
+    const { ctx } = createTestContext();
+    const toolCallId = "tool-message-hook-strips-delivery-controls";
+    recordAdjustedParamsForToolCall(
+      toolCallId,
+      {
+        provider: "discord",
+        to: "channel:brodie-only",
+        text: "one sec",
       },
+      "run-test",
+    );
+
+    await handleToolExecutionStart(
+      ctx as never,
+      {
+        type: "tool_execution_start",
+        toolName: "message",
+        toolCallId,
+        args: {
+          provider: "discord",
+          to: "channel:brodie-only",
+          text: "one sec",
+        },
+      } as never,
+    );
+    await handleToolExecutionEnd(
+      ctx as never,
+      {
+        type: "tool_execution_end",
+        toolName: "message",
+        toolCallId,
+        isError: false,
+        result: {
+          details: {
+            status: "sent",
+            messageToolDeliveryState: "provisional",
+            authoredMessages: [
+              {
+                authoredIndex: 0,
+                status: "sent",
+                bubbles: [
+                  {
+                    bubbleIndex: 0,
+                    channel: "discord",
+                    target: "channel:brodie-only",
+                    messageId: "message-provisional",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      } as never,
+    );
+
+    expect(ctx.state.messageToolDeliveryState).toBe("provisional");
+    expect(ctx.state.messagingToolSentTargets).toEqual([
+      expect.objectContaining({
+        tool: "message",
+        provider: "discord",
+        messageToolDeliveryState: "provisional",
+        to: "channel:brodie-only",
+        text: "one sec",
+      }),
     ]);
   });
 
@@ -1367,7 +1436,7 @@ describe("handleToolExecutionEnd mutating failure recovery", () => {
     ]);
   });
 
-  it("records reply target evidence without treating it as terminal send evidence", async () => {
+  it("records reply attachment evidence without treating reply text as send evidence", async () => {
     const { ctx } = createTestContext();
     const toolCallId = "tool-message-reply-target";
 
@@ -1382,6 +1451,13 @@ describe("handleToolExecutionEnd mutating failure recovery", () => {
           provider: "telegram",
           target: "chat-reply",
           message: "visible reply",
+          attachments: [
+            {
+              type: "image",
+              mimeType: "image/png",
+              media: "/tmp/reply.png",
+            },
+          ],
         },
       } as never,
     );
@@ -1397,14 +1473,81 @@ describe("handleToolExecutionEnd mutating failure recovery", () => {
     );
 
     expect(ctx.state.messagingToolSentTexts).toEqual([]);
-    expect(ctx.state.messagingToolSentMediaUrls).toEqual([]);
+    expect(ctx.state.messagingToolSentMediaUrls).toEqual(["/tmp/reply.png"]);
     expect(ctx.state.messagingToolSentTargets).toEqual([
       expect.objectContaining({
         tool: "message",
         provider: "telegram",
         to: "chat-reply",
+        mediaUrls: ["/tmp/reply.png"],
       }),
     ]);
+  });
+
+  it("records a normalized send to the current target as provisional source delivery in automatic mode", async () => {
+    const { ctx } = createTestContext();
+    const toolCallId = "tool-message-reply-source";
+    ctx.params.messageChannel = "whatsapp";
+    ctx.params.currentMessagingTarget = "source-chat";
+    recordAdjustedParamsForToolCall(
+      toolCallId,
+      {
+        provider: "whatsapp",
+        to: "source-chat",
+        text: "one sec",
+      },
+      "run-test",
+    );
+
+    await handleToolExecutionStart(
+      ctx as never,
+      {
+        type: "tool_execution_start",
+        toolName: "message",
+        toolCallId,
+        args: {
+          action: "send",
+          provider: "whatsapp",
+          to: "source-chat",
+          message: "one sec",
+          endTurn: false,
+        },
+      } as never,
+    );
+    await handleToolExecutionEnd(
+      ctx as never,
+      {
+        type: "tool_execution_end",
+        toolName: "message",
+        toolCallId,
+        isError: false,
+        result: {
+          details: {
+            status: "sent",
+            messageToolDeliveryState: "provisional",
+            authoredMessages: [
+              {
+                authoredIndex: 0,
+                status: "sent",
+                bubbles: [
+                  {
+                    bubbleIndex: 0,
+                    channel: "whatsapp",
+                    target: "source-chat",
+                    messageId: "message-reply-source",
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      } as never,
+    );
+
+    expect(ctx.state.messageToolOnlySourceReplyDelivered).toBe(true);
+    expect(ctx.state.messageToolDeliveryState).toBe("provisional");
+    expect(ctx.state.messageToolSourceReplyDeliveryState).toBe("provisional");
+    expect(ctx.state.messagingToolSentTexts).toEqual(["one sec"]);
   });
 
   it("records conversation creation target evidence", async () => {

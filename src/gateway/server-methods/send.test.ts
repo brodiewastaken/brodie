@@ -1170,7 +1170,7 @@ describe("gateway send mirroring", () => {
     expect(deliveryCall()?.mirror?.idempotencyKey).toBe("idem-2");
   });
 
-  it("mirrors MEDIA tags as attachments", async () => {
+  it("mirrors legacy MEDIA tags as literal text", async () => {
     mockDeliverySuccess("m2");
 
     await runSend({
@@ -1182,8 +1182,8 @@ describe("gateway send mirroring", () => {
     });
 
     expect(deliveryCall()?.mirror?.sessionKey).toBe("agent:main:main");
-    expect(deliveryCall()?.mirror?.text).toBe("Here");
-    expect(deliveryCall()?.mirror?.mediaUrls).toEqual(["https://example.com/image.png"]);
+    expect(deliveryCall()?.mirror?.text).toBe("Here\nMEDIA:https://example.com/image.png");
+    expect(deliveryCall()?.mirror?.mediaUrls).toBeUndefined();
   });
 
   it("lowercases provided session keys for mirroring", async () => {

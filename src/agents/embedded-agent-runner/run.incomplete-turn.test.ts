@@ -85,6 +85,24 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
     return call[0] as { prompt?: string };
   }
 
+  it("propagates the attempt trajectory terminal classification", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: ["visible output"],
+        trajectoryTerminalStatus: "error",
+        trajectoryTerminalError: "non_deliverable_terminal_turn",
+      }),
+    );
+
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-trajectory-terminal-error",
+    });
+
+    expect(result.meta.trajectoryTerminalStatus).toBe("error");
+    expect(result.meta.trajectoryTerminalError).toBe("non_deliverable_terminal_turn");
+  });
+
   it("emits the before_agent_run hook block message as the agent payload", async () => {
     mockedRunEmbeddedAttempt.mockResolvedValueOnce(
       makeAttemptResult({
@@ -2797,6 +2815,64 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
     },
   );
 
+  it("does not classify a provisional source acknowledgement as terminal output", () => {
+    const incompleteTurnText = resolveIncompleteTurnPayloadText({
+      payloadCount: 0,
+      aborted: false,
+      timedOut: false,
+      attempt: makeAttemptResult({
+        assistantTexts: [],
+        didSendViaMessagingTool: true,
+        didDeliverSourceReplyViaMessageTool: true,
+        messageToolSourceReplyDeliveryState: "provisional",
+        messagingToolSentTexts: ["one sec"],
+        messagingToolSentTargets: [{ tool: "message", provider: "whatsapp", text: "one sec" }],
+        lastAssistant: {
+          role: "assistant",
+          stopReason: "error",
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          errorMessage: "provider failed after acknowledgement",
+          content: [],
+        } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+      }),
+    });
+
+    expect(incompleteTurnText).toContain("verify before retrying");
+  });
+
+  it("does not warn when a clean stop follows a delivered provisional source reply", () => {
+    const incompleteTurnText = resolveIncompleteTurnPayloadText({
+      payloadCount: 0,
+      aborted: false,
+      timedOut: false,
+      attempt: makeAttemptResult({
+        assistantTexts: [],
+        didSendViaMessagingTool: true,
+        didDeliverSourceReplyViaMessageTool: true,
+        messageToolSourceReplyDeliveryState: "provisional",
+        messagingToolSentTexts: [],
+        messagingToolSentTargets: [
+          {
+            tool: "message",
+            provider: "whatsapp",
+            text: "ignore that, stray error bubble. the flight agent is still cooking.",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+        lastAssistant: {
+          role: "assistant",
+          stopReason: "stop",
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          content: [],
+        } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+      }),
+    });
+
+    expect(incompleteTurnText).toBeNull();
+  });
+
   it("retries replay-safe errored turns that only emitted thinking blocks", () => {
     const assistant = {
       role: "assistant",
@@ -3042,6 +3118,55 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
       }),
     ).toBe(false);
   });
+
+  it("treats an explicit message-tool silence outcome as terminal for every caller", () => {
+    const attempt = makeAttemptResult({
+      assistantTexts: [],
+      conversationOutcome: "deliberate_silence",
+      toolMetas: [{ toolName: "message", meta: "action=silence", replaySafe: false }],
+      lastAssistant: {
+        role: "assistant",
+        stopReason: "toolUse",
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        content: [],
+      } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+    });
+
+    expect(
+      shouldTreatEmptyAssistantReplyAsSilent({
+        allowEmptyAssistantReplyAsSilent: false,
+        payloadCount: 0,
+        aborted: false,
+        timedOut: false,
+        attempt,
+      }),
+    ).toBe(true);
+  });
+
+  it.each(["sent", "reacted", "deliberate_silence"] as const)(
+    "does not fail a committed message-tool %s outcome as an incomplete turn",
+    (conversationOutcome) => {
+      expect(
+        resolveIncompleteTurnPayloadText({
+          payloadCount: 0,
+          aborted: false,
+          timedOut: false,
+          attempt: makeAttemptResult({
+            conversationOutcome,
+            toolMetas: [{ toolName: "message", replaySafe: false }],
+            lastAssistant: {
+              role: "assistant",
+              stopReason: "toolUse",
+              provider: "openai",
+              model: "gpt-5.5",
+              content: [],
+            } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+          }),
+        }),
+      ).toBeNull();
+    },
+  );
 
   it("treats reasoning-only assistant turns as silent only when the caller allows it", () => {
     const attempt = makeAttemptResult({

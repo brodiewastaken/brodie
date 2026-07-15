@@ -180,6 +180,7 @@ async function sendSlackOutboundMessage(params: {
   onDeliveryResult?: Parameters<
     NonNullable<ChannelOutboundAdapter["sendText"]>
   >[0]["onDeliveryResult"];
+  requireSinglePost?: boolean;
 }) {
   const send =
     resolveOutboundSendDep<SlackSendFn>(params.deps, "slack") ??
@@ -210,6 +211,7 @@ async function sendSlackOutboundMessage(params: {
           await params.onDeliveryResult?.(attachChannelToResult("slack", progress));
         }
       : undefined,
+    ...(params.requireSinglePost ? { requireSinglePost: true } : {}),
   });
   return result;
 }
@@ -251,6 +253,7 @@ export const slackOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   chunker: null,
   textChunkLimit: SLACK_TEXT_LIMIT,
+  crossRouteSingleNativePost: true,
   normalizePayload: ({ payload, cfg, accountId }) =>
     isSlackInteractiveRepliesEnabled({ cfg, accountId })
       ? compileSlackInteractiveReplies(payload)
@@ -432,6 +435,7 @@ export const slackOutbound: ChannelOutboundAdapter = {
       deliveryQueueId,
       onPlatformSendDispatch,
       onDeliveryResult,
+      requireSinglePost,
     }) =>
       await sendSlackOutboundMessage({
         cfg,
@@ -445,6 +449,7 @@ export const slackOutbound: ChannelOutboundAdapter = {
         deliveryQueueId,
         onPlatformSendDispatch,
         onDeliveryResult,
+        requireSinglePost,
       }),
     sendMedia: async ({
       cfg,

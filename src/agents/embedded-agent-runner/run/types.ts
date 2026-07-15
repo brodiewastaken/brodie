@@ -9,6 +9,7 @@ import type {
 } from "../../../config/sessions/types.js";
 import type { ContextEngine, ContextEnginePromptCacheInfo } from "../../../context-engine/types.js";
 import type { DiagnosticTraceContext } from "../../../infra/diagnostic-trace-context.js";
+import type { ConversationalOutcome } from "../../../infra/outbound/conversational-action.js";
 import type { AssistantMessage, Model } from "../../../llm/types.js";
 import type { PluginHookBeforeAgentStartResult } from "../../../plugins/hook-before-agent-start.types.js";
 import type { AgentHarnessTaskRuntimeScope } from "../../../tasks/agent-harness-task-runtime-scope.js";
@@ -16,6 +17,8 @@ import type { AcceptedSessionSpawn } from "../../accepted-session-spawn.js";
 import type { ToolOutcomeObserver } from "../../agent-tools.before-tool-call.js";
 import type { AuthProfileStore } from "../../auth-profiles/types.js";
 import type {
+  MessageToolDeliveryState,
+  MessageToolSourceReplyDeliveryState,
   MessagingToolSend,
   MessagingToolSourceReplyPayload,
 } from "../../embedded-agent-messaging.types.js";
@@ -216,9 +219,12 @@ export type EmbeddedRunAttemptResult = {
   acceptedSessionSpawns?: AcceptedSessionSpawn[];
   lastAssistant: AssistantMessage | undefined;
   currentAttemptAssistant?: AssistantMessage | undefined;
+  conversationOutcome?: ConversationalOutcome;
   lastToolError?: ToolErrorSummary;
   didSendViaMessagingTool: boolean;
+  messageToolDeliveryState?: MessageToolDeliveryState;
   didDeliverSourceReplyViaMessageTool?: boolean;
+  messageToolSourceReplyDeliveryState?: MessageToolSourceReplyDeliveryState;
   didSendDeterministicApprovalPrompt?: boolean;
   messagingToolSentTexts: string[];
   messagingToolSentMediaUrls: string[];
@@ -234,6 +240,9 @@ export type EmbeddedRunAttemptResult = {
   attemptUsage?: NormalizedUsage;
   promptCache?: ContextEnginePromptCacheInfo;
   contextBudgetStatus?: SessionContextBudgetStatus;
+  /** Authoritative terminal classification recorded for this attempt's trajectory. */
+  trajectoryTerminalStatus?: "success" | "error" | "interrupted";
+  trajectoryTerminalError?: "non_deliverable_terminal_turn";
   compactionCount?: number;
   compactionTokensAfter?: number;
   /**

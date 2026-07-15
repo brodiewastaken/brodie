@@ -463,6 +463,7 @@ const slackChannelOutbound: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   chunker: null,
   textChunkLimit: SLACK_TEXT_LIMIT,
+  crossRouteSingleNativePost: true,
   sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
   normalizePayload: ({ payload, cfg, accountId }) =>
     isSlackInteractiveRepliesEnabled({ cfg, accountId })

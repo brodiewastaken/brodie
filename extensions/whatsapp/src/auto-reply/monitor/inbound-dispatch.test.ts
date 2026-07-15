@@ -9,6 +9,7 @@ type CapturedReplyPayload = {
   isReasoning?: boolean;
   isCompactionNotice?: boolean;
   isError?: boolean;
+  isAgentRunFailure?: boolean;
   mediaUrl?: string;
   mediaUrls?: string[];
   replyToId?: string | null;
@@ -1106,6 +1107,49 @@ describe("whatsapp inbound dispatch", () => {
 
     expect(deliverReply).not.toHaveBeenCalled();
     expect(rememberSentText).not.toHaveBeenCalled();
+  });
+
+  it("delivers only marked terminal error payloads", async () => {
+    const deliverReply = vi.fn(async () => acceptedDeliveryResult());
+    await dispatchBufferedReply({ deliverReply });
+
+    const deliver = getCapturedDeliver();
+    expect(deliver).toBeTypeOf("function");
+
+    const terminalFailure = {
+      text: "Something went wrong while processing your request.",
+      isError: true,
+      isAgentRunFailure: true,
+    };
+    await deliver?.(terminalFailure, { kind: "block" });
+    await deliver?.(terminalFailure, { kind: "tool" });
+    expect(deliverInboundReplyWithMessageSendContextMock).not.toHaveBeenCalled();
+
+    deliverInboundReplyWithMessageSendContextMock.mockResolvedValueOnce({
+      status: "handled_visible",
+      delivery: {
+        messageIds: ["wa-terminal-failure"],
+        visibleReplySent: true,
+      },
+    });
+    await deliver?.(terminalFailure, { kind: "final" });
+    expect(deliverInboundReplyWithMessageSendContextMock).toHaveBeenCalledTimes(1);
+    expectRecordFields(
+      requireLastMockArg(
+        deliverInboundReplyWithMessageSendContextMock,
+        0,
+        "terminal failure delivery params",
+      ),
+      {
+        channel: "whatsapp",
+        payload: {
+          text: "Something went wrong while processing your request.",
+          isError: true,
+          isAgentRunFailure: true,
+        },
+      },
+    );
+    expect(deliverReply).not.toHaveBeenCalled();
   });
 
   it("maps WhatsApp blockStreaming=true to disableBlockStreaming=false", async () => {

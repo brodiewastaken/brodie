@@ -89,9 +89,13 @@ export function handleAgentEnd(
       ctx.state.pendingToolTrustedLocalMedia ||
       ctx.state.deferredBlockReplies.some((payload) => payload.trustedLocalMedia),
     hasToolMediaBlockReply: ctx.state.hasToolMediaBlockReply,
+    messageToolDeliveryState: ctx.state.messageToolDeliveryState,
     didDeliverSourceReplyViaMessageTool:
       ctx.state.messageToolOnlySourceReplyDelivered ||
       ctx.params.hasDeliveredMessageToolOnlySourceReply?.() === true,
+    messageToolSourceReplyDeliveryState:
+      ctx.state.messageToolSourceReplyDeliveryState ??
+      ctx.params.getMessageToolOnlySourceReplyDeliveryState?.(),
     messagingToolSourceReplyPayloads: ctx.state.messagingToolSourceReplyPayloads,
     messagingToolSentTexts: ctx.state.messagingToolSentTexts,
     messagingToolSentMediaUrls: ctx.state.messagingToolSentMediaUrls,

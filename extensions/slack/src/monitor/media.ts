@@ -209,6 +209,14 @@ function resolveSlackMediaMimetype(
   return mime;
 }
 
+function isSlackCanvasHtml(file: SlackFile): boolean {
+  return (
+    normalizeOptionalLowercaseString(file.mimetype) === "application/vnd.slack-docs" &&
+    normalizeOptionalLowercaseString(file.filetype) === "quip" &&
+    normalizeOptionalLowercaseString(file.mode) === "quip"
+  );
+}
+
 function looksLikeHtmlBuffer(buffer: Buffer): boolean {
   const head = normalizeLowercaseStringOrEmpty(
     buffer.subarray(0, 512).toString("utf-8").replace(/^\s+/, ""),
@@ -284,12 +292,15 @@ async function downloadSlackMediaFile(params: {
     abortSignal: params.abortSignal,
   });
 
-  // Guard against auth/login HTML pages returned instead of binary media.
-  // Allow user-provided HTML files through.
+  // Slack Canvas documents are Quip-backed HTML despite their vendor MIME type.
+  // Keep rejecting HTML returned for every other declared binary attachment.
   const fileMime = normalizeOptionalLowercaseString(params.file.mimetype);
   const fileName = normalizeLowercaseStringOrEmpty(params.file.name);
   const isExpectedHtml =
-    fileMime === "text/html" || fileName.endsWith(".html") || fileName.endsWith(".htm");
+    fileMime === "text/html" ||
+    fileName.endsWith(".html") ||
+    fileName.endsWith(".htm") ||
+    isSlackCanvasHtml(params.file);
   if (!isExpectedHtml) {
     const detectedMime = normalizeOptionalLowercaseString(saved.contentType?.split(";")[0]);
     if (detectedMime === "text/html" || (await looksLikeHtmlFile(saved.path))) {

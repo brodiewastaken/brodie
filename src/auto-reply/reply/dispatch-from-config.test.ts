@@ -11628,6 +11628,36 @@ describe("sendPolicy deny — suppress delivery, not processing (#53328)", () =>
     expect(dispatcher.sendToolResult).not.toHaveBeenCalled();
   });
 
+  it("delivers terminal agent-run failures without WeakMap metadata", async () => {
+    setNoAbort();
+    sessionStoreMocks.currentEntry = {
+      sessionId: "s1",
+      updatedAt: 0,
+      sendPolicy: "allow",
+    };
+    const dispatcher = createDispatcher();
+    const failureNotice = {
+      text: "Something went wrong while processing your request.",
+      isError: true,
+      isAgentRunFailure: true,
+    } satisfies ReplyPayload;
+    const replyResolver = vi.fn(async () => failureNotice);
+    const ctx = buildTestCtx({ SessionKey: "test:session" });
+
+    const result = await dispatchReplyFromConfig({
+      ctx,
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver,
+      replyOptions: {
+        sourceReplyDeliveryMode: "message_tool_only",
+      },
+    });
+
+    expect(result.queuedFinal).toBe(true);
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith(failureNotice);
+  });
+
   it("suppresses marked runtime failure notices for room events", async () => {
     setNoAbort();
     sessionStoreMocks.currentEntry = {

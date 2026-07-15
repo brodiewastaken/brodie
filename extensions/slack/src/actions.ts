@@ -103,6 +103,7 @@ const SLACK_EMOJI_SHORTNAME_BY_GLYPH: Record<string, string> = {
   "➕": "heavy_plus_sign",
   "➖": "heavy_minus_sign",
   "🤔": "thinking_face",
+  "🫶": "heart_hands",
   "👨‍💻": "male-technologist",
   "👨💻": "male-technologist",
   "👩‍💻": "female-technologist",
@@ -463,6 +464,8 @@ type SlackFileInfoSummary = {
   id?: string;
   name?: string;
   mimetype?: string;
+  filetype?: string;
+  mode?: string;
   url_private?: string;
   url_private_download?: string;
   channels?: unknown;
@@ -611,6 +614,8 @@ export async function downloadSlackFile(
         id: file.id,
         name: file.name,
         mimetype: file.mimetype,
+        ...(file.filetype !== undefined ? { filetype: file.filetype } : {}),
+        ...(file.mode !== undefined ? { mode: file.mode } : {}),
         url_private: file.url_private,
         url_private_download: file.url_private_download,
       },

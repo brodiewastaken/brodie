@@ -541,6 +541,60 @@ describe("resolveSlackMedia", () => {
     expect(media[0]?.path).toBe("/tmp/page.html");
   });
 
+  it("allows Quip Canvas HTML served under Slack's document MIME", async () => {
+    vi.spyOn(mediaRuntime, "saveMediaBuffer").mockResolvedValue(
+      createSavedMedia("/tmp/canvas.html", "text/html"),
+    );
+    mockFetch.mockResolvedValueOnce(
+      new Response("<!doctype html><html><body>canvas</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const result = await resolveSlackMedia({
+      files: [
+        {
+          url_private: "https://files.slack.com/files-pri/T123-F123/canvas",
+          name: "canvas",
+          mimetype: "application/vnd.slack-docs",
+          filetype: "quip",
+          mode: "quip",
+        },
+      ],
+      token: "xoxb-test-token",
+      maxBytes: 1024 * 1024,
+    });
+
+    const media = expectSlackMediaResult(result);
+    expect(media[0]?.path).toBe("/tmp/canvas.html");
+  });
+
+  it("rejects HTML for non-Quip Slack document files", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response("<!doctype html><html><body>login</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const result = await resolveSlackMedia({
+      files: [
+        {
+          url_private: "https://files.slack.com/files-pri/T123-F456/document",
+          name: "document",
+          mimetype: "application/vnd.slack-docs",
+          filetype: "pdf",
+          mode: "hosted",
+        },
+      ],
+      token: "xoxb-test-token",
+      maxBytes: 1024 * 1024,
+    });
+
+    expect(result).toBeNull();
+  });
+
   it("overrides video/* MIME to audio/* for slack_audio voice messages", async () => {
     // saveMediaBuffer re-detects MIME from buffer bytes, so it may return
     // video/mp4 for MP4 containers.  Verify resolveSlackMedia preserves

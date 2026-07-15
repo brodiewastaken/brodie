@@ -230,6 +230,7 @@ export function subscribeEmbeddedAgentSession(params: SubscribeEmbeddedAgentSess
     messagingToolSentMediaUrls: [],
     messagingToolSourceReplyPayloads: [],
     messageToolOnlySourceReplyDelivered: false,
+    messageToolSourceReplyDeliveryState: undefined,
     pendingMessagingTexts: new Map(),
     pendingMessagingTargets: new Map(),
     successfulCronAdds: 0,
@@ -1430,6 +1431,9 @@ export function subscribeEmbeddedAgentSession(params: SubscribeEmbeddedAgentSess
     getMessagingToolSentMediaUrls: () => messagingToolSentMediaUrls.slice(),
     getMessagingToolSentTargets: () => messagingToolSentTargets.slice(),
     getMessagingToolSourceReplyPayloads: () => messagingToolSourceReplyPayloads.slice(),
+    getMessageToolDeliveryState: () => state.messageToolDeliveryState,
+    didDeliverSourceReplyViaMessageTool: () => state.messageToolOnlySourceReplyDelivered,
+    getMessageToolSourceReplyDeliveryState: () => state.messageToolSourceReplyDeliveryState,
     getHeartbeatToolResponse: () =>
       state.heartbeatToolResponse ? { ...state.heartbeatToolResponse } : undefined,
     getPendingToolMediaReply: () => readPendingToolMediaReply(state),

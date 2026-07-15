@@ -13,12 +13,16 @@ import { resolveContextTokensForModel } from "../../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
 import {
   hasCommittedSourceReplyDeliveryEvidence,
+  hasProvisionalMessageToolDeliveryEvidence,
   hasVisibleOutboundDeliveryEvidence,
+  hasVisibleTerminalOutboundDeliveryEvidence,
+  isAbortedRunTerminalFailure,
 } from "../../agents/embedded-agent-runner/delivery-evidence.js";
 import {
   hasDeliberateSilentTerminalReply,
   mergeEmbeddedAgentRunResultForModelFallbackExhaustion,
 } from "../../agents/embedded-agent-runner/result-fallback-classifier.js";
+import { resolvePersistedAttemptMessageToolDeliveryState } from "../../agents/embedded-agent-runner/run/message-tool-terminal.js";
 import { runEmbeddedAgent } from "../../agents/embedded-agent.js";
 import type { FastModeAutoProgressState } from "../../agents/fast-mode.js";
 import { ensureSelectedAgentHarnessPlugin } from "../../agents/harness/runtime-plugin.js";
@@ -59,6 +63,7 @@ import {
   getReplyPayloadMetadata,
   isReplyPayloadStatusNotice,
   markReplyPayloadForSourceSuppressionDelivery,
+  shouldReplyPayloadBypassSourceSuppression,
 } from "../reply-payload.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import {
@@ -755,6 +760,7 @@ export function createFollowupRunner(params: {
       let fallbackModel = run.model;
       let fallbackExhausted = false;
       let terminalRunFailed = false;
+      let persistedProvisionalFailure = false;
       const resolveFollowupCurrentMessageId = () =>
         run.inputProvenance?.kind === "internal_system" &&
         run.inputProvenance.sourceTool === "restart-sentinel"
@@ -1228,6 +1234,7 @@ export function createFollowupRunner(params: {
                     runId,
                     extraSystemPrompt: run.extraSystemPrompt,
                     sourceReplyDeliveryMode: run.sourceReplyDeliveryMode,
+                    allowedConversationalActions: run.allowedConversationalActions,
                     silentReplyPromptMode: run.silentReplyPromptMode,
                     allowEmptyAssistantReplyAsSilent: run.allowEmptyAssistantReplyAsSilent,
                     extraSystemPromptStatic: run.extraSystemPromptStatic,
@@ -1330,6 +1337,7 @@ export function createFollowupRunner(params: {
                 extraSystemPrompt: run.extraSystemPrompt,
                 silentReplyPromptMode: run.silentReplyPromptMode,
                 sourceReplyDeliveryMode: run.sourceReplyDeliveryMode,
+                allowedConversationalActions: run.allowedConversationalActions,
                 forceMessageTool: run.sourceReplyDeliveryMode === "message_tool_only",
                 suppressNextUserMessagePersistence: suppressQueuedUserPersistenceForCandidate,
                 onUserMessagePersisted: notifyUserMessagePersisted,
@@ -1464,10 +1472,14 @@ export function createFollowupRunner(params: {
         const userFacingErrorPayload = runResult.payloads?.find(
           (payload) => payload.isError === true && typeof payload.text === "string",
         )?.text;
+        const resultTerminalStatusFailed =
+          runResult.meta?.trajectoryTerminalStatus === "error" ||
+          isAbortedRunTerminalFailure(runResult) ||
+          runResult.meta?.stopReason === "error";
         const terminalErrorMessage =
           deferredLifecycleError ??
           userFacingErrorPayload ??
-          (runResult.meta?.error ? "Agent run failed" : undefined);
+          (runResult.meta?.error || resultTerminalStatusFailed ? "Agent run failed" : undefined);
         const terminalMetadata = resolveAgentLifecycleTerminalMetadata(runResult.meta);
         if (fallbackExhausted) {
           const exhaustionError = new Error(
@@ -1479,7 +1491,7 @@ export function createFollowupRunner(params: {
           });
           replyOperation.fail("run_failed", exhaustionError);
           terminalRunFailed = true;
-        } else if (deferredLifecycleError || runResult.meta?.error) {
+        } else if (deferredLifecycleError || runResult.meta?.error || resultTerminalStatusFailed) {
           const terminalError = new Error(terminalErrorMessage ?? "Agent run failed");
           emitSettledLifecycleError(terminalError, terminalMetadata);
           replyOperation.fail("run_failed", terminalError);
@@ -1508,6 +1520,8 @@ export function createFollowupRunner(params: {
         }
         const message = formatErrorMessage(err);
         const shouldRouteFallbackExhaustion = isFallbackSummaryError(err);
+        persistedProvisionalFailure =
+          resolvePersistedAttemptMessageToolDeliveryState(run.sessionFile) === "provisional";
         replyOperation.freezeAbort();
         replyOperation.fail("run_failed", err);
         pendingLifecycleTerminal?.backstop.emit("error", err);
@@ -1516,14 +1530,15 @@ export function createFollowupRunner(params: {
           clearAgentRunContext(runId, lifecycleGeneration);
         }
         defaultRuntime.error?.(`Followup agent failed before reply: ${message}`);
-        if (!shouldRouteFallbackExhaustion) {
+        if (!shouldRouteFallbackExhaustion && !persistedProvisionalFailure) {
           await drainProgressDeliveries();
           return;
         }
-        // Fallback exhaustion can throw without preserving a candidate result.
-        // Continue through the owner delivery path so interactive turns still get safe failure copy.
+        // Fallback exhaustion and post-provisional runner failures can throw
+        // without preserving a candidate result. Continue through the owner
+        // delivery path so interactive turns still get safe failure copy.
         runResult = { payloads: [], meta: { durationMs: 0 } };
-        fallbackExhausted = true;
+        fallbackExhausted = shouldRouteFallbackExhaustion;
         terminalRunFailed = true;
       }
 
@@ -1577,6 +1592,9 @@ export function createFollowupRunner(params: {
         hasVisibleOutboundDeliveryEvidence(runResult) ||
         hasCommittedSourceReplyDeliveryEvidence(runResult) ||
         runResult.didSendDeterministicApprovalPrompt === true;
+      const hasTerminalDelivery =
+        hasVisibleTerminalOutboundDeliveryEvidence(runResult) ||
+        runResult.didSendDeterministicApprovalPrompt === true;
       const hasDeliveryDestination = Boolean(
         (isRoutableChannel(queued.originatingChannel) && queued.originatingTo) ||
         opts?.onBlockReply,
@@ -1591,14 +1609,15 @@ export function createFollowupRunner(params: {
         SessionKey: replySessionKey,
         Surface: queued.originatingChannel,
       };
+      const hasProvisionalDeliveryEvidence =
+        persistedProvisionalFailure || hasProvisionalMessageToolDeliveryEvidence(runResult);
       const fallbackPayload = terminalRunFailed
-        ? isInteractive &&
-          run.sourceReplyDeliveryMode !== "message_tool_only" &&
-          !hasCommittedDelivery
+        ? isInteractive && !hasTerminalDelivery
           ? buildTerminalAgentRunFailureReplyPayload({
               isHeartbeat: opts?.isHeartbeat,
               sessionCtx: failureConversationContext,
               cfg: runtimeConfig,
+              forceVisible: hasProvisionalDeliveryEvidence,
             })
           : undefined
         : buildEmptyInteractiveReplyPayload({
@@ -1642,13 +1661,15 @@ export function createFollowupRunner(params: {
           (payload) => hasOutboundReplyContent(payload) && !deliveryPlan.isSilentPayload(payload),
         );
       let finalPayloads = resolveDeliveryPayloads(runResult.payloads ?? []);
-      const hasTerminalReplyPayload = finalPayloads.some(
+      const hasSourceDeliverableTerminalReplyPayload = finalPayloads.some(
         (payload) =>
           payload.isReasoning !== true &&
           payload.isCommentary !== true &&
-          !isReplyPayloadStatusNotice(payload),
+          !isReplyPayloadStatusNotice(payload) &&
+          (run.sourceReplyDeliveryMode !== "message_tool_only" ||
+            shouldReplyPayloadBypassSourceSuppression(payload)),
       );
-      if (!hasTerminalReplyPayload && fallbackPayload) {
+      if (!hasSourceDeliverableTerminalReplyPayload && fallbackPayload) {
         finalPayloads = [...finalPayloads, ...resolveDeliveryPayloads([fallbackPayload])];
       }
 
@@ -1763,10 +1784,13 @@ export function createFollowupRunner(params: {
       }
 
       if (run.sourceReplyDeliveryMode === "message_tool_only") {
-        logVerbose(
-          "followup queue: automatic source delivery suppressed by sourceReplyDeliveryMode: message_tool_only",
-        );
-        return;
+        deliveryPayloads = deliveryPayloads.filter(shouldReplyPayloadBypassSourceSuppression);
+        if (deliveryPayloads.length === 0) {
+          logVerbose(
+            "followup queue: automatic source delivery suppressed by sourceReplyDeliveryMode: message_tool_only",
+          );
+          return;
+        }
       }
 
       await sendRunPayloads(

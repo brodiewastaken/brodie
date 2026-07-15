@@ -13,6 +13,8 @@ import type { AssistantPhase } from "../shared/chat-message-content.js";
 import type { AcceptedSessionSpawn } from "./accepted-session-spawn.js";
 import type { EmbeddedBlockChunker } from "./embedded-agent-block-chunker.js";
 import type {
+  MessageToolDeliveryState,
+  MessageToolSourceReplyDeliveryState,
   MessagingToolSend,
   MessagingToolSourceReplyPayload,
 } from "./embedded-agent-messaging.types.js";
@@ -164,6 +166,8 @@ export type EmbeddedAgentSubscribeState = {
   heartbeatToolResponse?: HeartbeatToolResponse;
   messagingToolSentMediaUrls: string[];
   messagingToolSourceReplyPayloads: MessagingToolSourceReplyPayload[];
+  messageToolDeliveryState?: MessageToolDeliveryState;
+  messageToolSourceReplyDeliveryState?: MessageToolSourceReplyDeliveryState;
   messageToolOnlySourceReplyDelivered: boolean;
   pendingMessagingTexts: Map<string, string>;
   pendingMessagingTargets: Map<string, MessagingToolSend>;
@@ -323,6 +327,8 @@ type ToolHandlerState = Pick<
   | "messagingToolSentTextsNormalized"
   | "messagingToolSentMediaUrls"
   | "messagingToolSourceReplyPayloads"
+  | "messageToolDeliveryState"
+  | "messageToolSourceReplyDeliveryState"
   | "messageToolOnlySourceReplyDelivered"
   | "messagingToolSentTargets"
   | "heartbeatToolResponse"

@@ -1519,6 +1519,7 @@ describe("createFollowupRunner runtime config", () => {
           model: "claude-opus-4-7",
           suppressNextUserMessagePersistence: true,
           sourceReplyDeliveryMode: "message_tool_only",
+          allowedConversationalActions: ["reply"],
           allowEmptyAssistantReplyAsSilent: true,
         },
       }),
@@ -1532,6 +1533,7 @@ describe("createFollowupRunner runtime config", () => {
     expect(call.currentInboundAudio).toBe(true);
     expect(call.suppressNextUserMessagePersistence).toBe(true);
     expect(call.sourceReplyDeliveryMode).toBe("message_tool_only");
+    expect(call.allowedConversationalActions).toEqual(["reply"]);
     expect(call.allowEmptyAssistantReplyAsSilent).toBe(true);
     expect(call.cliSessionId).toBe("cli-session-1");
     expect(call.cliSessionBinding).toEqual({ sessionId: "cli-session-1" });
@@ -2556,6 +2558,7 @@ describe("createFollowupRunner runtime config", () => {
           provider: "openai",
           model: "gpt-5.4",
           sourceReplyDeliveryMode: "message_tool_only",
+          allowedConversationalActions: ["reply"],
         },
       }),
     );
@@ -2570,6 +2573,7 @@ describe("createFollowupRunner runtime config", () => {
     expect(fallbackCall.sessionId).toBe("session");
     expect(call.abortSignal).toBe(fallbackCall.abortSignal);
     expect(call.currentInboundAudio).toBe(true);
+    expect(call.allowedConversationalActions).toEqual(["reply"]);
   });
 
   it("does not inherit source abort signals for queued user followups", async () => {
@@ -4559,34 +4563,50 @@ describe("createFollowupRunner messaging delivery and dedupe", () => {
     });
   }
 
-  async function runMessagingCase(params: {
-    agentResult: Record<string, unknown>;
-    queued?: FollowupRun;
-    runnerOverrides?: Partial<{
-      sessionEntry: SessionEntry;
-      sessionStore: Record<string, SessionEntry>;
-      sessionKey: string;
-      storePath: string;
-      opts: GetReplyOptions;
-    }>;
-    agentEvent?: { stream: string; data: Record<string, unknown> };
-  }) {
+  type MessagingCaseExecution =
+    | {
+        agentResult?: Record<string, unknown>;
+        agentError?: never;
+        agentEvent?: { stream: string; data: Record<string, unknown> };
+      }
+    | {
+        agentResult?: never;
+        agentError: Error;
+        agentEvent?: never;
+      };
+
+  async function runMessagingCase(
+    params: MessagingCaseExecution & {
+      queued?: FollowupRun;
+      runnerOverrides?: Partial<{
+        sessionEntry: SessionEntry;
+        sessionStore: Record<string, SessionEntry>;
+        sessionKey: string;
+        storePath: string;
+        opts: GetReplyOptions;
+      }>;
+    },
+  ) {
     const onBlockReply = createAsyncReplySpy();
-    const agentResult = {
-      meta: {},
-      ...params.agentResult,
-    };
-    if (params.agentEvent) {
+    const agentResult = params.agentResult
+      ? {
+          meta: {},
+          ...params.agentResult,
+        }
+      : undefined;
+    if (params.agentError) {
+      runEmbeddedAgentMock.mockRejectedValueOnce(params.agentError);
+    } else if (params.agentEvent) {
       runEmbeddedAgentMock.mockImplementationOnce(async (runParams: unknown) => {
         const onAgentEvent = requireRecord(runParams, "embedded run params").onAgentEvent;
         if (typeof onAgentEvent !== "function") {
           throw new Error("expected embedded run onAgentEvent callback");
         }
         await onAgentEvent(params.agentEvent);
-        return agentResult;
+        return agentResult ?? { payloads: [], meta: {} };
       });
     } else {
-      runEmbeddedAgentMock.mockResolvedValueOnce(agentResult);
+      runEmbeddedAgentMock.mockResolvedValueOnce(agentResult ?? { payloads: [], meta: {} });
     }
     const runner = createMessagingDedupeRunner(onBlockReply, params.runnerOverrides);
     await runner(params.queued ?? baseQueuedRun());
@@ -5523,6 +5543,314 @@ describe("createFollowupRunner messaging delivery and dedupe", () => {
     expect(onBlockReply).not.toHaveBeenCalled();
   });
 
+  it("routes a terminal failure after only a provisional message-tool acknowledgement", async () => {
+    const queued = baseQueuedRun("discord");
+    const { onBlockReply } = await runMessagingCase({
+      agentResult: {
+        payloads: [],
+        meta: {
+          error: {
+            kind: "tool_result_mismatch",
+            message: "Agent run crashed after a provisional acknowledgement.",
+          },
+        },
+        didSendViaMessagingTool: true,
+        didDeliverSourceReplyViaMessageTool: true,
+        messageToolSourceReplyDeliveryState: "provisional",
+        messagingToolSentTexts: ["one sec"],
+        messagingToolSentTargets: [
+          { tool: "message", provider: "discord", to: "channel:C1", text: "one sec" },
+        ],
+      },
+      queued: {
+        ...queued,
+        originatingChannel: "discord",
+        originatingChatType: "group",
+        originatingTo: "channel:C1",
+        run: {
+          ...queued.run,
+          sourceReplyDeliveryMode: "message_tool_only",
+        },
+      } as FollowupRun,
+    });
+
+    expect(routeReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+          isError: true,
+        }),
+      }),
+    );
+    expect(onBlockReply).not.toHaveBeenCalled();
+    const routedPayload = requireRecord(
+      requireMockCallArg(routeReplyMock, 0).payload,
+      "routed terminal failure payload",
+    );
+    expect(
+      getReplyPayloadMetadataForTest(routedPayload)?.deliverDespiteSourceReplySuppression,
+    ).toBe(true);
+  });
+
+  it("routes a trajectory terminal failure after only a generic provisional message-tool send", async () => {
+    const queued = baseQueuedRun("discord");
+    const { onBlockReply } = await runMessagingCase({
+      agentResult: {
+        payloads: [],
+        meta: {
+          trajectoryTerminalStatus: "error",
+          trajectoryTerminalError: "non_deliverable_terminal_turn",
+        },
+        didSendViaMessagingTool: true,
+        didDeliverSourceReplyViaMessageTool: true,
+        messageToolDeliveryState: "provisional",
+        messagingToolSentTexts: ["one sec"],
+        messagingToolSentTargets: [
+          { tool: "message", provider: "discord", to: "channel:other", text: "one sec" },
+        ],
+      },
+      queued: {
+        ...queued,
+        originatingChannel: "discord",
+        originatingChatType: "group",
+        originatingTo: "channel:C1",
+        run: {
+          ...queued.run,
+          sourceReplyDeliveryMode: "message_tool_only",
+        },
+      } as FollowupRun,
+    });
+
+    expect(routeReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+          isError: true,
+        }),
+      }),
+    );
+    expect(onBlockReply).not.toHaveBeenCalled();
+    const routedPayload = requireRecord(
+      requireMockCallArg(routeReplyMock, 0).payload,
+      "routed trajectory failure payload",
+    );
+    expect(
+      getReplyPayloadMetadataForTest(routedPayload)?.deliverDespiteSourceReplySuppression,
+    ).toBe(true);
+  });
+
+  it("routes an aborted run failure after only a generic provisional message-tool send", async () => {
+    const queued = baseQueuedRun("whatsapp");
+    await runMessagingCase({
+      agentResult: {
+        payloads: [],
+        meta: {
+          aborted: true,
+        },
+        didSendViaMessagingTool: true,
+        messagingToolSentTexts: ["one sec"],
+        messagingToolSentTargets: [
+          {
+            tool: "message",
+            provider: "whatsapp",
+            to: "group:test",
+            text: "one sec",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+      },
+      queued: {
+        ...queued,
+        originatingChannel: "whatsapp",
+        originatingChatType: "group",
+        originatingTo: "group:test",
+        run: {
+          ...queued.run,
+          sourceReplyDeliveryMode: "message_tool_only",
+        },
+      } as FollowupRun,
+    });
+
+    expect(routeReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+          isError: true,
+        }),
+      }),
+    );
+  });
+
+  it.each(["completed", "end_turn", "stop"])(
+    "routes a recovered %s answer from an aborted queued run without a failure bubble",
+    async (stopReason) => {
+      const recoveredText = `Recovered queued answer for ${stopReason}.`;
+      await runMessagingCase({
+        agentResult: {
+          payloads: [{ text: recoveredText }],
+          meta: {
+            aborted: true,
+            stopReason,
+            trajectoryTerminalStatus: "interrupted",
+          },
+        },
+        queued: {
+          ...baseQueuedRun("whatsapp"),
+          originatingChannel: "whatsapp",
+          originatingTo: "group:test",
+        } as FollowupRun,
+      });
+
+      expect(routeReplyMock).toHaveBeenCalledTimes(1);
+      const routed = requireMockCallArg(routeReplyMock, 0);
+      expect(requireRecord(routed.payload, "recovered payload")).toMatchObject({
+        text: recoveredText,
+      });
+      expect(requireRecord(routed.payload, "recovered payload")).not.toMatchObject({
+        isError: true,
+      });
+      expect(requireRecord(routed.payload, "recovered payload").text).not.toBe(
+        GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+      );
+    },
+  );
+
+  it("replaces a private timeout payload after a provisional queued acknowledgement", async () => {
+    const queued = baseQueuedRun("whatsapp");
+    await runMessagingCase({
+      agentResult: {
+        payloads: [{ text: "LLM request timed out.", isError: true }],
+        meta: {
+          aborted: true,
+          trajectoryTerminalStatus: "error",
+        },
+        didSendViaMessagingTool: true,
+        didDeliverSourceReplyViaMessageTool: true,
+        messagingToolSentTexts: ["one sec"],
+        messagingToolSentTargets: [
+          {
+            tool: "message",
+            provider: "whatsapp",
+            to: "group:test",
+            text: "one sec",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+      },
+      queued: {
+        ...queued,
+        originatingChannel: "whatsapp",
+        originatingChatType: "group",
+        originatingTo: "group:test",
+        run: {
+          ...queued.run,
+          sourceReplyDeliveryMode: "message_tool_only",
+        },
+      } as FollowupRun,
+    });
+
+    expect(routeReplyMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+          isError: true,
+          isAgentRunFailure: true,
+        }),
+      }),
+    );
+  });
+
+  it("routes a thrown followup failure after a persisted provisional message-tool send", async () => {
+    const sessionRoot = await fs.mkdtemp(path.join(tmpdir(), "openclaw-followup-provisional-"));
+    const sessionFile = path.join(sessionRoot, "session.jsonl");
+    const storePath = path.join(sessionRoot, "sessions.json");
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      sessionFile,
+      updatedAt: Date.now(),
+    };
+    const sessionStore = { main: sessionEntry };
+    const timestamp = new Date().toISOString();
+    await fs.writeFile(
+      sessionFile,
+      [
+        {
+          type: "session",
+          version: 3,
+          id: "session",
+          timestamp,
+          cwd: sessionRoot,
+        },
+        {
+          type: "message",
+          id: "user",
+          parentId: null,
+          timestamp,
+          message: { role: "user", content: [{ type: "text", text: "hello" }] },
+        },
+        {
+          type: "message",
+          id: "tool",
+          parentId: "user",
+          timestamp,
+          message: {
+            role: "toolResult",
+            toolCallId: "call",
+            toolName: "message",
+            content: [{ type: "text", text: "sent" }],
+            details: { status: "sent", messageToolDeliveryState: "provisional" },
+          },
+        },
+      ]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n") + "\n",
+      "utf8",
+    );
+    registerFollowupTestSessionStore(storePath, sessionStore);
+    const queued = baseQueuedRun("whatsapp");
+
+    try {
+      await runMessagingCase({
+        agentError: new Error("forced queued followup crash after provisional acknowledgement"),
+        queued: {
+          ...queued,
+          originatingChannel: "whatsapp",
+          originatingChatType: "group",
+          originatingTo: "120363424071859049@g.us",
+          run: {
+            ...queued.run,
+            sessionFile,
+            sourceReplyDeliveryMode: "message_tool_only",
+          },
+        } as FollowupRun,
+        runnerOverrides: {
+          sessionEntry,
+          sessionStore,
+          sessionKey: "main",
+          storePath,
+        },
+      });
+
+      expect(routeReplyMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            text: GENERIC_EXTERNAL_RUN_FAILURE_TEXT,
+            isError: true,
+          }),
+        }),
+      );
+      const routedPayload = requireRecord(
+        requireMockCallArg(routeReplyMock, 0).payload,
+        "routed thrown failure payload",
+      );
+      expect(
+        getReplyPayloadMetadataForTest(routedPayload)?.deliverDespiteSourceReplySuppression,
+      ).toBe(true);
+    } finally {
+      await fs.rm(sessionRoot, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["source delivery", { didDeliverSourceReplyViaMessageTool: true }],
     ["source reply payload", { messagingToolSourceReplyPayloads: [{ text: "sent" }] }],
@@ -5530,6 +5858,7 @@ describe("createFollowupRunner messaging delivery and dedupe", () => {
       "committed messaging target",
       { messagingToolSentTargets: [{ tool: "message", provider: "discord", to: "channel:C1" }] },
     ],
+    ["terminal message-tool send", { messageToolDeliveryState: "terminal" }],
     [
       "accepted child-session spawn",
       { acceptedSessionSpawns: [{ runId: "child-run", childSessionKey: "agent:main:child" }] },

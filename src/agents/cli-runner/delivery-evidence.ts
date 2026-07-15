@@ -8,7 +8,9 @@ const CLI_MESSAGING_DELIVERY_EVIDENCE_KEY = "cliMessagingDeliveryEvidence";
 type CliMessagingDeliveryEvidence = Pick<
   CliOutput,
   | "didSendViaMessagingTool"
+  | "messageToolDeliveryState"
   | "didDeliverSourceReplyViaMessageTool"
+  | "messageToolSourceReplyDeliveryState"
   | "messagingToolSentTexts"
   | "messagingToolSentMediaUrls"
   | "messagingToolSentTargets"
@@ -23,8 +25,14 @@ function snapshotCliMessagingDeliveryEvidence(
   }
   return {
     didSendViaMessagingTool: true,
+    ...(output.messageToolDeliveryState
+      ? { messageToolDeliveryState: output.messageToolDeliveryState }
+      : {}),
     ...(output.didDeliverSourceReplyViaMessageTool
       ? { didDeliverSourceReplyViaMessageTool: true }
+      : {}),
+    ...(output.messageToolSourceReplyDeliveryState
+      ? { messageToolSourceReplyDeliveryState: output.messageToolSourceReplyDeliveryState }
       : {}),
     ...(output.messagingToolSentTexts?.length
       ? { messagingToolSentTexts: output.messagingToolSentTexts.slice() }

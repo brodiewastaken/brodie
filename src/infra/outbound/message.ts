@@ -91,6 +91,7 @@ type MessageSendParams = {
   abortSignal?: AbortSignal;
   silent?: boolean;
   parseMode?: "HTML";
+  singleNativePost?: boolean;
 };
 
 export type MessageSendResult = {
@@ -100,6 +101,8 @@ export type MessageSendResult = {
   mediaUrl: string | null;
   mediaUrls?: string[];
   result?: OutboundDeliveryResult | { messageId: string };
+  /** Every platform bubble created by this send, in delivery order. */
+  results?: OutboundDeliveryResult[];
   deliveryStatus?: "sent" | "suppressed" | "partial_failed" | "failed";
   /** Formatted send error when deliveryStatus is "failed" or "partial_failed". */
   error?: string;
@@ -413,6 +416,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       deps: params.deps,
       bestEffort: params.bestEffort,
       ...(requireUnknownSendReconciliation ? { requireUnknownSendReconciliation: true } : {}),
+      ...(params.singleNativePost ? { singleNativePost: true } : {}),
       durability:
         params.bestEffort || params.queuePolicy === "best_effort" ? "best_effort" : "required",
       signal: params.abortSignal,
@@ -441,6 +445,7 @@ export async function sendMessage(params: MessageSendParams): Promise<MessageSen
       mediaUrl: primaryMediaUrl,
       mediaUrls: mirrorMediaUrls.length ? mirrorMediaUrls : undefined,
       result: results.at(-1),
+      ...(results.length ? { results } : {}),
       deliveryStatus: send.status,
       ...(send.status === "failed" || send.status === "partial_failed"
         ? { error: formatErrorMessage(send.error) }

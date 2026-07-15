@@ -86,6 +86,7 @@ describe("reactSlackMessage emoji normalization", () => {
     { input: "rocket", expected: "rocket" },
     { input: "🦄", expected: "🦄" },
     { input: "👍🏽", expected: "thumbsup::skin-tone-4" },
+    { input: "🫶🏽", expected: "heart_hands::skin-tone-4" },
     { input: "⚠️", expected: "warning" },
   ])("normalizes $input to $expected", async ({ input, expected }) => {
     const client = createClient();

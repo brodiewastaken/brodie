@@ -136,6 +136,8 @@ export type RunMessageActionParams = {
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
   inboundEventKind?: InboundEventKind;
   inboundAudio?: boolean;
+  /** Tool-authored text treats retired control markers as literal text. */
+  literalSyntax?: boolean;
   abortSignal?: AbortSignal;
 };
 
@@ -946,10 +948,12 @@ async function buildSendPayloadParts(params: {
     message = caption;
   }
 
-  const parsed = parseInlineDirectives(message, {
-    stripAudioTag: true,
-    stripReplyTags: true,
-  });
+  const parsed = input.literalSyntax
+    ? { text: message, audioAsVoice: false, replyToId: undefined }
+    : parseInlineDirectives(message, {
+        stripAudioTag: true,
+        stripReplyTags: true,
+      });
   const mergedMediaUrls: string[] = [];
   const seenMedia = new Set<string>();
   const pushMedia = (value?: string | null) => {
@@ -1201,6 +1205,18 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     return gatewayPluginAction;
   }
 
+  // A message-tool send that leaves its bound conversation is a cross-route package. A destination
+  // that requires one native post gets the whole text with requireSinglePost so its own renderer
+  // rejects a package that would fan out before any platform side effect.
+  const destinationPlugin = getChannelPlugin(channel);
+  const singleNativePost =
+    destinationPlugin?.outbound?.crossRouteSingleNativePost === true &&
+    input.toolContext?.skipCrossContextDecoration === true &&
+    (params.topLevel === true ||
+      !destinationPlugin?.threading?.matchesToolContextTarget?.({
+        target: to,
+        toolContext: input.toolContext,
+      }));
   const send = await executeSendAction({
     ctx: {
       cfg,
@@ -1249,6 +1265,7 @@ async function handleSendAction(ctx: ResolvedActionContext): Promise<MessageActi
     bestEffort: sendPayload.bestEffort,
     replyToId: resolvedReplyToId ?? undefined,
     threadId: resolvedThreadId ?? undefined,
+    ...(singleNativePost ? { singleNativePost: true } : {}),
   });
 
   return {

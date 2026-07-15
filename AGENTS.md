@@ -278,7 +278,7 @@ Skills own workflows; root owns hard policy and routing.
 - Before sharing WebVNC links, use Crabbox screenshot first; verify real app/path works and target UI is not broken.
 - ClawSweeper ops: `$clawsweeper`. Deployed hook sessions may post one concise `#clawsweeper` note only when surprising/actionable/risky; if using message tool, reply exactly `NO_REPLY`.
 - Generated-media completions wake the requester agent first. Requester visible-reply config decides final text vs message tool; direct media send is fallback/recovery only.
-- `message_tool_only`: normal agent final visible reply = current-source `message(action=send)` only. No `NO_REPLY` prompt/contract; no message call = no source reply. Plugin-owned bound-thread reply = plugin return value; no message tool needed. Never auto-publish private final.
+- `message_tool_only`: normal agent final visible reply = current-source `message(action=reply)` only. `message(action=send)` is reserved for a deliberate different route with explicit channel and target. No `NO_REPLY` prompt/contract; no message call = no source reply. Plugin-owned bound-thread reply = plugin return value; no message tool needed. Never auto-publish private final.
 - Memory wiki prompt digest stays tiny; prefer `wiki_search` / `wiki_get`; verify contact data before use; source-class provenance for generated people facts.
 - Rebrand/migration/config warnings: run `openclaw doctor`.
 - Never edit `node_modules`.

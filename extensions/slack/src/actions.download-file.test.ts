@@ -121,6 +121,43 @@ describe("downloadSlackFile", () => {
     expect(result).toEqual(makeResolvedSlackMedia());
   });
 
+  it("forwards Quip Canvas metadata from files.info to the media resolver", async () => {
+    const client = createClient();
+    client.files.info.mockResolvedValueOnce({
+      file: makeSlackFileInfo({
+        name: "canvas",
+        mimetype: "application/vnd.slack-docs",
+        filetype: "quip",
+        mode: "quip",
+        url_private_download: "https://files.slack.com/files-pri/T1-F123/download/canvas",
+      }),
+    });
+    resolveSlackMedia.mockResolvedValueOnce([makeResolvedSlackMedia({ path: "/tmp/canvas.html" })]);
+
+    const result = await downloadSlackFile("F123", {
+      client,
+      token: "xoxb-test",
+      maxBytes: 1024,
+    });
+
+    expect(resolveSlackMedia).toHaveBeenCalledWith({
+      files: [
+        {
+          id: "F123",
+          name: "canvas",
+          mimetype: "application/vnd.slack-docs",
+          filetype: "quip",
+          mode: "quip",
+          url_private: undefined,
+          url_private_download: "https://files.slack.com/files-pri/T1-F123/download/canvas",
+        },
+      ],
+      token: "xoxb-test",
+      maxBytes: 1024,
+    });
+    expect(result).toEqual(makeResolvedSlackMedia({ path: "/tmp/canvas.html" }));
+  });
+
   it("preserves non-image download metadata", async () => {
     const client = createClient();
     client.files.info.mockResolvedValueOnce({

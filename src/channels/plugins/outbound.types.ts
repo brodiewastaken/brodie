@@ -46,6 +46,7 @@ export type ChannelOutboundContext = {
   onPlatformSendDispatch?: () => Promise<void>;
   /** @internal Report each completed platform sub-send before starting another fallible step. */
   onDeliveryResult?: (result: OutboundDeliveryResult) => Promise<void> | void;
+  requireSinglePost?: boolean;
 };
 
 export type ChannelOutboundPayloadContext = ChannelOutboundContext & {
@@ -160,6 +161,7 @@ export type ChannelOutboundAdapter = {
   /** Lift remote Markdown image syntax in text into outbound media attachments. */
   extractMarkdownImages?: boolean;
   textChunkLimit?: number;
+  crossRouteSingleNativePost?: boolean;
   sanitizeText?: (params: { text: string; payload: ReplyPayload }) => string;
   pollMaxOptions?: number;
   supportsPollDurationSeconds?: boolean;

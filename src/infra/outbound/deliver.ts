@@ -213,6 +213,7 @@ type ChannelHandlerParams = {
   gatewayClientScopes?: readonly string[];
   deliveryQueueId?: string;
   requiredUnknownSendReconciliation?: boolean;
+  singleNativePost?: boolean;
   onPlatformSendStart?: (route: PlatformSendRoute) => Promise<void>;
   onPlatformSendDispatch?: () => Promise<void>;
   onDeliveryResult?: (result: OutboundDeliveryResult) => Promise<void> | void;
@@ -648,6 +649,7 @@ function createChannelOutboundContextBase(
     deliveryQueueId: params.deliveryQueueId,
     onPlatformSendDispatch: params.onPlatformSendDispatch,
     onDeliveryResult: params.onDeliveryResult,
+    ...(params.singleNativePost ? { requireSinglePost: true } : {}),
   };
 }
 
@@ -744,6 +746,7 @@ type DeliverOutboundPayloadsCoreParams = {
   requiredUnknownSendReconciliation?: boolean;
   /** @internal Caller preflight explicitly required provider unknown-send reconciliation. */
   requireUnknownSendReconciliation?: boolean;
+  singleNativePost?: boolean;
   /** @internal Refresh durable timing after provider serialization and before I/O. */
   onPlatformSendDispatch?: () => Promise<void>;
   /** Session/agent context used for hooks and media local-root scoping. */
@@ -1843,6 +1846,7 @@ async function deliverOutboundPayloadsCore(
       gatewayClientScopes: params.gatewayClientScopes,
       deliveryQueueId: params.deliveryQueueId,
       requiredUnknownSendReconciliation: params.requiredUnknownSendReconciliation,
+      singleNativePost: params.singleNativePost,
       onPlatformSendStart: params.onPlatformSendStart,
       onPlatformSendDispatch: params.onPlatformSendDispatch,
       onDeliveryResult: reportIdentifiedDeliveryResult,
@@ -1889,7 +1893,9 @@ async function deliverOutboundPayloadsCore(
     const units = planOutboundTextMessageUnits({
       text,
       overrides,
-      chunker: sendHandler.chunker,
+      // A single-native-post send hands the whole text to the adapter, whose own renderer decides
+      // whether it fits one post; core chunking would hide that decision behind pre-split pieces.
+      chunker: params.singleNativePost ? null : sendHandler.chunker,
       chunkerMode: sendHandler.chunkerMode,
       chunkedTextFormatting: sendHandler.chunkedTextFormatting,
       textLimit,

@@ -60,6 +60,11 @@ import {
   isMessagingToolSendAction,
   isMessagingToolTargetEvidenceAction,
 } from "./embedded-agent-messaging.js";
+import {
+  mergeMessageToolDeliveryState,
+  mergeMessageToolSourceReplyDeliveryState,
+  readMessageToolDeliveryState,
+} from "./embedded-agent-messaging.types.js";
 import { mergeEmbeddedRunReplayState } from "./embedded-agent-runner/replay-state.js";
 import type {
   ToolCallSummary,
@@ -1388,24 +1393,47 @@ export async function handleToolExecutionEnd(
     });
   }
 
-  // Commit messaging tool evidence on success, discard on error.
-  const messagingArgs = applyCurrentMessageProvider(toolName, startArgs, ctx.params.messageChannel);
+  // Commit messaging tool evidence on success, discard on error. The tool
+  // result owns terminality because hook normalization may strip endTurn.
+  const resultDeliveryState = readMessageToolDeliveryState(result);
+  const authoredMessageReply =
+    toolName === "message" && normalizeOptionalLowercaseString(initialArgs.action) === "reply";
+  const deliveryArgs: Record<string, unknown> = {
+    ...(resultDeliveryState ? { action: "send" } : {}),
+    ...initialArgs,
+    ...startArgs,
+    ...(authoredMessageReply ? { action: "reply" } : {}),
+  };
+  const messagingArgs = applyCurrentMessageProvider(
+    toolName,
+    deliveryArgs,
+    ctx.params.messageChannel,
+  );
+  const messageToolEndTurn = deliveryArgs.endTurn;
   const isMessagingInvocation = isMessagingTool(toolName);
-  const isMessagingSend = isMessagingInvocation && isMessagingToolSendAction(toolName, startArgs);
+  const isMessagingSend =
+    isMessagingInvocation && isMessagingToolSendAction(toolName, deliveryArgs);
+  const isMessagingReply =
+    isMessagingInvocation &&
+    toolName === "message" &&
+    normalizeOptionalLowercaseString(deliveryArgs.action) === "reply";
+  const hasMessagingAttachmentEvidence = isMessagingSend || isMessagingReply;
   const hasMessagingTargetEvidence =
-    isMessagingInvocation && isMessagingToolTargetEvidenceAction(toolName, startArgs);
+    isMessagingInvocation && isMessagingToolTargetEvidenceAction(toolName, deliveryArgs);
   const didDeliverMessagingResult =
     isMessagingInvocation &&
     isDeliveredMessagingToolResult({
       toolName,
-      args: startArgs,
+      args: deliveryArgs,
       result,
       hookResult: toolSendReceiptResult,
       isError: isToolError,
     });
-  const messageText = isMessagingSend ? readMessagingText(startArgs) : undefined;
-  const argumentMediaUrls = isMessagingSend ? collectMessagingMediaUrlsFromRecord(startArgs) : [];
-  const hasRichContent = isMessagingSend && hasMessagingRichContent(startArgs);
+  const messageText = isMessagingSend ? readMessagingText(deliveryArgs) : undefined;
+  const argumentMediaUrls = hasMessagingAttachmentEvidence
+    ? collectMessagingMediaUrlsFromRecord(deliveryArgs)
+    : [];
+  const hasRichContent = isMessagingSend && hasMessagingRichContent(deliveryArgs);
   const messageTarget = hasMessagingTargetEvidence
     ? extractMessagingToolSend(toolName, messagingArgs, {
         config: ctx.params.config,
@@ -1418,46 +1446,88 @@ export async function handleToolExecutionEnd(
         hasRepliedRef: startData?.hasRepliedRef,
       })
     : undefined;
+  const confirmedMessageTarget =
+    didDeliverMessagingResult && messageTarget
+      ? extractMessagingToolSendResult(
+          messageTarget,
+          applyToolSendReceiptForExtraction(result, toolSendReceiptResult),
+        )
+      : undefined;
+  const currentSourceTargets = [ctx.params.currentMessagingTarget, ctx.params.currentChannelId]
+    .map((target) => normalizeOptionalLowercaseString(target))
+    .filter((target): target is string => Boolean(target));
+  const currentSourceThreadId = normalizeOptionalLowercaseString(
+    ctx.params.currentThreadId ?? parseSessionThreadInfoFast(ctx.params.sessionKey).threadId,
+  );
+  const didDeliverToCurrentSource = Boolean(
+    toolName === "message" &&
+    confirmedMessageTarget?.to &&
+    currentSourceTargets.includes(
+      normalizeOptionalLowercaseString(confirmedMessageTarget.to) ?? "",
+    ) &&
+    (!ctx.params.messageChannel ||
+      normalizeOptionalLowercaseString(confirmedMessageTarget.provider) ===
+        normalizeOptionalLowercaseString(ctx.params.messageChannel)) &&
+    (!confirmedMessageTarget.threadId ||
+      !currentSourceThreadId ||
+      normalizeOptionalLowercaseString(confirmedMessageTarget.threadId) === currentSourceThreadId),
+  );
   const committedMediaUrls =
-    didDeliverMessagingResult && isMessagingSend
+    didDeliverMessagingResult && hasMessagingAttachmentEvidence
       ? [...argumentMediaUrls, ...collectMessagingMediaUrlsFromToolResult(result)]
       : [];
   ctx.state.pendingMessagingTexts.delete(toolCallId);
   ctx.state.pendingMessagingTargets.delete(toolCallId);
   ctx.state.pendingMessagingMediaUrls.delete(toolCallId);
+  const committedMessageToolDeliveryState =
+    resultDeliveryState ?? (messageToolEndTurn === false ? "provisional" : "terminal");
+  if (didDeliverMessagingResult && (isMessagingSend || hasMessagingTargetEvidence)) {
+    ctx.state.messageToolDeliveryState = mergeMessageToolDeliveryState(
+      ctx.state.messageToolDeliveryState,
+      committedMessageToolDeliveryState,
+    );
+  }
   if (didDeliverMessagingResult && messageText) {
     ctx.state.messagingToolSentTexts.push(messageText);
     ctx.state.messagingToolSentTextsNormalized.push(normalizeTextForComparison(messageText));
     ctx.log.debug(`Committed messaging text: tool=${toolName} len=${messageText.length}`);
     ctx.trimMessagingToolSent();
   }
-  if (didDeliverMessagingResult && messageTarget) {
-    const extractionResult = applyToolSendReceiptForExtraction(result, toolSendReceiptResult);
-    const confirmedTarget = extractMessagingToolSendResult(messageTarget, extractionResult);
+  if (confirmedMessageTarget) {
     ctx.state.messagingToolSentTargets.push({
-      ...confirmedTarget,
+      ...confirmedMessageTarget,
+      messageToolDeliveryState: committedMessageToolDeliveryState,
       ...(messageText ? { text: messageText } : {}),
       ...(committedMediaUrls.length > 0 ? { mediaUrls: committedMediaUrls.slice() } : {}),
       ...(hasRichContent ? { hasRichContent: true as const } : {}),
     });
     ctx.trimMessagingToolSent();
   }
-  if (didDeliverMessagingResult && isMessagingSend) {
+  if (didDeliverMessagingResult && hasMessagingAttachmentEvidence) {
     if (committedMediaUrls.length > 0) {
       ctx.state.messagingToolSentMediaUrls.push(...committedMediaUrls);
       ctx.trimMessagingToolSent();
     }
-    if (
+  }
+  if (
+    didDeliverMessagingResult &&
+    (didDeliverToCurrentSource ||
       isDeliveredMessageToolOnlySourceReplyResult({
         sourceReplyDeliveryMode: ctx.params.sourceReplyDeliveryMode,
         toolName,
-        args: startArgs,
+        args: deliveryArgs,
         result,
         isError: isToolError,
-      })
-    ) {
-      ctx.state.messageToolOnlySourceReplyDelivered = true;
-    }
+        allowExplicitSourceRoute: isMessagingReply,
+      }))
+  ) {
+    ctx.state.messageToolOnlySourceReplyDelivered = true;
+    ctx.state.messageToolSourceReplyDeliveryState = mergeMessageToolSourceReplyDeliveryState(
+      ctx.state.messageToolSourceReplyDeliveryState,
+      committedMessageToolDeliveryState,
+    );
+  }
+  if (didDeliverMessagingResult && isMessagingSend) {
     const sourceReplyPayload = extractMessagingToolSourceReplyPayload(result);
     if (sourceReplyPayload) {
       ctx.state.messagingToolSourceReplyPayloads.push(sourceReplyPayload);

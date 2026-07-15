@@ -133,6 +133,41 @@ describe("message action threading helpers", () => {
     });
   });
 
+  it("keeps an implicit child reply id for delivery but not mirror session routing", async () => {
+    const currentSessionKey = "agent:main:slack:channel:c123:thread:root-42";
+    const actionParams: Record<string, unknown> = {
+      channel: "workspace",
+      target: "channel:C123",
+      message: "hi",
+      replyTo: "child-777",
+    };
+    resolveOutboundSessionRoute.mockResolvedValue(null);
+
+    await prepareOutboundMirrorRoute({
+      cfg: workspaceConfig,
+      channel: "workspace",
+      to: "channel:C123",
+      actionParams,
+      toolContext: {
+        currentChannelId: "C123",
+        currentThreadTs: "root-42",
+        replyToMode: "all",
+      },
+      agentId: "main",
+      currentSessionKey,
+      replyToIsExplicit: false,
+      resolveOutboundSessionRoute,
+      ensureOutboundSessionEntry,
+    });
+
+    expect(actionParams.replyTo).toBe("child-777");
+    expect(resolveOutboundSessionRoute).toHaveBeenCalledOnce();
+    expect(firstMockArg(resolveOutboundSessionRoute)).toMatchObject({
+      currentSessionKey,
+    });
+    expect(firstMockArg(resolveOutboundSessionRoute)).not.toHaveProperty("replyToId");
+  });
+
   it.each([
     {
       name: "injects threadId for matching target",

@@ -195,6 +195,7 @@ export type SessionInitResult = {
   sessionId: string;
   isNewSession: boolean;
   resetTriggered: boolean;
+  resetTriggeredAction: "new" | "reset" | undefined;
   systemSent: boolean;
   abortedLastRun: boolean;
   storePath: string;
@@ -670,8 +671,7 @@ async function initSessionStateAttemptLocked(
         entry,
         freshness: entryFreshness,
       });
-  const resetReturnsToConfiguredDefaults =
-    resetTriggered && matchedResetTriggerLower === "/reset";
+  const resetReturnsToConfiguredDefaults = resetTriggered && matchedResetTriggerLower === "/reset";
   const lifecycleMutationMatches = Boolean(
     previousSessionEntry &&
     lifecycleMutationIdentity?.sessionKey === sessionKey &&
@@ -1155,6 +1155,11 @@ async function initSessionStateAttemptLocked(
       sessionId: sessionId ?? crypto.randomUUID(),
       isNewSession,
       resetTriggered,
+      resetTriggeredAction: resetTriggered
+        ? matchedResetTriggerLower === "/reset"
+          ? "reset"
+          : "new"
+        : undefined,
       systemSent,
       abortedLastRun,
       storePath,

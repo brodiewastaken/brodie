@@ -320,6 +320,120 @@ describe("runMessageAction core send routing", () => {
     });
   });
 
+  function registerSlackSinglePostPlugin(params?: { crossRouteSingleNativePost?: boolean }) {
+    const sendText = vi.fn().mockResolvedValue({
+      channel: "slack",
+      messageId: "m1",
+      chatId: "C123",
+    });
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "slack",
+          source: "test",
+          plugin: {
+            ...createOutboundTestPlugin({
+              id: "slack",
+              outbound: {
+                deliveryMode: "direct",
+                sendText,
+                ...(params?.crossRouteSingleNativePost === false
+                  ? {}
+                  : { crossRouteSingleNativePost: true }),
+              },
+            }),
+            threading: {
+              matchesToolContextTarget: ({ target, toolContext }) =>
+                toolContext.currentChannelId === target,
+            },
+            config: {
+              listAccountIds: () => ["default"],
+              resolveAccount: () => ({ enabled: true }),
+              isConfigured: () => true,
+            },
+          },
+        },
+      ]),
+    );
+    return sendText;
+  }
+
+  it("hands a cross-route send to the adapter as one native post", async () => {
+    const sendText = registerSlackSinglePostPlugin();
+
+    await runMessageAction({
+      cfg: slackConfig,
+      action: "send",
+      params: { channel: "slack", target: "user:U999", message: "complete handoff" },
+      toolContext: {
+        currentChannelProvider: "slack",
+        currentChannelId: "channel:C123",
+        skipCrossContextDecoration: true,
+      },
+      dryRun: false,
+    });
+
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(firstMockArg(sendText, "send text")).toMatchObject({
+      text: "complete handoff",
+      requireSinglePost: true,
+    });
+  });
+
+  it("requires one native post for a deliberate top-level send in the bound channel", async () => {
+    const sendText = registerSlackSinglePostPlugin();
+
+    await runMessageAction({
+      cfg: slackConfig,
+      action: "send",
+      params: { channel: "slack", target: "channel:C123", message: "parent post", topLevel: true },
+      toolContext: {
+        currentChannelProvider: "slack",
+        currentChannelId: "channel:C123",
+        skipCrossContextDecoration: true,
+      },
+      dryRun: false,
+    });
+
+    expect(firstMockArg(sendText, "send text")).toMatchObject({ requireSinglePost: true });
+  });
+
+  it("keeps native chunking for a send that stays in the bound conversation", async () => {
+    const sendText = registerSlackSinglePostPlugin();
+
+    await runMessageAction({
+      cfg: slackConfig,
+      action: "send",
+      params: { channel: "slack", target: "channel:C123", message: "same room" },
+      toolContext: {
+        currentChannelProvider: "slack",
+        currentChannelId: "channel:C123",
+        skipCrossContextDecoration: true,
+      },
+      dryRun: false,
+    });
+
+    expect(firstMockArg(sendText, "send text")).not.toHaveProperty("requireSinglePost");
+  });
+
+  it("does not require one native post when the destination does not declare it", async () => {
+    const sendText = registerSlackSinglePostPlugin({ crossRouteSingleNativePost: false });
+
+    await runMessageAction({
+      cfg: slackConfig,
+      action: "send",
+      params: { channel: "slack", target: "user:U999", message: "complete handoff" },
+      toolContext: {
+        currentChannelProvider: "slack",
+        currentChannelId: "channel:C123",
+        skipCrossContextDecoration: true,
+      },
+      dryRun: false,
+    });
+
+    expect(firstMockArg(sendText, "send text")).not.toHaveProperty("requireSinglePost");
+  });
+
   it("uses best-effort delivery for implicit message-tool-only source replies", async () => {
     const sendText = registerSlackTextPlugin();
 

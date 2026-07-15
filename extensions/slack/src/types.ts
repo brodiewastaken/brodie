@@ -3,6 +3,8 @@ export type SlackFile = {
   id?: string;
   name?: string;
   mimetype?: string;
+  filetype?: string;
+  mode?: string;
   subtype?: string;
   size?: number;
   url_private?: string;

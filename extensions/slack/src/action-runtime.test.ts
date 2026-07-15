@@ -182,10 +182,71 @@ describe("handleSlackAction", () => {
         currentChannelId: "C123",
         replyToMode: "all",
         sameChannelThreadRequired: true,
+        skipCrossContextDecoration: true,
       },
     );
 
     expectLastSlackSend("root", cfg);
+    expect(requireRecordArg(sendSlackMessage, "sendSlackMessage", 0, 2).requireSinglePost).toBe(
+      true,
+    );
+  });
+
+  it("requires one native post for a conversational cross-route send", async () => {
+    const cfg = slackConfig();
+
+    await handleSlackAction(
+      { action: "sendMessage", to: "channel:C999", content: "complete handoff" },
+      cfg,
+      {
+        currentChannelId: "C123",
+        currentMessagingTarget: "channel:C123",
+        currentChannelProvider: "slack",
+        skipCrossContextDecoration: true,
+      },
+    );
+
+    expectSlackSendCall(0, "channel:C999", "complete handoff", {
+      cfg,
+      requireSinglePost: true,
+    });
+  });
+
+  it("requires one native post for a tool send with an empty trusted context", async () => {
+    const cfg = slackConfig();
+
+    await handleSlackAction(
+      { action: "sendMessage", to: "channel:C999", content: "complete handoff" },
+      cfg,
+      { skipCrossContextDecoration: true },
+    );
+
+    expectSlackSendCall(0, "channel:C999", "complete handoff", {
+      cfg,
+      requireSinglePost: true,
+    });
+  });
+
+  it("keeps native chunking available for an ordinary bound reply", async () => {
+    const cfg = slackConfig();
+
+    await handleSlackAction(
+      { action: "sendMessage", to: "channel:C123", content: "ordinary reply" },
+      cfg,
+      {
+        currentChannelId: "C123",
+        currentMessagingTarget: "channel:C123",
+        currentChannelProvider: "slack",
+        skipCrossContextDecoration: true,
+      },
+    );
+
+    expect(
+      Object.hasOwn(
+        requireRecordArg(sendSlackMessage, "sendSlackMessage", 0, 2),
+        "requireSinglePost",
+      ),
+    ).toBe(false);
   });
 
   async function resolveReadToken(cfg: OpenClawConfig): Promise<string | undefined> {
@@ -423,6 +484,37 @@ describe("handleSlackAction", () => {
       threadId: "123.456",
     });
     expect(requireDetails(result).ok).toBe(false);
+  });
+
+  it("adds method and principal context to download-file missing_scope errors", async () => {
+    downloadSlackFile.mockRejectedValueOnce(
+      Object.assign(new Error("An API error occurred: missing_scope"), {
+        code: "slack_webapi_platform_error",
+        data: {
+          error: "missing_scope",
+          needed: "files:read",
+          provided: "channels:history,chat:write",
+        },
+      }),
+    );
+
+    let error: unknown;
+    try {
+      await handleSlackAction(
+        { action: "downloadFile", fileId: "F123", channelId: "C1" },
+        slackConfig({ botToken: "xoxb-secret-value" }),
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("method: files.info");
+    expect((error as Error).message).toContain("principal type: bot");
+    expect((error as Error).message).toContain("account: default");
+    expect((error as Error).message).toContain("needed: files:read");
+    expect((error as Error).message).toContain("provided: channels:history,chat:write");
+    expect((error as Error).message).not.toContain("xoxb-secret-value");
   });
 
   it("returns non-image downloadFile results as file metadata instead of image content", async () => {

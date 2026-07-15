@@ -125,6 +125,7 @@ import {
   isReplyPayloadStatusNotice,
   markReplyPayloadAsTtsSupplement,
   setReplyPayloadMetadata,
+  shouldReplyPayloadBypassSourceSuppression,
   type ReplyPayload,
 } from "../reply-payload.js";
 import type { FinalizedMsgContext } from "../templating.js";
@@ -3904,7 +3905,7 @@ export async function dispatchReplyFromConfig(
     const shouldDeliverDespiteSourceReplySuppression = (reply: ReplyPayload) =>
       suppressAutomaticSourceDelivery &&
       !sendPolicyDenied &&
-      getReplyPayloadMetadata(reply)?.deliverDespiteSourceReplySuppression === true &&
+      shouldReplyPayloadBypassSourceSuppression(reply) &&
       (ctx.InboundEventKind !== "room_event" || explicitCommandTurnCtx);
     const sentFinalPayloadDedupeKeys = new Set<string>();
     for (const [replyIndex, reply] of replies.entries()) {

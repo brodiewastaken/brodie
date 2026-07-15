@@ -44,16 +44,24 @@ function createSlackMessageIdActionSchema(): Record<string, TSchema> {
 
 function createSlackSendActionSchema(): Record<string, TSchema> {
   return {
+    visibleMessages: Type.Optional(
+      Type.Array(Type.String({ minLength: 1 }), {
+        maxItems: 9,
+        "x-openclaw-destination-max-items": 1,
+        description:
+          "Slack cross-route sends must carry the complete handoff in one visibleMessages item so a mentioned recipient or DM bot cannot run on a partial package. If distinct standalone posts are intentional, use separate message tool calls.",
+      }),
+    ),
     topLevel: Type.Optional(
       Type.Boolean({
         description:
-          'Slack-only opt-out for action="send" from a threaded same-channel context. Set true to post a new parent-channel message instead of inheriting the current Slack thread. `threadId: null` is accepted as the same top-level request.',
+          'Slack-only opt-out for action="send" from a threaded same-channel context. Set true to post a new parent-channel message instead of inheriting the current Slack thread. Omit it for a different destination, which already posts at that destination root.',
       }),
     ),
     replyBroadcast: Type.Optional(
       Type.Boolean({
         description:
-          'Slack-only opt-in for action="send" thread replies. Set true with threadId or replyTo on text/block sends to also broadcast the reply to the parent channel. Not supported for media or upload-file.',
+          'Slack-only opt-in for an action="send" thread reply. Set true when quoteReply selects an existing Slack message or the send inherits the current bound Slack thread; the reply is also broadcast to the parent channel. This does not select a cross-route thread. Not supported for media or upload-file.',
       }),
     ),
   };

@@ -732,6 +732,11 @@ describe("slackPlugin outbound", () => {
     expect(slackPlugin.outbound?.textChunkLimit).toBe(8000);
   });
 
+  it("declares that cross-route tool sends must arrive as one native post", () => {
+    expect(slackOutbound.crossRouteSingleNativePost).toBe(true);
+    expect(slackPlugin.outbound?.crossRouteSingleNativePost).toBe(true);
+  });
+
   it("uses threadId as threadTs fallback for sendText", async () => {
     const sendSlack = vi.fn().mockResolvedValue({ messageId: "m-text" });
     const sendText = requireSlackSendText();

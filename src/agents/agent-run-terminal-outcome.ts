@@ -64,6 +64,7 @@ type AgentRunTerminalWaitInput = Omit<AgentRunTerminalInput, "status"> & {
 export const AGENT_RUN_TERMINAL_RETRY_GRACE_MS = 15_000;
 
 const HARD_TIMEOUT_PHASES = new Set<AgentRunTimeoutPhase>(["preflight", "provider", "post_turn"]);
+const COMPLETED_ASSISTANT_STOP_REASONS = new Set(["completed", "end_turn", "stop"]);
 
 function asFiniteTimestamp(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -171,6 +172,40 @@ export function buildAgentRunTerminalOutcome(
       ? { endedAt: asFiniteTimestamp(input.endedAt) }
       : {}),
   };
+}
+
+/**
+ * Returns whether abort metadata still owns the terminal result.
+ *
+ * A prompt-timeout race can leave `aborted=true` after a completed assistant
+ * reply or terminal delivery wins. Normalize that surviving evidence here so
+ * delivery projections do not reinterpret abort precedence independently.
+ */
+export function isAbortedAgentRunTerminalFailure(input: {
+  aborted?: unknown;
+  stopReason?: unknown;
+  finalAssistantVisibleText?: unknown;
+  hasValidTerminalPayload?: boolean;
+  hasVisibleTerminalDelivery?: boolean;
+  didSendDeterministicApprovalPrompt?: boolean;
+}): boolean {
+  if (input.aborted !== true) {
+    return false;
+  }
+  const stopReason = asNonEmptyString(input.stopReason);
+  const recoveredAssistantReply =
+    COMPLETED_ASSISTANT_STOP_REASONS.has(stopReason?.trim().toLowerCase() ?? "") &&
+    (asNonEmptyString(input.finalAssistantVisibleText) !== undefined ||
+      input.hasValidTerminalPayload === true);
+  const hasTerminalEvidence =
+    recoveredAssistantReply ||
+    input.hasVisibleTerminalDelivery === true ||
+    input.didSendDeterministicApprovalPrompt === true;
+  const outcome = buildAgentRunTerminalOutcome({
+    status: hasTerminalEvidence ? "ok" : "error",
+    ...(recoveredAssistantReply && stopReason ? { stopReason } : {}),
+  });
+  return outcome.status !== "ok";
 }
 
 /** Builds a terminal outcome from a wait result, ignoring pending/unknown status. */

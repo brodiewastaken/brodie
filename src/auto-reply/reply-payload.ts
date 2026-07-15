@@ -45,6 +45,8 @@ export type ReplyPayload = {
    */
   ttsSupplement?: ReplyPayloadTtsSupplement;
   isError?: boolean;
+  /** Internal marker for a synthesized terminal agent-run failure. */
+  isAgentRunFailure?: boolean;
   /** Marks this payload as a reasoning/thinking block. Channels that do not
    *  have a dedicated reasoning lane (e.g. WhatsApp, web) should suppress it. */
   isReasoning?: boolean;
@@ -287,6 +289,14 @@ export function markReplyPayloadForSourceSuppressionDelivery<T extends object>(p
   return setReplyPayloadMetadata(payload, {
     deliverDespiteSourceReplySuppression: true,
   });
+}
+
+/** Returns true when a payload may bypass automatic source-reply suppression. */
+export function shouldReplyPayloadBypassSourceSuppression(payload: ReplyPayload): boolean {
+  return (
+    payload.isAgentRunFailure === true ||
+    getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true
+  );
 }
 
 export function markCommandReplyForDelivery(

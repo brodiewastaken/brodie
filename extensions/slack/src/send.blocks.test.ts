@@ -167,6 +167,39 @@ describe("sendMessageSlack thread participation", () => {
 });
 
 describe("sendMessageSlack chunking", () => {
+  it("rejects rendered Markdown chunks before the first guarded native post", async () => {
+    const client = createSlackSendTestClient();
+    const cfg = { channels: { slack: { botToken: "xoxb-test", textChunkLimit: 5 } } };
+
+    await expect(
+      sendMessageSlack("user:U123", "[source](https://example.com/long-preview)", {
+        token: "xoxb-test",
+        cfg,
+        client,
+        requireSinglePost: true,
+      }),
+    ).rejects.toThrow(/one native Slack post.*shorter message or attach an artifact/i);
+
+    expect(client.chat.postMessage).not.toHaveBeenCalled();
+    expect(client.conversations.open).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary replies chunkable under the same text limit", async () => {
+    const client = createSlackSendTestClient();
+    const cfg = { channels: { slack: { botToken: "xoxb-test", textChunkLimit: 5 } } };
+    const message = "ordinaryreply";
+
+    await sendMessageSlack("channel:C123", message, {
+      token: "xoxb-test",
+      cfg,
+      client,
+    });
+
+    const postedTexts = client.chat.postMessage.mock.calls.map((call) => call[0].text);
+    expect(postedTexts.length).toBeGreaterThan(1);
+    expect(postedTexts.join("")).toBe(message);
+  });
+
   it("keeps 4205-character text in a single Slack post by default", async () => {
     const client = createSlackSendTestClient();
     const message = "a".repeat(4205);

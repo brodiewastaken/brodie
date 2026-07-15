@@ -6,6 +6,7 @@ import { isSingleUseReplyToMode } from "openclaw/plugin-sdk/reply-reference";
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
 import type { ResolvedSlackAccount } from "./accounts.js";
 import { parseSlackBlocksInput } from "./blocks-input.js";
+import { formatSlackError } from "./errors.js";
 import { resolveSlackChannelConfig } from "./monitor/channel-config.js";
 import { isSlackChannelAllowedByPolicy } from "./monitor/policy.js";
 import {
@@ -80,6 +81,8 @@ export type SlackActionContext = {
   hasRepliedRef?: { value: boolean };
   /** True when same-channel root posting would leak a thread-originated reply. */
   sameChannelThreadRequired?: boolean;
+  /** True for direct message-tool composition rather than raw API/CLI dispatch. */
+  skipCrossContextDecoration?: boolean;
   /** Allowed local media directories for file uploads. */
   mediaLocalRoots?: readonly string[];
   mediaReadFile?: (filePath: string) => Promise<Buffer>;
@@ -142,6 +145,38 @@ function readSlackBlocksParam(params: Record<string, unknown>) {
 
 function isImageContentType(value: string | undefined): boolean {
   return value?.trim().toLowerCase().startsWith("image/") === true;
+}
+
+function resolveSlackPrincipalType(params: {
+  account: ResolvedSlackAccount;
+  token: string | undefined;
+}): "bot" | "user" | "unknown" {
+  const token = params.token?.trim();
+  if (token && token === params.account.userToken?.trim()) {
+    return "user";
+  }
+  if (token && token === params.account.botToken?.trim()) {
+    return "bot";
+  }
+  return "unknown";
+}
+
+function rethrowSlackDownloadScopeError(params: {
+  account: ResolvedSlackAccount;
+  error: unknown;
+  token: string | undefined;
+}): never {
+  const detail = formatSlackError(params.error);
+  if (!/\bmissing_scope\b/iu.test(detail)) {
+    throw params.error;
+  }
+  const principalType = resolveSlackPrincipalType({
+    account: params.account,
+    token: params.token,
+  });
+  throw new Error(
+    `Slack API scope error; method: files.info; principal type: ${principalType}; account: ${params.account.accountId}; ${detail}`,
+  );
 }
 
 type SlackReadTargetDecision = "allow" | "deny" | "resolve-name";
@@ -330,12 +365,21 @@ export async function handleSlackAction(
             suppressImplicitThread: params.topLevel === true || params.threadTs === null,
           },
         );
+        const requireSinglePost =
+          context?.skipCrossContextDecoration === true &&
+          (params.topLevel === true || !slackContextTargetsMatch(to, context));
+        if (requireSinglePost && mediaUrl && blocks) {
+          throw new Error(
+            "Slack cross-route send requires one native post; media plus blocks would create two posts. Put the complete handoff in one shorter message or attach a single artifact.",
+          );
+        }
         const sendOpts = {
           ...writeOpts,
           mediaLocalRoots: context?.mediaLocalRoots,
           mediaReadFile: context?.mediaReadFile,
           threadTs: threadTs ?? undefined,
           ...(replyBroadcast ? { replyBroadcast } : {}),
+          ...(requireSinglePost ? { requireSinglePost: true } : {}),
         };
         const result =
           mediaUrl && blocks
@@ -485,13 +529,17 @@ export async function handleSlackAction(
           ? account.config.mediaMaxMb * 1024 * 1024
           : 20 * 1024 * 1024;
         const readToken = getTokenForOperation("read");
-        const downloaded = await slackActionRuntime.downloadSlackFile(fileId, {
-          ...readOpts,
-          ...(readToken && !readOpts?.token ? { token: readToken } : {}),
-          maxBytes,
-          channelId,
-          threadId: threadId ?? undefined,
-        });
+        const downloaded = await slackActionRuntime
+          .downloadSlackFile(fileId, {
+            ...readOpts,
+            ...(readToken && !readOpts?.token ? { token: readToken } : {}),
+            maxBytes,
+            channelId,
+            threadId: threadId ?? undefined,
+          })
+          .catch((error: unknown) =>
+            rethrowSlackDownloadScopeError({ account, error, token: readToken }),
+          );
         if (!downloaded) {
           return jsonResult({
             ok: false,

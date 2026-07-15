@@ -182,7 +182,7 @@ function resolveWhatsAppDeliverablePayload(
   if (payload.isReasoning === true || payload.isCompactionNotice === true) {
     return null;
   }
-  if (payload.isError === true) {
+  if (payload.isError === true && !(info.kind === "final" && payload.isAgentRunFailure === true)) {
     return null;
   }
   if (info.kind === "tool") {

@@ -274,4 +274,52 @@ describe("runEmbeddedAgent cross-provider fallback error handling", () => {
       model: "test-model",
     });
   });
+
+  it("returns a terminal provider error after a provisional send instead of replaying it", async () => {
+    mockedIsFailoverAssistantError.mockReturnValue(true);
+    mockedIsRateLimitAssistantError.mockReturnValue(false);
+    mockedClassifyFailoverReason.mockReturnValue("server_error");
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        didSendViaMessagingTool: true,
+        messageToolDeliveryState: "provisional",
+        messagingToolSentTexts: ["one sec"],
+        messagingToolSentTargets: [
+          {
+            tool: "message",
+            provider: "discord",
+            to: "channel:brodie-only",
+            text: "one sec",
+          },
+        ],
+        lastAssistant: makeAssistantMessageFixture({
+          stopReason: "error",
+          errorMessage: "provider failed after provisional delivery",
+          provider: "deepseek",
+          model: "deepseek-chat",
+          content: [],
+        }),
+      }),
+    );
+
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-provisional-delivery-provider-error",
+      config: makeCrossProviderFallbackConfig(),
+      agentHarnessRuntimeOverride: "openclaw",
+      provider: "deepseek",
+      model: "deepseek-chat",
+      modelFallbacksOverride: [],
+    });
+
+    expect(result.meta.error).toMatchObject({
+      kind: "provider_error",
+      fallbackSafe: false,
+    });
+    expect(result.didSendViaMessagingTool).toBe(true);
+    expect(result.messageToolDeliveryState).toBe("provisional");
+    expect(result.messagingToolSentTargets).toHaveLength(1);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledOnce();
+  });
 });

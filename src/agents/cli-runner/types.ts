@@ -11,6 +11,7 @@ import type { SessionSystemPromptReport } from "../../config/sessions/types.js";
 import type { CliBackendConfig } from "../../config/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { ContextEngine } from "../../context-engine/types.js";
+import type { CoreConversationalAction } from "../../infra/outbound/conversational-action.js";
 import type { ImageContent } from "../../llm/types.js";
 import type { PromptImageOrderEntry } from "../../media/prompt-image-order.js";
 import type { CliBackendExecutionMode } from "../../plugins/cli-backend.types.js";
@@ -91,6 +92,7 @@ export type RunCliAgentParams = {
   jobId?: string;
   extraSystemPrompt?: string;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  allowedConversationalActions?: readonly CoreConversationalAction[];
   requireExplicitMessageTarget?: boolean;
   silentReplyPromptMode?: SilentReplyPromptMode;
   allowEmptyAssistantReplyAsSilent?: boolean;

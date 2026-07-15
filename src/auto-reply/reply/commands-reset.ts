@@ -111,6 +111,7 @@ export async function maybeHandleResetCommand(
       previousSessionEntry,
       workspaceDir: params.workspaceDir,
     });
+    params.command.resetTriggeredAction = "reset";
     params.command.softResetTriggered = true;
     params.command.softResetTail = softReset.tail;
     return null;
@@ -129,6 +130,7 @@ export async function maybeHandleResetCommand(
 
   const commandAction: ResetCommandAction =
     resetMatch[1]?.toLowerCase() === "reset" ? "reset" : "new";
+  params.command.resetTriggeredAction = commandAction;
   const resetTail = params.command.commandBodyNormalized.slice(resetMatch[0].length).trimStart();
   const boundAcpSessionKey = resolveBoundAcpThreadSessionKey(params);
   const boundAcpKey =

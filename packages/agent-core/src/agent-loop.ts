@@ -807,10 +807,7 @@ type FinalizedToolCallOutcome = {
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
-  return (
-    finalizedCalls.length > 0 &&
-    finalizedCalls.every((finalized) => finalized.result.terminate === true)
-  );
+  return finalizedCalls.some((finalized) => finalized.result.terminate === true);
 }
 
 function prepareToolCallArguments(tool: AgentTool, toolCall: AgentToolCall): AgentToolCall {

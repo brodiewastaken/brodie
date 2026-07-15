@@ -360,7 +360,7 @@ describe("sendMessage", () => {
     expect(mocks.deliverOutboundPayloads).not.toHaveBeenCalled();
   });
 
-  it("applies mirror matrix semantics for MEDIA and silent token variants", async () => {
+  it("keeps retired MEDIA and silence syntax literal in delivery and mirrors", async () => {
     const matrix: Array<{
       name: string;
       content: string;
@@ -380,20 +380,20 @@ describe("sendMessage", () => {
         content: "Here\nMEDIA:https://example.com/a.png\nMEDIA:https://example.com/b.png",
         expectedPayloads: [
           {
-            text: "Here",
+            text: "Here\nMEDIA:https://example.com/a.png\nMEDIA:https://example.com/b.png",
             mediaUrl: null,
-            mediaUrls: ["https://example.com/a.png", "https://example.com/b.png"],
+            mediaUrls: [],
           },
         ],
         expectedMirror: {
-          text: "Here",
-          mediaUrls: ["https://example.com/a.png", "https://example.com/b.png"],
+          text: "Here\nMEDIA:https://example.com/a.png\nMEDIA:https://example.com/b.png",
+          mediaUrls: undefined,
         },
       },
       {
         name: "exact NO_REPLY",
         content: "NO_REPLY",
-        expectedPayloads: [],
+        expectedPayloads: [{ text: "NO_REPLY", mediaUrl: null, mediaUrls: [] }],
         expectedMirror: {
           text: "NO_REPLY",
           mediaUrls: undefined,
@@ -402,7 +402,7 @@ describe("sendMessage", () => {
       {
         name: "JSON NO_REPLY",
         content: '{\n  "action": "NO_REPLY"\n}',
-        expectedPayloads: [],
+        expectedPayloads: [{ text: '{\n  "action": "NO_REPLY"\n}', mediaUrl: null, mediaUrls: [] }],
         expectedMirror: {
           text: '{\n  "action": "NO_REPLY"\n}',
           mediaUrls: undefined,
@@ -414,7 +414,7 @@ describe("sendMessage", () => {
         mediaUrl: "https://example.com/c.png",
         expectedPayloads: [
           {
-            text: "",
+            text: "NO_REPLY",
             mediaUrl: "https://example.com/c.png",
             mediaUrls: ["https://example.com/c.png"],
           },

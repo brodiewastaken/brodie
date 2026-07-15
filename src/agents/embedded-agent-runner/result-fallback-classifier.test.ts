@@ -1,9 +1,39 @@
 // Coverage for deciding when embedded run results should trigger model fallback.
 import { describe, expect, it } from "vitest";
 import { GENERIC_EXTERNAL_RUN_FAILURE_TEXT } from "../../auto-reply/reply/agent-runner-failure-copy.js";
-import { classifyEmbeddedAgentRunResultForModelFallback } from "./result-fallback-classifier.js";
+import {
+  classifyEmbeddedAgentRunResultForModelFallback,
+  hasDeliberateSilentTerminalReply,
+} from "./result-fallback-classifier.js";
 
 describe("classifyEmbeddedAgentRunResultForModelFallback", () => {
+  it("recognizes the message-tool deliberate silence outcome as an intentional terminal reply", () => {
+    expect(
+      hasDeliberateSilentTerminalReply({
+        payloads: [],
+        meta: { durationMs: 1 },
+        conversationOutcome: "deliberate_silence",
+      }),
+    ).toBe(true);
+  });
+
+  it("does not classify Anthropic deliberate silence as an empty harness failure", () => {
+    expect(
+      classifyEmbeddedAgentRunResultForModelFallback({
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        result: {
+          payloads: [],
+          meta: {
+            durationMs: 1,
+            agentHarnessResultClassification: "empty",
+          },
+          conversationOutcome: "deliberate_silence",
+        },
+      }),
+    ).toBeNull();
+  });
+
   it("does not fallback when sessions_spawn accepted a child session", () => {
     // Accepted child sessions mean the turn made progress even if the parent did
     // not emit a normal assistant reply.

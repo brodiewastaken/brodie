@@ -133,6 +133,8 @@ type SlackSendOpts = {
   onPlatformSendDispatch?: () => Promise<void>;
   /** Persist each concrete platform send before any later chunk can fail. */
   onDeliveryResult?: (result: SlackSendResult) => Promise<void> | void;
+  /** Reject before delivery when the logical send would require multiple native posts. */
+  requireSinglePost?: boolean;
 };
 
 type SlackWebApiErrorData = {
@@ -1243,6 +1245,33 @@ async function sendMessageSlackQueuedInner(params: {
     unfurlLinks: account.config.unfurlLinks,
     unfurlMedia: account.config.unfurlMedia,
   };
+  const resolvedChunks = blocks
+    ? undefined
+    : (() => {
+        const textLimit = resolveTextChunkLimit(cfg, "slack", account.accountId, {
+          fallbackLimit: SLACK_TEXT_LIMIT,
+        });
+        const chunkLimit = Math.min(textLimit, SLACK_TEXT_LIMIT);
+        const tableMode = resolveMarkdownTableMode({
+          cfg,
+          channel: "slack",
+          accountId: account.accountId,
+        });
+        const chunkMode = resolveChunkMode(cfg, "slack", account.accountId);
+        const markdownChunks =
+          chunkMode === "newline"
+            ? chunkMarkdownTextWithMode(trimmedMessage, chunkLimit, chunkMode)
+            : [trimmedMessage];
+        const chunks = markdownChunks.flatMap((markdown) =>
+          markdownToSlackMrkdwnChunks(markdown, chunkLimit, { tableMode }),
+        );
+        return resolveTextChunksWithFallback(trimmedMessage, chunks);
+      })();
+  if (opts.requireSinglePost && resolvedChunks && resolvedChunks.length > 1) {
+    throw new Error(
+      `Slack cross-route send requires one native Slack post, but rendered content needs ${resolvedChunks.length}. Put the complete handoff in one shorter message or attach an artifact.`,
+    );
+  }
   // Durable signatures bind the concrete provider channel, so user-targeted
   // sends must resolve U... to the resulting D... conversation first.
   const directUserPostChannelId = opts.deliveryQueueId
@@ -1298,24 +1327,6 @@ async function sendMessageSlackQueuedInner(params: {
       }),
     });
   }
-  const textLimit = resolveTextChunkLimit(cfg, "slack", account.accountId, {
-    fallbackLimit: SLACK_TEXT_LIMIT,
-  });
-  const chunkLimit = Math.min(textLimit, SLACK_TEXT_LIMIT);
-  const tableMode = resolveMarkdownTableMode({
-    cfg,
-    channel: "slack",
-    accountId: account.accountId,
-  });
-  const chunkMode = resolveChunkMode(cfg, "slack", account.accountId);
-  const markdownChunks =
-    chunkMode === "newline"
-      ? chunkMarkdownTextWithMode(trimmedMessage, chunkLimit, chunkMode)
-      : [trimmedMessage];
-  const chunks = markdownChunks.flatMap((markdown) =>
-    markdownToSlackMrkdwnChunks(markdown, chunkLimit, { tableMode }),
-  );
-  const resolvedChunks = resolveTextChunksWithFallback(trimmedMessage, chunks);
   const mediaMaxBytes =
     typeof account.config.mediaMaxMb === "number"
       ? account.config.mediaMaxMb * 1024 * 1024
@@ -1327,7 +1338,7 @@ async function sendMessageSlackQueuedInner(params: {
   let canonicalDeliveredThreadTs: string | undefined;
   let chunksToPost: string[];
   if (opts.mediaUrl) {
-    const [firstChunk, ...rest] = resolvedChunks;
+    const [firstChunk, ...rest] = resolvedChunks ?? [];
     lastMessageId = await uploadSlackFile({
       client,
       channelId,
@@ -1356,7 +1367,7 @@ async function sendMessageSlackQueuedInner(params: {
     });
     chunksToPost = rest;
   } else {
-    chunksToPost = resolvedChunks.length ? resolvedChunks : [""];
+    chunksToPost = resolvedChunks?.length ? resolvedChunks : [""];
   }
 
   let sendIdentity = identity;

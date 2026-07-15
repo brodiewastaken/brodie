@@ -725,13 +725,16 @@ export async function runPreparedReply(
   const normalizedCommandBody = command.commandBodyNormalized.trim();
   const softResetTriggered = command.softResetTriggered === true;
   const softResetTail = command.softResetTail?.trim() ?? "";
-  const effectiveResetTriggered = resetTriggered || softResetTriggered;
+  const resetTriggeredAction = command.resetTriggeredAction;
+  const effectiveResetTriggered =
+    resetTriggered || softResetTriggered || resetTriggeredAction !== undefined;
   const hasCurrentReplyTargetContext =
     hasReplyTargetContext(ctx) || hasReplyTargetContext(sessionCtx);
   const isWholeMessageCommand =
     normalizedCommandBody === rawBodyTrimmed ||
     normalizedCommandBody === rawBodyTrimmed.toLowerCase();
-  const isResetOrNewCommand = /^\/(new|reset)(?:\s|$)/i.test(normalizedCommandBody);
+  const isResetOrNewCommand =
+    resetTriggeredAction !== undefined || /^\/(new|reset)(?:\s|$)/i.test(normalizedCommandBody);
   if (
     allowTextCommands &&
     (!commandAuthorized || !command.isAuthorizedSender) &&
@@ -749,13 +752,17 @@ export async function runPreparedReply(
           baseBodyTrimmedRaw.length === 0 &&
           rawBodyTrimmed.length > 0)));
   const startupAction =
-    softResetTriggered || /^\/reset(?:\s|$)/i.test(normalizedCommandBody) ? "reset" : "new";
+    resetTriggeredAction ??
+    (softResetTriggered || /^\/reset(?:\s|$)/i.test(normalizedCommandBody) ? "reset" : "new");
   const resetJournalMode =
     startupAction === "reset"
       ? "paths"
       : (cfg.agents?.defaults?.models?.[`${provider}/${model}`]?.startupJournals ?? "paths");
   const resetSystemMessage =
-    isBareSessionReset && isResetOrNewCommand && command.isAuthorizedSender && workspaceDir
+    isBareSessionReset &&
+    isResetOrNewCommand &&
+    (resetTriggeredAction !== undefined || commandAuthorized || command.isAuthorizedSender) &&
+    workspaceDir
       ? await buildSessionResetSystemMessage({
           cfg,
           agentId,
@@ -1001,7 +1008,7 @@ export async function runPreparedReply(
       softResetTail,
       isHeartbeat,
       inboundEventKind,
-      sourceReplyDeliveryMode,
+      sourceReplyDeliveryMode: isBareSessionReset ? "message_tool_only" : sourceReplyDeliveryMode,
       threadContextNote,
       transcriptThreadContextNote,
       systemEventBlocks: drainedSystemEventBlocks,
@@ -1625,7 +1632,8 @@ export async function runPreparedReply(
       ownerNumbers: command.ownerList.length > 0 ? command.ownerList : undefined,
       inputProvenance,
       extraSystemPrompt: extraSystemPromptParts.join("\n\n") || undefined,
-      sourceReplyDeliveryMode,
+      sourceReplyDeliveryMode: isBareSessionReset ? "message_tool_only" : sourceReplyDeliveryMode,
+      ...(isBareSessionReset ? { allowedConversationalActions: ["reply"] as const } : {}),
       silentReplyPromptMode,
       extraSystemPromptStatic,
       cliSessionBindingFacts,

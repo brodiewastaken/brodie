@@ -1680,6 +1680,22 @@ describe("runAgentTurnWithFallback", () => {
     });
   });
 
+  it("passes conversational action restrictions to embedded execution", async () => {
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "ok" }],
+      meta: {},
+    });
+    const followupRun = createFollowupRun();
+    followupRun.run.allowedConversationalActions = ["reply"];
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    await runAgentTurnWithFallback(createMinimalRunAgentTurnParams({ followupRun }));
+
+    expectMockCallArgFields(state.runEmbeddedAgentMock, 0, "embedded run params", {
+      allowedConversationalActions: ["reply"],
+    });
+  });
+
   it("signals typing from embedded harness execution phases before assistant text", async () => {
     const typingSignals = createMockTypingSignaler();
     const onAgentRunStart = vi.fn();

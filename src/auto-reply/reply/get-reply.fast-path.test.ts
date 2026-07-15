@@ -728,6 +728,7 @@ describe("getReplyFromConfig fast test bootstrap", () => {
     });
 
     expect(result.resetTriggered).toBe(true);
+    expect(result.resetTriggeredAction).toBe("reset");
     expect(result.sessionEntry.responseUsage).toBe("full");
   });
 

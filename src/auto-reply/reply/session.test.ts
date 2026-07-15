@@ -1034,6 +1034,7 @@ describe("initSessionState RawBody", () => {
 
     expect(result.isNewSession).toBe(true);
     expect(result.resetTriggered).toBe(true);
+    expect(result.resetTriggeredAction).toBe("new");
     expect(result.sessionId).not.toBe(existingSessionId);
     expect(result.sessionEntry.skillsSnapshot).toBeUndefined();
     expect(result.sessionEntry.totalTokens).toBe(0);
@@ -3124,6 +3125,7 @@ describe("initSessionState reset triggers in Slack channels", () => {
 
     expect(result.isNewSession).toBe(true);
     expect(result.resetTriggered).toBe(true);
+    expect(result.resetTriggeredAction).toBe("new");
     expect(result.sessionId).not.toBe(existingSessionId);
     expect(result.bodyStripped).toBe("take notes");
   });
@@ -3196,6 +3198,9 @@ describe("initSessionState preserves behavior overrides across /new and /reset",
 
       expect(result.isNewSession, testCase.name).toBe(true);
       expect(result.resetTriggered, testCase.name).toBe(true);
+      expect(result.resetTriggeredAction, testCase.name).toBe(
+        testCase.body === "/reset" ? "reset" : "new",
+      );
       expect(result.sessionId, testCase.name).not.toBe(existingSessionId);
       if (testCase.body === "/new") {
         expectEntryFields(result.sessionEntry, overrides, testCase.name);

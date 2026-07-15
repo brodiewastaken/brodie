@@ -15,6 +15,8 @@ function createBlockReplyHarness(
   options: {
     sourceReplyDeliveryMode?: "automatic" | "message_tool_only";
     hasDeliveredMessageToolOnlySourceReply?: () => boolean;
+    messageChannel?: string;
+    currentMessagingTarget?: string;
     reasoningMode?: "off" | "on" | "stream";
     onReasoningEnd?: () => void;
     onReasoningStream?: (payload: { text?: string }) => void;
@@ -38,6 +40,8 @@ function createBlockReplyHarness(
     reasoningMode: options.reasoningMode,
     sourceReplyDeliveryMode: options.sourceReplyDeliveryMode,
     hasDeliveredMessageToolOnlySourceReply: options.hasDeliveredMessageToolOnlySourceReply,
+    messageChannel: options.messageChannel,
+    currentMessagingTarget: options.currentMessagingTarget,
   });
   return { emit, onAgentEvent, onBlockReply, onPartialReply, subscription };
 }
@@ -48,6 +52,8 @@ async function emitMessageToolLifecycle(params: {
   message: string;
   media?: string;
   to?: string | null;
+  endTurn?: boolean;
+  action?: "reply" | "send";
   result: unknown;
 }) {
   // Message tool sends are modeled as normal tool start/end events because the
@@ -57,10 +63,11 @@ async function emitMessageToolLifecycle(params: {
     toolName: "message",
     toolCallId: params.toolCallId,
     args: {
-      action: "send",
+      action: params.action ?? "send",
       ...(params.to === null ? {} : { to: params.to ?? "+1555" }),
       message: params.message,
       media: params.media,
+      ...(params.endTurn === undefined ? {} : { endTurn: params.endTurn }),
     },
   });
   // Wait for async handler to complete.
@@ -348,6 +355,53 @@ describe("subscribeEmbeddedAgentSession", () => {
 
     expect(subscription.didSendViaMessagingTool()).toBe(true);
     expect(subscription.getMessagingToolSentMediaUrls()).toEqual(["file:///tmp/render.mp4"]);
+  });
+
+  it("tracks generic provisional message-tool delivery state", async () => {
+    const { emit, subscription } = createBlockReplyHarness("message_end");
+
+    await emitMessageToolLifecycle({
+      emit,
+      toolCallId: "tool-message-provisional",
+      message: "one sec",
+      endTurn: false,
+      result: { details: { deliveryStatus: "sent" } },
+    });
+    await Promise.resolve();
+
+    expect(subscription.getMessageToolDeliveryState()).toBe("provisional");
+
+    await emitMessageToolLifecycle({
+      emit,
+      toolCallId: "tool-message-terminal",
+      message: "done",
+      endTurn: true,
+      result: { details: { deliveryStatus: "sent" } },
+    });
+    await Promise.resolve();
+
+    expect(subscription.getMessageToolDeliveryState()).toBe("terminal");
+  });
+
+  it("tracks a normalized provisional send to the current target as source delivery", async () => {
+    const { emit, subscription } = createBlockReplyHarness("message_end", {
+      sourceReplyDeliveryMode: "message_tool_only",
+      messageChannel: "whatsapp",
+      currentMessagingTarget: "+1555",
+    });
+
+    await emitMessageToolLifecycle({
+      emit,
+      toolCallId: "tool-message-source-reply-provisional",
+      message: "one sec",
+      to: "+1555",
+      endTurn: false,
+      result: { details: { deliveryStatus: "sent" } },
+    });
+    await Promise.resolve();
+
+    expect(subscription.didDeliverSourceReplyViaMessageTool()).toBe(true);
+    expect(subscription.getMessageToolSourceReplyDeliveryState()).toBe("provisional");
   });
 
   it("tracks internal-ui source replies for message-tool-only final payloads", async () => {

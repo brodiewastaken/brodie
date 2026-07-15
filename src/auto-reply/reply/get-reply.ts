@@ -499,6 +499,7 @@ export async function getReplyFromConfig(
     sessionId,
     isNewSession,
     resetTriggered,
+    resetTriggeredAction,
     systemSent,
     storePath,
     sessionScope,
@@ -700,6 +701,7 @@ export async function getReplyFromConfig(
       triggerBodyNormalized,
       commandAuthorized,
     });
+    fastCommand.resetTriggeredAction ??= resetTriggeredAction;
     logResolverTiming("milestone", "before_fast_directive_prepared_reply");
     const fastReplyResult = await traceGetReplyPhase("reply.run_prepared_reply", () =>
       runPreparedReply({
@@ -827,6 +829,7 @@ export async function getReplyFromConfig(
     perMessageQueueMode,
     perMessageQueueOptions,
   } = directiveResult.result;
+  command.resetTriggeredAction ??= resetTriggeredAction;
   let { directives, cleanedBody, resolvedThinkLevel, resolvedReasoningLevel } =
     directiveResult.result;
   provider = resolvedProvider;
