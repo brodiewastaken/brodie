@@ -260,6 +260,7 @@ export async function runSubagentAnnounceFlow(params: {
   wakeOnDescendantSettle?: boolean;
   signal?: AbortSignal;
   bestEffortDeliver?: boolean;
+  recordRunCorrelationId?: (runId: string) => void;
   onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void;
   onBeforeDeleteChildSession?: () => boolean;
 }): Promise<boolean> {
@@ -595,11 +596,18 @@ export async function runSubagentAnnounceFlow(params: {
       expectsCompletionMessage,
       bestEffortDeliver: params.bestEffortDeliver,
       directIdempotencyKey,
+      recordRunCorrelationId: params.recordRunCorrelationId,
       signal: params.signal,
     });
     params.onDeliveryResult?.(delivery);
-    didAnnounce = delivery.delivered || delivery.terminal === true;
-    if (!delivery.delivered && delivery.path === "direct" && delivery.error) {
+    didAnnounce = delivery.status === "delivered" || delivery.status === "terminal_failure";
+    if (
+      (delivery.status === "failed" ||
+        delivery.status === "terminal_failure" ||
+        delivery.status === "unresolved") &&
+      delivery.path === "direct" &&
+      delivery.error
+    ) {
       defaultRuntime.log(
         `[warn] Subagent completion direct announce failed for run ${params.childRunId}: ${delivery.error}`,
       );

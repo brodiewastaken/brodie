@@ -22,6 +22,7 @@ import {
   markRestartAbortedMainSessions,
   markRestartAbortedMainSessionsFromLocks,
   markStartupOrphanedMainSessionsForRecovery,
+  mainSessionRestartRecoveryTesting,
   recoverStartupOrphanedMainSessions,
   recoverRestartAbortedMainSessions,
 } from "./main-session-restart-recovery.js";
@@ -1352,5 +1353,93 @@ describe("main-session-restart-recovery", () => {
     const store = loadSessionStore(path.join(sessionsDir, "sessions.json"));
     expect(store["agent:main:demo-channel:room-1"]?.status).toBe("failed");
     expect(store["agent:main:demo-channel:room-1"]?.abortedLastRun).toBe(true);
+  });
+
+  it("suppresses the resend notice when a durable child completion owns continuation", async () => {
+    const sessionsDir = await makeSessionsDir();
+    await writeStore(sessionsDir, {
+      "agent:main:demo-channel:room-1": {
+        sessionId: "main-session",
+        updatedAt: Date.now() - 10_000,
+        startedAt: 1_000,
+        status: "running",
+        abortedLastRun: true,
+        lastChannel: "discord",
+        lastTo: "discord:channel:room-1",
+        lastAccountId: "default",
+      },
+    });
+    await writeTranscript(sessionsDir, "main-session", [
+      { role: "user", content: "do the thing" },
+      { role: "assistant", content: "waiting on the child lookup" },
+    ]);
+    const hasPendingDurableContinuation = vi.fn(async () => true);
+
+    const result = await recoverRestartAbortedMainSessions({
+      stateDir: tmpDir,
+      hasPendingDurableContinuation,
+    });
+
+    expect(result).toEqual({ recovered: 0, failed: 0, skipped: 1 });
+    expect(hasPendingDurableContinuation).toHaveBeenCalledWith({
+      interruptedRunStartedAt: 1_000,
+      sessionKey: "agent:main:demo-channel:room-1",
+    });
+    expect(callGateway).not.toHaveBeenCalled();
+    const store = loadSessionStore(path.join(sessionsDir, "sessions.json"));
+    expect(store["agent:main:demo-channel:room-1"]?.status).toBe("failed");
+    expect(store["agent:main:demo-channel:room-1"]?.abortedLastRun).toBe(true);
+  });
+
+  it("does not treat an unrelated older child in the same room as continuation", () => {
+    const baseRun = {
+      runId: "child-run-1",
+      childSessionKey: "agent:main:subagent:child-run-1",
+      requesterSessionKey: "agent:main:demo-channel:room-1",
+      requesterDisplayKey: "room-1",
+      task: "older unrelated lookup",
+      cleanup: "keep" as const,
+      createdAt: 1_000,
+      schedulerReceiptId: "receipt-child-run-1",
+      completionAdmittedAt: 1_500,
+      delivery: { status: "pending" as const },
+    };
+
+    expect(
+      mainSessionRestartRecoveryTesting.isCurrentRunDurableChildContinuation({
+        interruptedRunStartedAt: undefined,
+        run: baseRun,
+      }),
+    ).toBe(false);
+    expect(
+      mainSessionRestartRecoveryTesting.isCurrentRunDurableChildContinuation({
+        interruptedRunStartedAt: 2_000,
+        run: baseRun,
+      }),
+    ).toBe(false);
+    expect(
+      mainSessionRestartRecoveryTesting.isCurrentRunDurableChildContinuation({
+        interruptedRunStartedAt: 900,
+        run: { ...baseRun, delivery: { status: "delivered" } },
+      }),
+    ).toBe(false);
+    expect(
+      mainSessionRestartRecoveryTesting.isCurrentRunDurableChildContinuation({
+        interruptedRunStartedAt: 900,
+        run: baseRun,
+      }),
+    ).toBe(true);
+    expect(
+      mainSessionRestartRecoveryTesting.isCurrentRunDurableChildContinuation({
+        interruptedRunStartedAt: 900,
+        run: { ...baseRun, delivery: undefined },
+      }),
+    ).toBe(true);
+    expect(
+      mainSessionRestartRecoveryTesting.isCurrentRunDurableChildContinuation({
+        interruptedRunStartedAt: 900,
+        run: { ...baseRun, delivery: undefined, expectsCompletionMessage: false },
+      }),
+    ).toBe(false);
   });
 });

@@ -178,7 +178,8 @@ afterEach(() => {
 });
 
 describe("createCodexDynamicToolBridge", () => {
-  it("keeps OpenClaw control-path tools direct while deferring broad tools", () => {
+  it("rejects stale sessions_yield declarations without invoking them", async () => {
+    const sessionsYieldExecute = vi.fn(async () => textToolResult("should not run"));
     const bridge = createCodexDynamicToolBridge({
       tools: [
         createTool({ name: "web_search" }),
@@ -186,7 +187,7 @@ describe("createCodexDynamicToolBridge", () => {
         createTool({ name: HEARTBEAT_RESPONSE_TOOL_NAME }),
         createTool({ name: "agents_list" }),
         createTool({ name: "sessions_spawn" }),
-        createTool({ name: "sessions_yield" }),
+        createTool({ name: "sessions_yield", execute: sessionsYieldExecute }),
       ],
       signal: new AbortController().signal,
     });
@@ -216,7 +217,21 @@ describe("createCodexDynamicToolBridge", () => {
     });
     expectNoNamespace(agentsList);
     expectNoNamespace(sessionsSpawn);
-    expectNoNamespace(sessionsYield);
+    expect(sessionsYield).toBeUndefined();
+
+    const result = await bridge.handleToolCall({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      callId: "call-stale-yield",
+      namespace: null,
+      tool: "sessions_yield",
+      arguments: {},
+    });
+    expect(result).toEqual({
+      contentItems: [{ type: "inputText", text: "Unknown OpenClaw tool: sessions_yield" }],
+      success: false,
+    });
+    expect(sessionsYieldExecute).not.toHaveBeenCalled();
   });
 
   it("keeps configured direct tools in the initial Codex tool context", () => {

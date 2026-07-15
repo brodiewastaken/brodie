@@ -1,6 +1,7 @@
 /** Shared CLI runner test doubles for supervisor, bootstrap, and heartbeat seams. */
 import type { Mock } from "vitest";
 import { beforeEach, vi } from "vitest";
+import type { admitDurableSystemEventWake } from "../infra/durable-system-event-wake.js";
 import type { requestHeartbeat } from "../infra/heartbeat-wake.js";
 import type { enqueueSystemEvent } from "../infra/system-events.js";
 import type { getProcessSupervisor } from "../process/supervisor/index.js";
@@ -15,6 +16,7 @@ type ProcessSupervisor = ReturnType<typeof getProcessSupervisor>;
 type SupervisorSpawnFn = ProcessSupervisor["spawn"];
 type EnqueueSystemEventFn = typeof enqueueSystemEvent;
 type RequestHeartbeatFn = typeof requestHeartbeat;
+type AdmitDurableSystemEventWakeFn = typeof admitDurableSystemEventWake;
 type UnknownMock = Mock<(...args: unknown[]) => unknown>;
 type BootstrapContext = {
   bootstrapFiles: WorkspaceBootstrapFile[];
@@ -25,6 +27,10 @@ type ResolveBootstrapContextForRunMock = Mock<() => Promise<BootstrapContext>>;
 export const supervisorSpawnMock: UnknownMock = vi.fn();
 export const enqueueSystemEventMock: UnknownMock = vi.fn();
 export const requestHeartbeatMock: UnknownMock = vi.fn();
+export const admitDurableSystemEventWakeMock: UnknownMock = vi.fn(async () => ({
+  accepted: false as const,
+  reason: "disabled" as const,
+}));
 
 const hoisted = vi.hoisted(
   (): {
@@ -93,6 +99,27 @@ setCliRunnerExecuteTestDeps({
   ) => enqueueSystemEventMock(text, options) as ReturnType<EnqueueSystemEventFn>,
   requestHeartbeat: (options?: Parameters<RequestHeartbeatFn>[0]) =>
     requestHeartbeatMock(options) as ReturnType<RequestHeartbeatFn>,
+  admitDurableSystemEventWake: async (options: Parameters<AdmitDurableSystemEventWakeFn>[0]) => {
+    enqueueSystemEventMock(options.systemEvent.text, {
+      sessionKey: options.sessionKey,
+      contextKey: options.systemEvent.contextKey,
+      deliveryContext: options.systemEvent.deliveryContext,
+    });
+    const admission = (await admitDurableSystemEventWakeMock(options)) as Awaited<
+      ReturnType<AdmitDurableSystemEventWakeFn>
+    >;
+    if (!admission.accepted) {
+      requestHeartbeatMock({
+        source: options.source,
+        intent: options.intent,
+        reason: options.reason,
+        sessionKey: options.sessionKey,
+        sourceGeneration: options.sourceGeneration,
+        producerKind: options.producerKind,
+      });
+    }
+    return admission;
+  },
 });
 
 setCliRunnerPrepareTestDeps({

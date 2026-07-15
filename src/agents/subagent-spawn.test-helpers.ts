@@ -141,6 +141,8 @@ export async function loadSubagentSpawnModuleForTest(params: {
   resolveParentForkDecisionMock?: MockFn;
   pruneLegacyStoreKeysMock?: MockFn;
   registerSubagentRunMock?: MockFn;
+  replaceSubagentRunAfterSteerMock?: MockFn;
+  releaseSubagentRunMock?: MockFn;
   emitSessionLifecycleEventMock?: MockFn;
   hookRunner?: HookRunner;
   resolveAgentConfig?: (cfg: Record<string, unknown>, agentId: string) => unknown;
@@ -364,6 +366,8 @@ export async function loadSubagentSpawnModuleForTest(params: {
     countActiveRunsForSession: params.countActiveRunsForSession ?? (() => 0),
     registerSubagentRun:
       params.registerSubagentRunMock ?? vi.fn((_record: Record<string, unknown>) => undefined),
+    replaceSubagentRunAfterSteer: params.replaceSubagentRunAfterSteerMock ?? vi.fn(() => true),
+    releaseSubagentRun: params.releaseSubagentRunMock ?? vi.fn(),
     resetSubagentRegistryForTests,
   }));
 

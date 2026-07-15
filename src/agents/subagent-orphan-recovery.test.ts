@@ -1,11 +1,5 @@
-// Subagent orphan-recovery tests cover restart recovery for child sessions whose
-// embedded run was interrupted while the registry still considers them active.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as sessions from "../config/sessions.js";
-import * as gateway from "../gateway/call.js";
-import * as sessionUtils from "../gateway/session-transcript-readers.js";
-import { resolveInternalSessionEffectsTranscriptPath } from "./internal-session-effects.js";
-import * as announceDelivery from "./subagent-announce-delivery.js";
 import {
   recoverOrphanedSubagentSessions,
   scheduleOrphanRecovery,
@@ -13,12 +7,8 @@ import {
 import * as subagentRegistrySteerRuntime from "./subagent-registry-steer-runtime.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
-// Mocks are installed before importing the recovery module so registry/runtime
-// helpers resolve to deterministic restart fixtures.
 vi.mock("../config/config.js", () => ({
-  getRuntimeConfig: vi.fn(() => ({
-    session: { store: undefined },
-  })),
+  getRuntimeConfig: vi.fn(() => ({ session: { store: undefined } })),
 }));
 
 vi.mock("../config/sessions.js", () => ({
@@ -28,36 +18,19 @@ vi.mock("../config/sessions.js", () => ({
   updateSessionStore: vi.fn(async () => {}),
 }));
 
-vi.mock("../gateway/call.js", () => ({
-  callGateway: vi.fn(async () => ({ runId: "test-run-id" })),
-}));
-
-vi.mock("../gateway/session-transcript-readers.js", () => ({
-  readSessionMessagesAsync: vi.fn(async () => []),
-}));
-
-vi.mock("./subagent-announce-delivery.js", () => ({
-  deliverSubagentAnnouncement: vi.fn(async () => ({ delivered: true, path: "direct" })),
-  isInternalAnnounceRequesterSession: vi.fn(() => false),
-  loadRequesterSessionEntry: vi.fn(() => ({ entry: {} })),
-}));
-
-vi.mock("./subagent-announce-origin.js", () => ({
-  resolveAnnounceOrigin: vi.fn((entry, requesterOrigin) => requesterOrigin),
-}));
-
 vi.mock("./subagent-registry-steer-runtime.js", () => ({
-  replaceSubagentRunAfterSteer: vi.fn(() => true),
   finalizeInterruptedSubagentRun: vi.fn(async () => 1),
 }));
 
-function createTestRunRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecord {
+const CHILD_SESSION_KEY = "agent:main:subagent:test-session-1";
+
+function createRun(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecord {
   return {
     runId: "run-1",
-    childSessionKey: "agent:main:subagent:test-session-1",
-    requesterSessionKey: "agent:main:quietchat:direct:+1234567890",
+    childSessionKey: CHILD_SESSION_KEY,
+    requesterSessionKey: "agent:main:quietchat:direct:requester",
     requesterDisplayKey: "main",
-    task: "Test task: implement feature X",
+    task: "side-effecting delegated task",
     cleanup: "delete",
     createdAt: Date.now() - 60_000,
     startedAt: Date.now() - 55_000,
@@ -65,15 +38,15 @@ function createTestRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subage
   };
 }
 
-function createActiveRuns(...runs: SubagentRunRecord[]) {
+function activeRuns(...runs: SubagentRunRecord[]) {
   return new Map(runs.map((run) => [run.runId, run] satisfies [string, SubagentRunRecord]));
 }
 
-function mockSingleAbortedSession(
+function mockStore(
   overrides: Partial<NonNullable<ReturnType<typeof sessions.loadSessionStore>[string]>> = {},
 ) {
   vi.mocked(sessions.loadSessionStore).mockReturnValue({
-    "agent:main:subagent:test-session-1": {
+    [CHILD_SESSION_KEY]: {
       sessionId: "session-abc",
       updatedAt: Date.now(),
       abortedLastRun: true,
@@ -82,51 +55,15 @@ function mockSingleAbortedSession(
   });
 }
 
-async function expectSkippedRecovery(store: ReturnType<typeof sessions.loadSessionStore>) {
-  vi.mocked(sessions.loadSessionStore).mockReturnValue(store);
-
-  const result = await recoverOrphanedSubagentSessions({
-    getActiveRuns: () => createActiveRuns(createTestRunRecord()),
-  });
-
-  expect(result.recovered).toBe(0);
-  expect(result.skipped).toBe(1);
-  expect(gateway.callGateway).not.toHaveBeenCalled();
-}
-
-function getResumeMessage() {
-  const call = requireRecord(
-    firstCallParam(vi.mocked(gateway.callGateway).mock.calls, "resume gateway"),
-    "resume gateway params",
-  );
-  const params = call.params as Record<string, unknown>;
-  return params.message as string;
-}
-
-function firstCallParam(calls: ReadonlyArray<readonly unknown[]>, label: string) {
-  const call = calls[0];
-  if (call === undefined) {
-    throw new Error(`expected ${label} call`);
-  }
-  return call[0];
-}
-
-function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`expected ${label} to be a record`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function requireFirstUpdateSessionStoreCall() {
+function requireUpdateCallback() {
   const call = vi.mocked(sessions.updateSessionStore).mock.calls[0];
-  if (call === undefined) {
-    throw new Error("expected update session store call");
+  if (!call || typeof call[1] !== "function") {
+    throw new Error("expected session-store update callback");
   }
-  return call;
+  return call[1];
 }
 
-describe("subagent-orphan-recovery", () => {
+describe("subagent restart reconciliation", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
@@ -137,525 +74,286 @@ describe("subagent-orphan-recovery", () => {
     vi.restoreAllMocks();
   });
 
-  it("recovers orphaned sessions with abortedLastRun=true", async () => {
-    const sessionEntry = {
-      sessionId: "session-abc",
-      updatedAt: Date.now(),
-      abortedLastRun: true,
-    };
-
-    vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:test-session-1": sessionEntry,
-    });
-
-    const run = createTestRunRecord();
-    const activeRuns = new Map<string, SubagentRunRecord>();
-    activeRuns.set("run-1", run);
+  it("never replays an aborted task without durable live-runtime proof", async () => {
+    mockStore();
 
     const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
+      getActiveRuns: () => activeRuns(createRun()),
     });
 
-    expect(result.recovered).toBe(1);
-    expect(result.failed).toBe(0);
-    expect(result.skipped).toBe(0);
-
-    // Recovery resumes through the gateway and records the new run id so the
-    // registry follows the resumed transcript instead of the idempotency key.
-    expect(gateway.callGateway).toHaveBeenCalledOnce();
-    const opts = requireRecord(
-      firstCallParam(vi.mocked(gateway.callGateway).mock.calls, "gateway resume"),
-      "gateway resume params",
-    );
-    expect(opts.method).toBe("agent");
-    const params = opts.params as Record<string, unknown>;
-    expect(params.sessionKey).toBe("agent:main:subagent:test-session-1");
-    expect(params.message).toContain("gateway reload");
-    expect(params.message).toContain("Test task: implement feature X");
-    expect(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).toHaveBeenCalledOnce();
-    const replaceParams = requireRecord(
-      firstCallParam(
-        vi.mocked(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).mock.calls,
-        "run replacement",
-      ),
-      "run replacement params",
-    );
-    expect(replaceParams.previousRunId).toBe("run-1");
-    expect(replaceParams.nextRunId).toBe("test-run-id");
-    expect(replaceParams.fallback).toBe(run);
-    expect(replaceParams.transcriptFile).toBe(
-      resolveInternalSessionEffectsTranscriptPath("test-run-id"),
-    );
-    expect(replaceParams.transcriptFile).not.toBe(
-      resolveInternalSessionEffectsTranscriptPath(params.idempotencyKey as string),
-    );
-  });
-
-  it("skips sessions that are not aborted", async () => {
-    await expectSkippedRecovery({
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: Date.now(),
-        abortedLastRun: false,
-      },
-    });
-  });
-
-  it("skips runs that have already ended", async () => {
-    const activeRuns = new Map<string, SubagentRunRecord>();
-    activeRuns.set(
-      "run-1",
-      createTestRunRecord({
-        endedAt: Date.now() - 1000,
-      }),
-    );
-
-    const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
-    });
-
-    expect(result.recovered).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(gateway.callGateway).not.toHaveBeenCalled();
-  });
-
-  it("recovers restart-aborted timeout runs even when the registry marked them ended", async () => {
-    vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
-      },
-    });
-
-    const activeRuns = createActiveRuns(
-      createTestRunRecord({
-        endedAt: Date.now() - 1_000,
-        outcome: {
-          status: "timeout",
+    expect(result).toMatchObject({
+      recovered: 0,
+      failed: 0,
+      skipped: 1,
+      failedRuns: [
+        {
+          runId: "run-1",
+          childSessionKey: CHILD_SESSION_KEY,
         },
-      }),
-    );
-
-    const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
+      ],
     });
+    expect(result.failedRuns[0]?.error).toContain("automatic replay is unsafe");
+    expect(sessions.updateSessionStore).toHaveBeenCalledOnce();
 
-    expect(result.recovered).toBe(1);
-    expect(result.failed).toBe(0);
-    expect(result.skipped).toBe(0);
-    expect(gateway.callGateway).toHaveBeenCalledOnce();
+    const persisted: ReturnType<typeof sessions.loadSessionStore> = {
+      [CHILD_SESSION_KEY]: {
+        sessionId: "session-abc",
+        updatedAt: 0,
+        abortedLastRun: true,
+      },
+    };
+    await requireUpdateCallback()(persisted);
+    const entry = persisted[CHILD_SESSION_KEY];
+    expect(entry?.abortedLastRun).toBe(false);
+    expect(entry?.subagentRecovery?.wedgedReason).toContain("automatic replay is unsafe");
   });
 
-  it("handles multiple orphaned sessions", async () => {
+  it("does not classify a non-aborted or already-terminal run as interrupted", async () => {
     vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:session-a": {
-        sessionId: "id-a",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
-      },
-      "agent:main:subagent:session-b": {
-        sessionId: "id-b",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
-      },
-      "agent:main:subagent:session-c": {
-        sessionId: "id-c",
+      [CHILD_SESSION_KEY]: {
+        sessionId: "session-abc",
         updatedAt: Date.now(),
         abortedLastRun: false,
       },
     });
+    const notAborted = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => activeRuns(createRun()),
+    });
+    expect(notAborted).toMatchObject({ recovered: 0, failed: 0, skipped: 1, failedRuns: [] });
 
-    const activeRuns = new Map<string, SubagentRunRecord>();
-    activeRuns.set(
-      "run-a",
-      createTestRunRecord({
-        runId: "run-a",
-        childSessionKey: "agent:main:subagent:session-a",
-        task: "Task A",
-      }),
-    );
-    activeRuns.set(
-      "run-b",
-      createTestRunRecord({
-        runId: "run-b",
-        childSessionKey: "agent:main:subagent:session-b",
-        task: "Task B",
-      }),
-    );
-    activeRuns.set(
-      "run-c",
-      createTestRunRecord({
-        runId: "run-c",
-        childSessionKey: "agent:main:subagent:session-c",
-        task: "Task C",
-      }),
+    mockStore();
+    const ended = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => activeRuns(createRun({ endedAt: Date.now() - 1_000 })),
+    });
+    expect(ended).toMatchObject({ recovered: 0, failed: 0, skipped: 1, failedRuns: [] });
+  });
+
+  it("reclassifies legacy restart timeouts as one structured interruption", async () => {
+    mockStore();
+    const run = createRun({
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "timeout" },
+    });
+
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => activeRuns(run),
+    });
+
+    expect(result.failedRuns).toHaveLength(1);
+    expect(run.endedAt).toBeUndefined();
+    expect(run.execution?.status).toBe("interrupted");
+    expect(run.execution?.interruptionReason).toBe("gateway-restart");
+  });
+
+  it("selects only the latest generation when a child session has no persisted marker", async () => {
+    mockStore();
+    const runs = activeRuns(
+      createRun({ runId: "run-old", generation: 1 }),
+      createRun({ runId: "run-new", generation: 2 }),
     );
 
     const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
+      getActiveRuns: () => runs,
     });
 
-    expect(result.recovered).toBe(2);
-    expect(result.skipped).toBe(1);
-    expect(gateway.callGateway).toHaveBeenCalledTimes(2);
+    expect(result.failedRuns).toMatchObject([
+      { runId: "run-new", childSessionKey: CHILD_SESSION_KEY },
+    ]);
+    expect(result.skipped).toBe(2);
   });
 
-  it("handles callGateway failure gracefully and preserves abortedLastRun flag", async () => {
-    vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
+  it("selects only the exact persisted interruption marker when a child session was reused", async () => {
+    mockStore({
+      abortedLastRun: false,
+      subagentRecovery: {
+        automaticAttempts: 1,
+        lastAttemptAt: Date.now() - 1_000,
+        lastRunId: "run-old",
+        wedgedAt: Date.now() - 1_000,
+        wedgedReason:
+          "durable runtime proof is unavailable after the gateway restart; automatic replay is unsafe",
+      },
+    });
+    const runs = activeRuns(
+      createRun({ runId: "run-old", generation: 1 }),
+      createRun({ runId: "run-new", generation: 2 }),
+    );
+
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => runs,
+    });
+
+    expect(result.failedRuns).toMatchObject([
+      { runId: "run-old", childSessionKey: CHILD_SESSION_KEY },
+    ]);
+    expect(result.skipped).toBe(2);
+  });
+
+  it("ignores an ended interruption marker when a newer aborted generation reused the session", async () => {
+    mockStore({
+      abortedLastRun: true,
+      subagentRecovery: {
+        automaticAttempts: 1,
+        lastAttemptAt: Date.now() - 1_000,
+        lastRunId: "run-old",
+        wedgedAt: Date.now() - 1_000,
+        wedgedReason:
+          "durable runtime proof is unavailable after the gateway restart; automatic replay is unsafe",
+      },
+    });
+    const runs = activeRuns(
+      createRun({ runId: "run-old", generation: 1, endedAt: Date.now() - 500 }),
+      createRun({ runId: "run-new", generation: 2 }),
+    );
+
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => runs,
+    });
+
+    expect(result.failedRuns).toMatchObject([
+      { runId: "run-new", childSessionKey: CHILD_SESSION_KEY },
+    ]);
+  });
+
+  it("does not reclassify an older terminal timeout for a newer aborted generation", async () => {
+    mockStore({ abortedLastRun: true });
+    const oldRun = createRun({
+      runId: "run-old-timeout",
+      generation: 1,
+      endedAt: Date.now() - 1_000,
+      outcome: { status: "timeout" },
+    });
+    const newRun = createRun({ runId: "run-new-aborted", generation: 2 });
+
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => activeRuns(oldRun, newRun),
+    });
+
+    expect(result.failedRuns).toMatchObject([
+      { runId: "run-new-aborted", childSessionKey: CHILD_SESSION_KEY },
+    ]);
+    expect(oldRun).toMatchObject({
+      endedAt: expect.any(Number),
+      outcome: { status: "timeout" },
+    });
+  });
+
+  it("settles an unfinished marker and the latest aborted generation exactly once", async () => {
+    mockStore({
+      abortedLastRun: true,
+      subagentRecovery: {
+        automaticAttempts: 1,
+        lastAttemptAt: Date.now() - 1_000,
+        lastRunId: "run-old",
+        wedgedAt: Date.now() - 1_000,
+        wedgedReason:
+          "durable runtime proof is unavailable after the gateway restart; automatic replay is unsafe",
+      },
+    });
+    const runs = activeRuns(
+      createRun({ runId: "run-old", generation: 1 }),
+      createRun({ runId: "run-new", generation: 2 }),
+    );
+
+    scheduleOrphanRecovery({
+      getActiveRuns: () => runs,
+      delayMs: 1,
+      maxRetries: 1,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => {
+      expect(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).toHaveBeenCalledTimes(2);
+    });
+
+    expect(
+      vi
+        .mocked(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun)
+        .mock.calls.map(([params]) => params.runId)
+        .filter((runId): runId is string => typeof runId === "string")
+        .toSorted((left, right) => left.localeCompare(right)),
+    ).toEqual(["run-new", "run-old"]);
+  });
+
+  it("retries finalization from a persisted interruption marker after a crash", async () => {
+    mockStore({
+      abortedLastRun: false,
+      subagentRecovery: {
+        automaticAttempts: 2,
+        lastAttemptAt: Date.now() - 1_000,
+        lastRunId: "run-1",
+        wedgedAt: Date.now() - 1_000,
+        wedgedReason:
+          "durable runtime proof is unavailable after the gateway restart; automatic replay is unsafe",
       },
     });
 
-    vi.mocked(gateway.callGateway).mockRejectedValue(new Error("gateway unavailable"));
+    const result = await recoverOrphanedSubagentSessions({
+      getActiveRuns: () => activeRuns(createRun()),
+    });
 
-    const activeRuns = new Map<string, SubagentRunRecord>();
-    activeRuns.set("run-1", createTestRunRecord());
+    expect(result.failedRuns).toMatchObject([
+      { runId: "run-1", childSessionKey: CHILD_SESSION_KEY },
+    ]);
+  });
+
+  it("reports storage failure without replaying the task", async () => {
+    mockStore();
+    vi.mocked(sessions.updateSessionStore).mockRejectedValue(new Error("state unavailable"));
 
     const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
+      getActiveRuns: () => activeRuns(createRun()),
     });
 
     expect(result.recovered).toBe(0);
     expect(result.failed).toBe(1);
-    expect(result.failedRuns).toHaveLength(1);
-    const failedRun = requireRecord(result.failedRuns[0], "failed run");
-    expect(failedRun.runId).toBe("run-1");
-    expect(failedRun.childSessionKey).toBe("agent:main:subagent:test-session-1");
-    expect(failedRun.error).toBe("gateway unavailable");
-
-    // abortedLastRun flag should NOT be cleared on failure,
-    // so the next restart can retry the recovery
-    expect(sessions.updateSessionStore).not.toHaveBeenCalled();
+    expect(result.failedRuns[0]?.error).toContain("state unavailable");
   });
 
-  it("returns empty results when no active runs exist", async () => {
-    const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => new Map(),
-    });
-
-    expect(result.recovered).toBe(0);
-    expect(result.failed).toBe(0);
-    expect(result.skipped).toBe(0);
-  });
-
-  it("skips sessions with missing session entry in store", async () => {
-    await expectSkippedRecovery({});
-  });
-
-  it("clears abortedLastRun flag after successful resume", async () => {
-    // Ensure callGateway succeeds for this test
-    vi.mocked(gateway.callGateway).mockResolvedValue({ runId: "resumed-run" } as never);
-
-    vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
-      },
-    });
-
-    const activeRuns = new Map<string, SubagentRunRecord>();
-    activeRuns.set("run-1", createTestRunRecord());
-
-    await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
-    });
-
-    // updateSessionStore should have been called AFTER successful resume to clear the flag
-    expect(sessions.updateSessionStore).toHaveBeenCalledOnce();
-    const calls = vi.mocked(sessions.updateSessionStore).mock.calls;
-    const [storePath, updater] = calls[0];
-    expect(storePath).toBe("/tmp/test-sessions.json");
-
-    // Simulate the updater to verify it clears abortedLastRun
-    const mockStore: Record<string, { abortedLastRun?: boolean; updatedAt?: number }> = {
-      "agent:main:subagent:test-session-1": {
-        abortedLastRun: true,
-        updatedAt: 0,
-      },
-    };
-    (updater as (store: Record<string, unknown>) => void)(mockStore);
-    expect(mockStore["agent:main:subagent:test-session-1"]?.abortedLastRun).toBe(false);
-  });
-
-  it("persists accepted recovery attempts after successful resume", async () => {
-    vi.mocked(gateway.callGateway).mockResolvedValue({ runId: "resumed-run" } as never);
-    mockSingleAbortedSession();
-
-    await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => createActiveRuns(createTestRunRecord()),
-    });
-
-    const updateCall = requireFirstUpdateSessionStoreCall();
-    const updater = updateCall[1];
-    if (typeof updater !== "function") {
-      throw new Error("expected update session store callback");
-    }
-    const mockStore: ReturnType<typeof sessions.loadSessionStore> = {
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: 0,
-        abortedLastRun: true,
-      },
-    };
-    await updater(mockStore);
-    const sessionEntry = requireRecord(
-      mockStore["agent:main:subagent:test-session-1"],
-      "updated session entry",
-    );
-    expect(sessionEntry.abortedLastRun).toBe(false);
-    const recovery = requireRecord(sessionEntry.subagentRecovery, "subagent recovery");
-    expect(recovery.automaticAttempts).toBe(1);
-    expect(recovery.lastRunId).toBe("run-1");
-    expect(recovery.lastAttemptAt).toBeTypeOf("number");
-  });
-
-  it("tombstones rapid repeated accepted recovery before resuming again", async () => {
-    const now = Date.now();
-    mockSingleAbortedSession({
-      subagentRecovery: {
-        automaticAttempts: 2,
-        lastAttemptAt: now - 30_000,
-        lastRunId: "previous-run",
-      },
-    });
-
-    const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => createActiveRuns(createTestRunRecord()),
-    });
-
-    expect(result.recovered).toBe(0);
-    expect(result.failed).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(result.failedRuns).toHaveLength(1);
-    const blockedRun = requireRecord(result.failedRuns[0], "blocked run");
-    expect(blockedRun.runId).toBe("run-1");
-    expect(blockedRun.childSessionKey).toBe("agent:main:subagent:test-session-1");
-    expect(blockedRun.error).toContain("recovery blocked after 2 rapid accepted resume attempts");
-    expect(gateway.callGateway).not.toHaveBeenCalled();
-    expect(sessions.updateSessionStore).toHaveBeenCalledOnce();
-
-    const updateCall = requireFirstUpdateSessionStoreCall();
-    const updater = updateCall[1];
-    if (typeof updater !== "function") {
-      throw new Error("expected update session store callback");
-    }
-    const mockStore: ReturnType<typeof sessions.loadSessionStore> = {
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: 0,
-        abortedLastRun: true,
-        subagentRecovery: {
-          automaticAttempts: 2,
-          lastAttemptAt: now - 30_000,
-          lastRunId: "previous-run",
-        },
-      },
-    };
-    await updater(mockStore);
-    const sessionEntry = requireRecord(
-      mockStore["agent:main:subagent:test-session-1"],
-      "wedged session entry",
-    );
-    expect(sessionEntry.abortedLastRun).toBe(false);
-    const recovery = requireRecord(sessionEntry.subagentRecovery, "wedged recovery");
-    expect(recovery.automaticAttempts).toBe(2);
-    expect(recovery.lastRunId).toBe("run-1");
-    expect(recovery.wedgedAt).toBeTypeOf("number");
-    expect(recovery.wedgedReason).toContain("recovery blocked");
-  });
-
-  it("skips already tombstoned wedged sessions without rewriting them", async () => {
-    mockSingleAbortedSession({
-      subagentRecovery: {
-        automaticAttempts: 2,
-        lastAttemptAt: Date.now() - 20_000,
-        lastRunId: "previous-run",
-        wedgedAt: Date.now() - 10_000,
-        wedgedReason: "subagent orphan recovery blocked after 2 rapid accepted resume attempts",
-      },
-    });
-
-    const result = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => createActiveRuns(createTestRunRecord()),
-    });
-
-    expect(result.recovered).toBe(0);
-    expect(result.failed).toBe(0);
-    expect(result.skipped).toBe(1);
-    expect(result.failedRuns).toHaveLength(1);
-    expect(gateway.callGateway).not.toHaveBeenCalled();
-    expect(sessions.updateSessionStore).not.toHaveBeenCalled();
-  });
-
-  it("truncates long task descriptions in resume message", async () => {
-    mockSingleAbortedSession();
-
-    const longTask = "x".repeat(5000);
-    const activeRuns = createActiveRuns(createTestRunRecord({ task: longTask }));
-
-    await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
-    });
-
-    const message = getResumeMessage();
-    // Message should contain truncated task (2000 chars + "...")
-    expect(message.length).toBeLessThan(5000);
-    expect(message).toContain("...");
-  });
-
-  it("includes last human message in resume when available", async () => {
-    mockSingleAbortedSession({ sessionFile: "session-abc.jsonl" });
-
-    vi.mocked(sessionUtils.readSessionMessagesAsync).mockResolvedValue([
-      { role: "user", content: [{ type: "text", text: "Please build feature Y" }] },
-      { role: "assistant", content: [{ type: "text", text: "Working on it..." }] },
-      { role: "user", content: [{ type: "text", text: "Also add tests for it" }] },
-      { role: "assistant", content: [{ type: "text", text: "Sure, adding tests now." }] },
-    ]);
-
-    const activeRuns = createActiveRuns(createTestRunRecord());
-
-    await recoverOrphanedSubagentSessions({ getActiveRuns: () => activeRuns });
-
-    const message = getResumeMessage();
-    expect(message).toContain("Also add tests for it");
-    expect(message).toContain("last message from the user");
-  });
-
-  it("adds config change hint when assistant messages reference config modifications", async () => {
-    mockSingleAbortedSession();
-
-    vi.mocked(sessionUtils.readSessionMessagesAsync).mockResolvedValue([
-      { role: "user", content: "Update the config" },
-      { role: "assistant", content: "I've modified openclaw.json to add the new setting." },
-    ]);
-
-    const activeRuns = createActiveRuns(createTestRunRecord());
-
-    await recoverOrphanedSubagentSessions({ getActiveRuns: () => activeRuns });
-
-    const message = getResumeMessage();
-    expect(message).toContain("config changes from your previous run were already applied");
-  });
-
-  it("does not send parent-visible recovery-progress announcements on retry", async () => {
-    mockSingleAbortedSession();
-
-    const activeRuns = createActiveRuns(createTestRunRecord());
-
-    await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
-    });
-
-    expect(announceDelivery.deliverSubagentAnnouncement).not.toHaveBeenCalled();
-
-    await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
-    });
-
-    expect(announceDelivery.deliverSubagentAnnouncement).not.toHaveBeenCalled();
-  });
-
-  it("prevents duplicate resume when updateSessionStore fails", async () => {
-    vi.mocked(gateway.callGateway).mockResolvedValue({ runId: "new-run" } as never);
-    vi.mocked(sessions.updateSessionStore).mockRejectedValue(new Error("write failed"));
-
-    vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
-      },
-    });
-
-    const activeRuns = new Map<string, SubagentRunRecord>();
-    activeRuns.set("run-1", createTestRunRecord());
-    activeRuns.set(
-      "run-2",
-      createTestRunRecord({
-        runId: "run-2",
-      }),
-    );
-
-    const result = await recoverOrphanedSubagentSessions({ getActiveRuns: () => activeRuns });
-
-    expect(result.recovered).toBe(1);
-    expect(result.skipped).toBe(1);
-    expect(gateway.callGateway).toHaveBeenCalledOnce();
-  });
-
-  it("does not retry a session after the gateway accepted resume but run remap failed", async () => {
-    vi.mocked(gateway.callGateway).mockResolvedValue({ runId: "new-run" } as never);
-    vi.mocked(subagentRegistrySteerRuntime.replaceSubagentRunAfterSteer).mockReturnValue(false);
-
-    vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
-      },
-    });
-
-    const activeRuns = new Map<string, SubagentRunRecord>();
-    activeRuns.set("run-1", createTestRunRecord());
-    const resumedSessionKeys = new Set<string>();
-
-    const first = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
-      resumedSessionKeys,
-    });
-    const second = await recoverOrphanedSubagentSessions({
-      getActiveRuns: () => activeRuns,
-      resumedSessionKeys,
-    });
-
-    expect(first.recovered).toBe(1);
-    expect(first.failed).toBe(0);
-    expect(second.recovered).toBe(0);
-    expect(second.skipped).toBe(1);
-    expect(gateway.callGateway).toHaveBeenCalledOnce();
-    expect(sessions.updateSessionStore).toHaveBeenCalledOnce();
-  });
-
-  it("finalizes interrupted runs with a readable failure after recovery retries are exhausted", async () => {
-    vi.mocked(sessions.loadSessionStore).mockReturnValue({
-      "agent:main:subagent:test-session-1": {
-        sessionId: "session-abc",
-        updatedAt: Date.now(),
-        abortedLastRun: true,
-      },
-    });
-    vi.mocked(gateway.callGateway).mockRejectedValue(new Error("service restart"));
-
-    const activeRuns = createActiveRuns(createTestRunRecord());
+  it("finalizes the interrupted run once with explicit safe-retry guidance", async () => {
+    mockStore();
 
     scheduleOrphanRecovery({
-      getActiveRuns: () => activeRuns,
+      getActiveRuns: () => activeRuns(createRun()),
+      delayMs: 1,
+      maxRetries: 3,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => {
+      expect(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).toHaveBeenCalledOnce();
+    });
+    const call = vi.mocked(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).mock
+      .calls[0];
+    expect(call?.[0]).toMatchObject({
+      runId: "run-1",
+      childSessionKey: CHILD_SESSION_KEY,
+    });
+    expect(call?.[0].error).toContain("Automatic replay was not attempted");
+    expect(call?.[0].error).toContain("Review known side effects before retrying");
+  });
+
+  it("keeps retrying persisted interruption finalization after one retry cycle is exhausted", async () => {
+    mockStore();
+    vi.mocked(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun)
+      .mockRejectedValueOnce(new Error("registry unavailable"))
+      .mockRejectedValueOnce(new Error("registry still unavailable"))
+      .mockResolvedValueOnce(1);
+
+    scheduleOrphanRecovery({
+      getActiveRuns: () => activeRuns(createRun()),
       delayMs: 1,
       maxRetries: 1,
     });
-
     await vi.advanceTimersByTimeAsync(1);
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).toHaveBeenCalledTimes(1);
+    });
     await vi.advanceTimersByTimeAsync(2);
-    await Promise.resolve();
-
-    expect(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).toHaveBeenCalledOnce();
-    const finalizeParams = requireRecord(
-      firstCallParam(
-        vi.mocked(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).mock.calls,
-        "interrupted run finalization",
-      ),
-      "interrupted run finalization params",
-    );
-    expect(finalizeParams.runId).toBe("run-1");
-    expect(finalizeParams.childSessionKey).toBe("agent:main:subagent:test-session-1");
-    expect(finalizeParams.error).toContain("Automatic recovery failed after 2 attempts");
-    expect(finalizeParams.error).toContain("service restart");
+    await vi.waitFor(() => {
+      expect(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).toHaveBeenCalledTimes(2);
+    });
+    await vi.advanceTimersByTimeAsync(2);
+    await vi.waitFor(() => {
+      expect(subagentRegistrySteerRuntime.finalizeInterruptedSubagentRun).toHaveBeenCalledTimes(3);
+    });
   });
 });

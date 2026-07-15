@@ -2159,9 +2159,6 @@ async function buildResponsesPayload(
     /subagent handoff/i.test(allInputText) ||
     buildExplicitSessionsSpawnArgs(allInputText) !== null;
   const canCallSessionsSpawn = hasDeclaredTool(body, "sessions_spawn") || canCallMockSubagentTool;
-  const canCallSessionsYield =
-    hasDeclaredTool(body, "sessions_yield") ||
-    QA_SUBAGENT_DIRECT_FALLBACK_PROMPT_RE.test(allInputText);
   const buildToolProgressReadEvents = (pattern: RegExp) => {
     const toolProgressPrompt = extractLastMatchingUserText(extractAllUserTexts(input), pattern);
     return buildToolCallEventsWithArgs("read", {
@@ -2275,10 +2272,8 @@ async function buildResponsesPayload(
         mode: "run",
       });
     }
-    if (toolOutput && canCallSessionsYield && !/\byielded\b/i.test(toolOutput)) {
-      return buildToolCallEventsWithArgs("sessions_yield", {
-        message: `Waiting for ${QA_SUBAGENT_DIRECT_FALLBACK_MARKER}.`,
-      });
+    if (toolOutput) {
+      return buildAssistantEvents("");
     }
   }
   if (/remember this fact/i.test(prompt)) {

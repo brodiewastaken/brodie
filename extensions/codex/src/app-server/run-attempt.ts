@@ -793,7 +793,6 @@ export async function runCodexAppServerAttempt(
       },
     );
   }
-  let yieldDetected = false;
   const toolOutcomeOrdinals = new Map<string, number>();
   const suppressedDynamicToolOutcomeOrdinals = new Set<number>();
   const onCodexToolOutcome = params.onToolOutcome
@@ -846,9 +845,6 @@ export async function runCodexAppServerAttempt(
     sessionAgentId,
     pluginConfig,
     profilerEnabled,
-    onYieldDetected: () => {
-      yieldDetected = true;
-    },
     onCodexAppServerEvent: (event) => {
       void emitCodexAppServerEvent(params, event);
     },
@@ -875,9 +871,6 @@ export async function runCodexAppServerAttempt(
     forceHeartbeatTool: true,
     ignoreDisableMessageTool: true,
     ignoreRuntimePlan: true,
-    onYieldDetected: () => {
-      yieldDetected = true;
-    },
     onCodexAppServerEvent: (event) => {
       void emitCodexAppServerEvent(params, event);
     },
@@ -3255,7 +3248,7 @@ export async function runCodexAppServerAttempt(
         timeoutMs: turnWatchTimeoutMs,
       });
     }
-    const result = activeProjector.buildResult(toolBridge.telemetry, { yieldDetected });
+    const result = activeProjector.buildResult(toolBridge.telemetry);
     const effectiveTimedOut = timedOut && !recoveredTurnWatchTimeout;
     const effectiveTurnCompletionIdleTimedOut =
       turnCompletionIdleTimedOut && !recoveredTurnWatchTimeout;
@@ -3429,7 +3422,7 @@ export async function runCodexAppServerAttempt(
         contextEngine: activeContextEngine,
         promptError: Boolean(finalPromptError),
         aborted: finalAborted,
-        yieldAborted: Boolean(result.yieldDetected),
+        yieldAborted: false,
         sessionIdUsed: activeSessionId,
         sessionKey: contextSessionKey,
         sessionFile: activeSessionFile,
@@ -3525,7 +3518,6 @@ export async function runCodexAppServerAttempt(
       threadId: thread.threadId,
       turnId: activeTurnId,
       timedOut: effectiveTimedOut,
-      yieldDetected,
     });
     trajectoryRecorder?.recordEvent("session.ended", {
       status: finalPromptError
@@ -3536,7 +3528,6 @@ export async function runCodexAppServerAttempt(
       threadId: thread.threadId,
       turnId: activeTurnId,
       timedOut: effectiveTimedOut,
-      yieldDetected,
       promptError: normalizeCodexTrajectoryError(finalPromptError),
     });
     markTrajectoryEndRecorded();
@@ -3614,20 +3605,7 @@ export async function runCodexAppServerAttempt(
     if (!timedOut && !runAbortController.signal.aborted) {
       await steeringQueueRef.current?.flushPending();
     }
-    const yieldedOneShotCleanupDeferred =
-      !timedOut &&
-      params.cleanupBundleMcpOnRunEnd === true &&
-      yieldDetected &&
-      nativeSubagentMonitorRef.current?.deferUntilParentSettles(thread.threadId, async () => {
-        // Keep the parent subscription alive until native child delivery;
-        // unsubscribing first drops the completion signal that settles cleanup.
-        await unsubscribeCodexThreadBestEffort(client, {
-          threadId: thread.threadId,
-          timeoutMs: CODEX_APP_SERVER_UNSUBSCRIBE_TIMEOUT_MS,
-        });
-        await releaseSharedClientLeaseAndRetireOneShotClient();
-      });
-    if (!timedOut && !yieldedOneShotCleanupDeferred) {
+    if (!timedOut) {
       await unsubscribeCodexThreadBestEffort(client, {
         threadId: thread.threadId,
         timeoutMs: CODEX_APP_SERVER_UNSUBSCRIBE_TIMEOUT_MS,
@@ -3636,9 +3614,7 @@ export async function runCodexAppServerAttempt(
     userInputBridgeRef.current?.cancelPending();
     turnWatches.clearAllTimers();
     releaseCurrentRoute();
-    if (!yieldedOneShotCleanupDeferred) {
-      await releaseSharedClientLeaseAndRetireOneShotClient();
-    }
+    await releaseSharedClientLeaseAndRetireOneShotClient();
     if (nativeHookRelay) {
       if (shouldDelayNativeHookRelayUnregister) {
         // Codex hook subprocesses can outlive a completed app-server turn by a

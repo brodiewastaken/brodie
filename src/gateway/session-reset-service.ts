@@ -378,6 +378,7 @@ async function ensureSessionRuntimeCleanup(params: {
   cfg: OpenClawConfig;
   key: string;
   target: ReturnType<typeof resolveGatewaySessionStoreTarget>;
+  reason: "session-reset" | "session-delete";
   sessionId?: string;
   assertCurrent?: () => void;
 }) {
@@ -404,12 +405,14 @@ async function ensureSessionRuntimeCleanup(params: {
     queueKeys.add(params.sessionId);
   }
   await stopRuntimeConversationSchedulerSession(params.target.canonicalKey, {
-    descendants: true,
+    descendants: params.reason === "session-delete",
   });
   clearSessionResetRuntimeState([...queueKeys], {
     activeReplySessionId: params.sessionId,
   });
-  stopSubagentsForRequester({ cfg: params.cfg, requesterSessionKey: params.target.canonicalKey });
+  if (params.reason === "session-delete") {
+    stopSubagentsForRequester({ cfg: params.cfg, requesterSessionKey: params.target.canonicalKey });
+  }
   if (!params.sessionId) {
     params.assertCurrent?.();
     clearBootstrapSnapshot(params.target.canonicalKey);
@@ -750,6 +753,7 @@ export async function cleanupSessionBeforeMutation(params: {
     cfg: params.cfg,
     key: params.key,
     target: params.target,
+    reason: params.reason,
     sessionId: params.entry?.sessionId,
     assertCurrent: params.assertCurrent,
   });
@@ -782,12 +786,14 @@ export async function cleanupSessionBeforeMutation(params: {
     assertCurrent: params.assertCurrent,
   });
   params.assertCurrent?.();
-  await closeChildAcpRuntimesForParent({
-    cfg: params.cfg,
-    parentKey: params.target.canonicalKey ?? params.canonicalKey ?? params.key,
-    reason: params.reason,
-    assertCurrent: params.assertCurrent,
-  });
+  if (params.reason === "session-delete") {
+    await closeChildAcpRuntimesForParent({
+      cfg: params.cfg,
+      parentKey: params.target.canonicalKey ?? params.canonicalKey ?? params.key,
+      reason: params.reason,
+      assertCurrent: params.assertCurrent,
+    });
+  }
   params.assertCurrent?.();
   if (parentAcpError) {
     return parentAcpError;
@@ -1018,6 +1024,7 @@ export async function performGatewaySessionReset(params: {
         cfg,
         key: params.key,
         target,
+        reason: "session-reset",
         sessionId: entry?.sessionId,
       });
       if (runtimeCleanupError) {
@@ -1049,11 +1056,6 @@ export async function performGatewaySessionReset(params: {
           `plugin host cleanup failed for ${failure.pluginId}/${failure.hookId}: ${String(failure.error)}`,
         );
       }
-      await closeChildAcpRuntimesForParent({
-        cfg,
-        parentKey: target.canonicalKey ?? canonicalKey ?? params.key,
-        reason: "session-reset",
-      });
       if (entry?.sessionId) {
         await resetRegisteredAgentHarnessSessions({
           agentId,

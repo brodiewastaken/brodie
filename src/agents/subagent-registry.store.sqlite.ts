@@ -1,11 +1,17 @@
 /**
- * Persists subagent run records in the shared sqlite state database. The
+ * Persists subagent run records in each controller agent's sqlite database. The
  * store preserves typed columns for hot delivery state while retaining the
  * normalized payload JSON for forward-compatible record hydration.
  */
 import fs from "node:fs";
 import type { Insertable, Selectable, Updateable } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
+import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
+import type { DB as OpenClawAgentKyselyDatabase } from "../state/openclaw-agent-db.generated.js";
+import {
+  openOpenClawAgentDatabase,
+  runOpenClawAgentWriteTransaction,
+} from "../state/openclaw-agent-db.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   openOpenClawStateDatabase,
@@ -25,8 +31,12 @@ import type {
   SubagentRunRecord,
 } from "./subagent-registry.types.js";
 
-type SubagentRunsTable = OpenClawStateKyselyDatabase["subagent_runs"];
-type SubagentRegistryDatabase = Pick<OpenClawStateKyselyDatabase, "subagent_runs">;
+type SubagentRunsTable = OpenClawAgentKyselyDatabase["subagent_runs"];
+type SubagentRegistryDatabase = Pick<OpenClawAgentKyselyDatabase, "subagent_runs">;
+type LegacySubagentRegistryDatabase = Pick<
+  OpenClawStateKyselyDatabase,
+  "agent_databases" | "subagent_runs"
+>;
 type SubagentRunSqliteRow = Selectable<SubagentRunsTable>;
 type SubagentRunSqliteInsert = Insertable<SubagentRunsTable>;
 type SubagentRunSqliteUpdate = Updateable<SubagentRunsTable>;
@@ -57,6 +67,16 @@ function sqliteBool(value: number | null): boolean | undefined {
 
 function normalizeFiniteNumber(value: number | null): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function resolveSubagentOwnerAgentId(entry: Partial<SubagentRunRecord>): string {
+  const explicit = entry.ownerAgentId?.trim();
+  if (explicit) {
+    return normalizeAgentId(explicit);
+  }
+  const sessionKey =
+    entry.controllerSessionKey ?? entry.requesterSessionKey ?? entry.childSessionKey;
+  return normalizeAgentId(parseAgentSessionKey(sessionKey ?? "")?.agentId ?? "main");
 }
 
 function createDeliveryFromTypedColumns(
@@ -137,6 +157,12 @@ function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRecord | 
   const record = normalizeSubagentRunState({
     ...payload,
     runId: row.run_id,
+    ownerAgentId: resolveSubagentOwnerAgentId({
+      ...payload,
+      childSessionKey: row.child_session_key,
+      controllerSessionKey: row.controller_session_key ?? undefined,
+      requesterSessionKey: row.requester_session_key,
+    }),
     childSessionKey: row.child_session_key,
     ...(row.controller_session_key ? { controllerSessionKey: row.controller_session_key } : {}),
     requesterSessionKey: row.requester_session_key,
@@ -176,7 +202,6 @@ function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRecord | 
     ...(row.ended_reason
       ? { endedReason: row.ended_reason as SubagentRunRecord["endedReason"] }
       : {}),
-    ...(row.pause_reason === "sessions_yield" ? { pauseReason: row.pause_reason } : {}),
     ...(sqliteBool(row.wake_on_descendant_settle) !== undefined
       ? { wakeOnDescendantSettle: sqliteBool(row.wake_on_descendant_settle) }
       : {}),
@@ -192,7 +217,10 @@ function rowToSubagentRunRecord(row: SubagentRunSqliteRow): SubagentRunRecord | 
 
 /** Flattens a normalized subagent run into typed sqlite columns plus payload_json. */
 function subagentRunRecordToSqliteInsert(entry: SubagentRunRecord): SubagentRunSqliteInsert {
-  const normalized = normalizeSubagentRunState(structuredClone(entry));
+  const normalized = normalizeSubagentRunState({
+    ...structuredClone(entry),
+    ownerAgentId: resolveSubagentOwnerAgentId(entry),
+  });
   const delivery = normalized.delivery;
   const completion = normalized.completion;
   return {
@@ -226,7 +254,6 @@ function subagentRunRecordToSqliteInsert(entry: SubagentRunRecord): SubagentRunS
     last_announce_retry_at: delivery?.lastAttemptAt ?? null,
     last_announce_delivery_error: delivery?.lastError ?? null,
     ended_reason: normalized.endedReason ?? null,
-    pause_reason: normalized.pauseReason ?? null,
     wake_on_descendant_settle: boolToSqlite(normalized.wakeOnDescendantSettle),
     frozen_result_text: completion?.resultText ?? null,
     frozen_result_captured_at: completion?.capturedAt ?? null,
@@ -251,9 +278,38 @@ function subagentRunRecordToSqliteUpdate(values: SubagentRunSqliteInsert): Subag
   return update;
 }
 
-function readSubagentRegistryRows(): SubagentRunSqliteRow[] {
+function listKnownSubagentAgentIds(runs?: Iterable<SubagentRunRecord>): string[] {
   const { db } = openOpenClawStateDatabase();
-  const stateDb = getNodeSqliteKysely<SubagentRegistryDatabase>(db);
+  const stateDb = getNodeSqliteKysely<LegacySubagentRegistryDatabase>(db);
+  const agentIds = new Set<string>(["main"]);
+  for (const row of executeSqliteQuerySync(
+    db,
+    stateDb.selectFrom("agent_databases").select("agent_id").distinct(),
+  ).rows) {
+    agentIds.add(normalizeAgentId(row.agent_id));
+  }
+  for (const entry of runs ?? []) {
+    agentIds.add(resolveSubagentOwnerAgentId(entry));
+  }
+  return Array.from(agentIds).toSorted();
+}
+
+function readAgentSubagentRegistryRows(agentId: string): SubagentRunSqliteRow[] {
+  const { db } = openOpenClawAgentDatabase({ agentId });
+  const agentDb = getNodeSqliteKysely<SubagentRegistryDatabase>(db);
+  return executeSqliteQuerySync(
+    db,
+    agentDb
+      .selectFrom("subagent_runs")
+      .selectAll()
+      .orderBy("created_at", "asc")
+      .orderBy("run_id", "asc"),
+  ).rows;
+}
+
+function readLegacySharedSubagentRegistryRows(): SubagentRunSqliteRow[] {
+  const { db } = openOpenClawStateDatabase();
+  const stateDb = getNodeSqliteKysely<LegacySubagentRegistryDatabase>(db);
   return executeSqliteQuerySync(
     db,
     stateDb
@@ -276,18 +332,41 @@ function removeLegacySubagentRegistryFile(): void {
 
 function loadSubagentRegistryFromSqliteOnly(): Map<string, SubagentRunRecord> {
   const runs = new Map<string, SubagentRunRecord>();
-  for (const row of readSubagentRegistryRows()) {
-    const entry = rowToSubagentRunRecord(row);
-    if (entry) {
-      runs.set(entry.runId, entry);
+  for (const agentId of listKnownSubagentAgentIds()) {
+    for (const row of readAgentSubagentRegistryRows(agentId)) {
+      const entry = rowToSubagentRunRecord(row);
+      if (entry) {
+        runs.set(entry.runId, { ...entry, ownerAgentId: agentId });
+      }
     }
   }
   return runs;
 }
 
-/** Loads subagent runs from sqlite, importing and deleting the legacy JSON store when needed. */
+function importLegacySharedSubagentRegistry(
+  runs: Map<string, SubagentRunRecord>,
+): Map<string, SubagentRunRecord> {
+  const legacyRows = readLegacySharedSubagentRegistryRows();
+  if (legacyRows.length === 0) {
+    return runs;
+  }
+  for (const row of legacyRows) {
+    const entry = rowToSubagentRunRecord(row);
+    if (entry && !runs.has(entry.runId)) {
+      runs.set(entry.runId, entry);
+    }
+  }
+  saveSubagentRegistryToSqlite(runs);
+  runOpenClawStateWriteTransaction(({ db }) => {
+    const stateDb = getNodeSqliteKysely<LegacySubagentRegistryDatabase>(db);
+    executeSqliteQuerySync(db, stateDb.deleteFrom("subagent_runs"));
+  });
+  return loadSubagentRegistryFromSqliteOnly();
+}
+
+/** Loads per-agent subagent runs, importing shared SQLite and JSON state once when needed. */
 export function loadSubagentRegistryFromSqlite(): Map<string, SubagentRunRecord> {
-  const runs = loadSubagentRegistryFromSqliteOnly();
+  const runs = importLegacySharedSubagentRegistry(loadSubagentRegistryFromSqliteOnly());
   if (runs.size > 0) {
     return runs;
   }
@@ -300,28 +379,40 @@ export function loadSubagentRegistryFromSqlite(): Map<string, SubagentRunRecord>
   return loadSubagentRegistryFromSqliteOnly();
 }
 
-/** Saves the complete subagent run snapshot to sqlite and prunes rows not in the snapshot. */
+/** Saves the complete subagent snapshot across agent databases and prunes absent rows. */
 export function saveSubagentRegistryToSqlite(runs: Map<string, SubagentRunRecord>): void {
-  runOpenClawStateWriteTransaction(({ db }) => {
-    const stateDb = getNodeSqliteKysely<SubagentRegistryDatabase>(db);
-    const runIds: string[] = [];
-    for (const entry of runs.values()) {
-      const values = subagentRunRecordToSqliteInsert(entry);
-      runIds.push(values.run_id);
-      executeSqliteQuerySync(
-        db,
-        stateDb
-          .insertInto("subagent_runs")
-          .values(values)
-          .onConflict((conflict) =>
-            conflict.column("run_id").doUpdateSet(subagentRunRecordToSqliteUpdate(values)),
-          ),
-      );
-    }
-    const deleteQuery =
-      runIds.length === 0
-        ? stateDb.deleteFrom("subagent_runs")
-        : stateDb.deleteFrom("subagent_runs").where("run_id", "not in", runIds);
-    executeSqliteQuerySync(db, deleteQuery);
-  });
+  const runsByAgent = new Map<string, SubagentRunRecord[]>();
+  for (const entry of runs.values()) {
+    const agentId = resolveSubagentOwnerAgentId(entry);
+    const entries = runsByAgent.get(agentId) ?? [];
+    entries.push({ ...entry, ownerAgentId: agentId });
+    runsByAgent.set(agentId, entries);
+  }
+  for (const agentId of listKnownSubagentAgentIds(runs.values())) {
+    runOpenClawAgentWriteTransaction(
+      ({ db }) => {
+        const agentDb = getNodeSqliteKysely<SubagentRegistryDatabase>(db);
+        const runIds: string[] = [];
+        for (const entry of runsByAgent.get(agentId) ?? []) {
+          const values = subagentRunRecordToSqliteInsert(entry);
+          runIds.push(values.run_id);
+          executeSqliteQuerySync(
+            db,
+            agentDb
+              .insertInto("subagent_runs")
+              .values(values)
+              .onConflict((conflict) =>
+                conflict.column("run_id").doUpdateSet(subagentRunRecordToSqliteUpdate(values)),
+              ),
+          );
+        }
+        const deleteQuery =
+          runIds.length === 0
+            ? agentDb.deleteFrom("subagent_runs")
+            : agentDb.deleteFrom("subagent_runs").where("run_id", "not in", runIds);
+        executeSqliteQuerySync(db, deleteQuery);
+      },
+      { agentId },
+    );
+  }
 }

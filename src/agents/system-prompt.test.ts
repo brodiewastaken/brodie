@@ -359,7 +359,7 @@ describe("buildAgentSystemPrompt", () => {
     );
   });
 
-  it("only mentions sessions_yield wait guidance when the tool is available", () => {
+  it("does not revive removed sessions_yield guidance from a stale tool name", () => {
     const withoutYield = buildAgentSystemPrompt({
       workspaceDir: "/tmp/openclaw",
       toolNames: ["sessions_spawn", "subagents"],
@@ -370,7 +370,8 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     expect(withoutYield).not.toContain("use `sessions_yield` when waiting");
-    expect(withYield).toContain("use `sessions_yield` when waiting");
+    expect(withYield).not.toContain("use `sessions_yield`");
+    expect(withYield).toContain("durable completion events resume the controller");
   });
 
   it("lists available tools when provided", () => {
@@ -923,7 +924,8 @@ describe("buildAgentSystemPrompt", () => {
     expect(orchestrationPrompt).toContain(
       '- Sub-agent orchestration → use `sessions_spawn(...)` to start delegated work; include a clear objective/output/write-scope/verification brief and `taskName` when a stable handle helps; omit `context` for isolated children, set `context:"fork"` only when the child needs the current transcript; use `subagents(action=list)` only for on-demand status/debugging visibility.',
     );
-    expect(orchestrationWaitPrompt).toContain("use `sessions_yield` to wait for completion events");
+    expect(orchestrationWaitPrompt).not.toContain("use `sessions_yield`");
+    expect(orchestrationWaitPrompt).toContain("durable completion events resume the controller");
   });
 
   it("adds stronger sub-agent delegation guidance in prefer mode", () => {
@@ -1591,9 +1593,11 @@ describe("buildSubagentSystemPrompt", () => {
       "After spawning children, do NOT call sessions_list, sessions_history, exec sleep, or any polling tool.",
     );
     expect(prompt).toContain(
-      "If required completions have not arrived yet and `sessions_yield` is available",
+      "If required completions have not arrived yet, end the turn naturally",
     );
-    expect(prompt).toContain("If it is not available, do not invent polling loops");
+    expect(prompt).toContain(
+      "runtime will resume this controller after durable completion admission",
+    );
     expect(prompt).toContain("expected output, relevant files/inputs, write scope");
     expect(prompt).toContain(
       "Track expected child session keys and only send your final answer after completion events for ALL expected children arrive.",

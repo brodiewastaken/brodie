@@ -78,7 +78,6 @@ export function resolveFinalizedSubagentTaskState(
   if (
     typeof endedAt !== "number" ||
     !outcome ||
-    entry.pauseReason === "sessions_yield" ||
     (completion?.resultText === undefined && typeof completion?.capturedAt !== "number")
   ) {
     return undefined;

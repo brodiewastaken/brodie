@@ -2,6 +2,7 @@
 // outcomes, requester lookup, delivery, and cleanup.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EmbeddedAgentQueueMessageOutcome } from "./embedded-agent-runner/runs.js";
+import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import { createSubagentAnnounceDeliveryRuntimeMock } from "./subagent-announce.test-support.js";
 
 type AgentCallRequest = { method?: string; params?: Record<string, unknown> };
@@ -124,7 +125,7 @@ vi.mock("./subagent-announce-delivery.js", () => ({
         `[Internal task completion event]\n${params.triggerMessage}`,
         { steeringMode: "all" },
       );
-      return { delivered: true, path: "steered" };
+      return { status: "delivered", path: "steered" };
     }
 
     const effectiveOrigin =
@@ -153,14 +154,13 @@ vi.mock("./subagent-announce-delivery.js", () => ({
 
     if (response.status === "error") {
       return {
-        delivered: false,
+        status: response.terminal === true ? "terminal_failure" : "failed",
         path: "direct",
         error: response.error ?? "agent delivery failed",
-        ...(response.terminal === true ? { terminal: true } : {}),
       };
     }
 
-    return { delivered: true, path: "direct" };
+    return { status: "delivered", path: "direct" };
   },
   loadRequesterSessionEntry: (sessionKey: string) => {
     const store = loadSessionStoreMock("/tmp/sessions.json") as Record<string, unknown>;
@@ -625,14 +625,7 @@ describe("subagent announce seam flow", () => {
   });
 
   it("treats terminal direct completion failures as announced for cleanup", async () => {
-    let deliveryResult:
-      | {
-          delivered: boolean;
-          path: string;
-          error?: string;
-          terminal?: boolean;
-        }
-      | undefined;
+    let deliveryResult: SubagentAnnounceDeliveryResult | undefined;
     agentSpy.mockResolvedValueOnce({
       status: "error",
       error: "prompt lock failed after visible send",
@@ -664,10 +657,9 @@ describe("subagent announce seam flow", () => {
 
     expect(didAnnounce).toBe(true);
     expect(deliveryResult).toMatchObject({
-      delivered: false,
+      status: "terminal_failure",
       path: "direct",
       error: "prompt lock failed after visible send",
-      terminal: true,
     });
   });
 });

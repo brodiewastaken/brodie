@@ -236,6 +236,10 @@ describe("spawnSubagentDirect seam flow", () => {
     const operations: string[] = [];
     let persistedStore: Record<string, Record<string, unknown>> | undefined;
 
+    hoisted.registerSubagentRunMock.mockImplementation(() => {
+      operations.push("registry:register");
+    });
+
     hoisted.callGatewayMock.mockImplementation(async (request: { method?: string }) => {
       operations.push(`gateway:${request.method ?? "unknown"}`);
       if (request.method === "agent") {
@@ -279,7 +283,8 @@ describe("spawnSubagentDirect seam flow", () => {
     expect(hoisted.updateSessionStoreMock).toHaveBeenCalledTimes(3);
     const registerInput = firstRegisteredSubagentRun();
     const requesterOrigin = requireRecord(registerInput.requesterOrigin);
-    expect(registerInput.runId).toBe("run-1");
+    expect(registerInput.runId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(registerInput.deferCompletionWait).toBe(true);
     expect(registerInput.childSessionKey).toBe(childSessionKey);
     expect(registerInput.requesterSessionKey).toBe("agent:main:main");
     expect(registerInput.requesterDisplayKey).toBe("agent:main:main");
@@ -310,6 +315,9 @@ describe("spawnSubagentDirect seam flow", () => {
     expect(operations.indexOf("store:update")).toBeGreaterThan(-1);
     expect(operations.indexOf("gateway:agent")).toBeGreaterThan(
       operations.lastIndexOf("store:update"),
+    );
+    expect(operations.indexOf("gateway:agent")).toBeGreaterThan(
+      operations.indexOf("registry:register"),
     );
     const agentRequest = gatewayRequest("agent");
     const agentParams = requireRecord(agentRequest.params);

@@ -46,6 +46,7 @@ import {
 } from "./embedded-agent-runner/run-state.js";
 import { resolveAgentSessionDirs } from "./session-dirs.js";
 import type { SessionLockInspection } from "./session-write-lock.js";
+import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 const log = createSubsystemLogger("main-session-restart-recovery");
 
@@ -55,6 +56,54 @@ const RETRY_BACKOFF_MULTIPLIER = 2;
 const UNRESUMABLE_SESSION_NOTICE =
   "I was interrupted by a gateway restart and couldn't safely resume the previous turn. " +
   "Please send that last request again and I'll pick it up cleanly.";
+
+type PendingDurableContinuationProbe = (params: {
+  interruptedRunStartedAt?: number;
+  sessionKey: string;
+}) => boolean | Promise<boolean>;
+
+function isCurrentRunDurableChildContinuation(params: {
+  interruptedRunStartedAt?: number;
+  run: SubagentRunRecord;
+}): boolean {
+  if (
+    params.interruptedRunStartedAt === undefined ||
+    params.run.createdAt < params.interruptedRunStartedAt ||
+    !params.run.schedulerReceiptId ||
+    !params.run.completionAdmittedAt ||
+    params.run.cleanupCompletedAt
+  ) {
+    return false;
+  }
+  const status =
+    params.run.delivery?.status ??
+    (params.run.expectsCompletionMessage === false ? "not_required" : "pending");
+  return status === "pending" || status === "in_progress";
+}
+
+async function hasPendingDurableChildContinuation(params: {
+  interruptedRunStartedAt?: number;
+  sessionKey: string;
+}): Promise<boolean> {
+  if (params.interruptedRunStartedAt === undefined) {
+    return false;
+  }
+  try {
+    const registry = await import("./subagent-registry.js");
+    registry.initSubagentRegistry();
+    return registry.listSubagentRunsForRequester(params.sessionKey).some((run) =>
+      isCurrentRunDurableChildContinuation({
+        interruptedRunStartedAt: params.interruptedRunStartedAt,
+        run,
+      }),
+    );
+  } catch (err) {
+    log.warn(
+      `failed to inspect durable child continuation for ${params.sessionKey}: ${String(err)}`,
+    );
+    return false;
+  }
+}
 
 function shouldSkipMainRecovery(entry: SessionEntry, sessionKey: string): boolean {
   if (typeof entry.spawnDepth === "number" && entry.spawnDepth > 0) {
@@ -724,6 +773,7 @@ async function recoverStore(params: {
   resumedSessionKeys: Set<string>;
   activeSessionIds?: Iterable<string>;
   activeSessionKeys?: Iterable<string>;
+  hasPendingDurableContinuation: PendingDurableContinuationProbe;
 }): Promise<{ recovered: number; failed: number; skipped: number }> {
   const result = { recovered: 0, failed: 0, skipped: 0 };
   const providedActiveSessionIds =
@@ -823,6 +873,21 @@ async function recoverStore(params: {
 
     const resumeBlockReason = resolveMainSessionResumeBlockReason(messages);
     if (resumeBlockReason) {
+      if (
+        await params.hasPendingDurableContinuation({
+          interruptedRunStartedAt: normalizeFiniteTimestamp(entry.startedAt),
+          sessionKey,
+        })
+      ) {
+        await markSessionFailed({
+          storePath: params.storePath,
+          sessionKey,
+          reason: `${resumeBlockReason}; durable child completion owns continuation`,
+        });
+        params.resumedSessionKeys.add(resumeDedupeKey);
+        result.skipped++;
+        continue;
+      }
       await sendUnresumableSessionNotice({
         cfg: params.cfg,
         entry,
@@ -881,6 +946,7 @@ export async function recoverRestartAbortedMainSessions(
     resumedSessionKeys?: Set<string>;
     activeSessionIds?: Iterable<string>;
     activeSessionKeys?: Iterable<string>;
+    hasPendingDurableContinuation?: PendingDurableContinuationProbe;
   } = {},
 ): Promise<{ recovered: number; failed: number; skipped: number }> {
   const result = { recovered: 0, failed: 0, skipped: 0 };
@@ -893,6 +959,8 @@ export async function recoverRestartAbortedMainSessions(
       resumedSessionKeys,
       activeSessionIds: params.activeSessionIds,
       activeSessionKeys: params.activeSessionKeys,
+      hasPendingDurableContinuation:
+        params.hasPendingDurableContinuation ?? hasPendingDurableChildContinuation,
     });
     result.recovered += storeResult.recovered;
     result.failed += storeResult.failed;
@@ -915,6 +983,7 @@ export async function recoverStartupOrphanedMainSessions(
     activeSessionKeys?: Iterable<string>;
     updatedBeforeMs?: number;
     resumedSessionKeys?: Set<string>;
+    hasPendingDurableContinuation?: PendingDurableContinuationProbe;
   } = {},
 ): Promise<{ marked: number; recovered: number; failed: number; skipped: number }> {
   const startupRecoveryCutoffMs = params.updatedBeforeMs ?? Date.now();
@@ -931,6 +1000,7 @@ export async function recoverStartupOrphanedMainSessions(
     resumedSessionKeys: params.resumedSessionKeys,
     activeSessionIds: params.activeSessionIds,
     activeSessionKeys: params.activeSessionKeys,
+    hasPendingDurableContinuation: params.hasPendingDurableContinuation,
   });
   return {
     marked: marked.marked,
@@ -989,3 +1059,7 @@ export function scheduleRestartAbortedMainSessionRecovery(
 
   scheduleAttempt(1, initialDelay);
 }
+
+export const mainSessionRestartRecoveryTesting = {
+  isCurrentRunDurableChildContinuation,
+};

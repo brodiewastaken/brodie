@@ -631,6 +631,7 @@ export const TOOL_DISPLAY_CONFIG: ToolDisplayConfig = {
       title: "PDF",
       detailKeys: ["path", "paths", "url", "urls", "prompt", "pageRange", "model"],
     },
+    // Legacy transcript rendering only. sessions_yield is no longer exposed.
     sessions_yield: {
       emoji: "⏸️",
       title: "Yield",

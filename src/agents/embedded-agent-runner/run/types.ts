@@ -253,8 +253,6 @@ export type EmbeddedRunAttemptResult = {
    * keep their meaning. When set, the array always has at least one entry.
    */
   clientToolCalls?: Array<{ name: string; params: Record<string, unknown> }>;
-  /** True when sessions_yield tool was called during this attempt. */
-  yieldDetected?: boolean;
   replayMetadata: EmbeddedRunReplayMetadata;
   itemLifecycle: {
     startedCount: number;
@@ -265,7 +263,6 @@ export type EmbeddedRunAttemptResult = {
     replayInvalid?: boolean;
     livenessState?: EmbeddedRunLivenessState;
     stopReason?: string;
-    yielded?: boolean;
     timeoutPhase?: AgentRunTimeoutPhase;
     providerStarted?: boolean;
     aborted?: boolean;

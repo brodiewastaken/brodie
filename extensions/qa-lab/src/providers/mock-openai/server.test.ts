@@ -2098,7 +2098,7 @@ describe("qa mock openai server", () => {
     expect(plannedToolArgs.mode).toBe("run");
   });
 
-  it("drives yielded-parent subagent fallback QA through sessions_spawn and sessions_yield", async () => {
+  it("ends the parent turn naturally after spawn even when sessions_yield is stale-declared", async () => {
     const server = await startMockServer();
     const prompt =
       "Subagent direct fallback QA check: spawn one worker and yield until QA-SUBAGENT-DIRECT-FALLBACK-OK is delivered.";
@@ -2137,13 +2137,8 @@ describe("qa mock openai server", () => {
       ],
     });
 
-    expect(body).toContain('"name":"sessions_yield"');
-    expect(body).toContain("QA-SUBAGENT-DIRECT-FALLBACK-OK");
-    const yieldDebug = requireRecord(
-      await (await fetch(`${server.baseUrl}/debug/last-request`)).json(),
-      "yield debug request",
-    );
-    expect(yieldDebug.plannedToolName).toBe("sessions_yield");
+    expect(body).not.toContain('"name":"sessions_yield"');
+    expect(body).not.toContain("QA-SUBAGENT-DIRECT-FALLBACK-OK");
   });
 
   it("returns no visible announce output for the direct fallback QA marker", async () => {

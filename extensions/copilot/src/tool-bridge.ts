@@ -32,18 +32,6 @@ type AgentToolResultLike = {
 };
 
 /**
- * Mutable holder populated by `attempt.ts` *after* `client.createSession()`
- * (or `client.resumeSession()`) succeeds, so that the tool bridge — which is
- * constructed *before* the SDK session exists — can route `onYield` events
- * to the live session's `abort()` later in the run. Bridged tools cannot
- * execute before the SDK session is up, so reading `current === undefined`
- * inside `onYield` is a no-op by design.
- */
-export interface CopilotSessionHolder {
-  current: { abort?: () => unknown } | undefined;
-}
-
-/**
  * Structural subset of `EmbeddedRunAttemptParams` carried into the tool
  * bridge for PI-parity tool context (see
  * `src/agents/pi-embedded-runner/run/attempt.ts:1029-1117` — the
@@ -106,24 +94,6 @@ export interface CopilotToolBridgeInput {
    * `src/agents/pi-embedded-runner/run/attempt.ts:1029-1117`.
    */
   attemptParams?: CopilotToolAttemptParams;
-  /**
-   * Mutable session holder used to wire `onYield` to the live
-   * `session.abort()` once the SDK session is established. See
-   * {@link CopilotSessionHolder}.
-   */
-  sessionRef?: CopilotSessionHolder;
-  /**
-   * Invoked when a wrapped tool fires `sessions_yield`. The bridge
-   * always also calls `sessionRef.current?.abort?.()` to interrupt
-   * the in-flight SDK session; this callback lets the caller track
-   * the yield so the final attempt result can carry
-   * `yieldDetected: true` (the parent runner uses it to mark
-   * liveness as paused and stop_reason as `end_turn`). Mirrors
-   * the PI/codex contract — see
-   * `src/agents/pi-embedded-runner/run/attempt.ts:1107-1113` and
-   * `extensions/codex/src/app-server/run-attempt.ts:539-541`.
-   */
-  onYieldDetected?: (message?: string) => void;
   onToolCompleted?: (completion: CopilotToolCompletion) => void | Promise<void>;
   createOpenClawCodingTools?: (opts: unknown) => AnyAgentTool[] | Promise<AnyAgentTool[]>;
   beforeExecute?: (ctx: {
@@ -416,28 +386,6 @@ function buildOpenClawCodingToolsOptions(
     // recordToolPrepStage intentionally omitted: copilot does not
     // surface attempt-stage telemetry yet. Codex omits this too.
     onToolOutcome: a.onToolOutcome,
-    onYield: (message) => {
-      // Notify the caller first so the final attempt result can carry
-      // yieldDetected even if the abort below races a concurrent
-      // settle path. Errors thrown by the caller's handler must not
-      // skip the abort, so wrap defensively. Mirrors PI (`attempt.ts`
-      // sets `yieldDetected = true; yieldMessage = message;` before
-      // calling abort) and codex (`onYieldDetected()` runs before the
-      // run-abort controller fires).
-      try {
-        input.onYieldDetected?.(message);
-      } catch (error) {
-        console.warn("[copilot-tool-bridge] onYieldDetected handler threw; continuing", error);
-      }
-      // The SDK session does not exist at bridge-construction time, so
-      // we route yield events through a mutable holder populated by
-      // attempt.ts immediately after `createSession()` /
-      // `resumeSession()` resolves. Bridged tools cannot execute before
-      // the SDK session is up, so a missing `current` is a no-op by
-      // design (e.g. early aborts handled by the abortSignal path).
-      const target = input.sessionRef?.current;
-      void target?.abort?.();
-    },
   };
 }
 

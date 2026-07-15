@@ -41,7 +41,6 @@ describe("tool-catalog", () => {
       "sessions_history",
       "sessions_send",
       "sessions_spawn",
-      "sessions_yield",
       "subagents",
       "session_status",
       "cron",

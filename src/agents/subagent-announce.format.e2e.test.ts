@@ -780,7 +780,7 @@ describe("subagent announce formatting", () => {
     expect(msg).not.toContain("✅ Subagent");
   });
 
-  it("keeps completion delivery enabled for extension channels captured from requester origin", async () => {
+  it("preserves extension route context without automatically delivering subagent completion", async () => {
     const didAnnounce = await runSubagentAnnounceFlow({
       childSessionKey: "agent:main:subagent:test",
       childRunId: "run-direct-completion-imessage",
@@ -795,7 +795,7 @@ describe("subagent announce formatting", () => {
     expect(sendSpy).not.toHaveBeenCalled();
     expect(agentSpy).toHaveBeenCalledTimes(1);
     const call = getAgentCall() as { params?: Record<string, unknown> };
-    expect(call?.params?.deliver).toBe(true);
+    expect(call?.params?.deliver).toBe(false);
     expect(call?.params?.channel).toBe("imessage");
     expect(call?.params?.to).toBe("+1234567890");
     expect(call?.params?.accountId).toBe("acct-bb");
@@ -1690,7 +1690,7 @@ describe("subagent announce formatting", () => {
     }
   });
 
-  it("uses hook-provided extension channel targets for completion delivery", async () => {
+  it("passes hook-provided extension route context to the root without automatic delivery", async () => {
     hasSubagentDeliveryTargetHook = true;
     subagentDeliveryTargetHookMock.mockResolvedValueOnce({
       origin: {
@@ -1719,7 +1719,7 @@ describe("subagent announce formatting", () => {
     expect(sendSpy).not.toHaveBeenCalled();
     expect(agentSpy).toHaveBeenCalledTimes(1);
     const call = getAgentCall() as { params?: Record<string, unknown> };
-    expect(call?.params?.deliver).toBe(true);
+    expect(call?.params?.deliver).toBe(false);
     expect(call?.params?.channel).toBe("imessage");
     expect(call?.params?.to).toBe("+1234567890");
     expect(call?.params?.accountId).toBe("acct-bb");
@@ -1770,14 +1770,14 @@ describe("subagent announce formatting", () => {
   });
 
   it("steers announcements into an active run", async () => {
-    const direct = vi.fn(async () => ({ delivered: true, path: "direct" as const }));
+    const direct = vi.fn(async () => ({ status: "delivered" as const, path: "direct" as const }));
     const delivery = await runSubagentAnnounceDispatch({
       expectsCompletionMessage: false,
       steer: async () => ({ status: "steered" }),
       direct,
     });
 
-    expect(delivery.delivered).toBe(true);
+    expect(delivery.status).toBe("delivered");
     expect(delivery.path).toBe("steered");
     expect(direct).not.toHaveBeenCalled();
   });
@@ -1786,24 +1786,24 @@ describe("subagent announce formatting", () => {
     const delivery = await runSubagentAnnounceDispatch({
       expectsCompletionMessage: false,
       steer: async () => ({ status: "steered" }),
-      direct: async () => ({ delivered: false, path: "direct" as const }),
+      direct: async () => ({ status: "failed" as const, path: "direct" as const }),
     });
 
-    expect(delivery.delivered).toBe(true);
+    expect(delivery.status).toBe("delivered");
     expect(delivery.path).toBe("steered");
   });
 
   it("does not fall through to direct delivery when active steering drops a new item", async () => {
-    const direct = vi.fn(async () => ({ delivered: true, path: "direct" as const }));
+    const direct = vi.fn(async () => ({ status: "delivered" as const, path: "direct" as const }));
     const delivery = await runSubagentAnnounceDispatch({
       expectsCompletionMessage: false,
       steer: async () => ({ status: "dropped" }),
       direct,
     });
 
-    expect(delivery.delivered).toBe(false);
+    expect(delivery.status).toBe("failed");
     expect(delivery.phases).toEqual([
-      { phase: "steer-primary", delivered: false, path: "none", error: undefined },
+      { phase: "steer-primary", status: "failed", path: "none", error: undefined },
     ]);
     expect(direct).not.toHaveBeenCalled();
   });
@@ -1878,7 +1878,7 @@ describe("subagent announce formatting", () => {
       },
     };
     const direct = vi.fn(async () => ({
-      delivered: false,
+      status: "failed" as const,
       path: "direct" as const,
       error: "direct delivery unavailable",
     }));
@@ -1888,7 +1888,7 @@ describe("subagent announce formatting", () => {
       steer: async () => ({ status: "steered" }),
     });
 
-    expect(delivery.delivered).toBe(true);
+    expect(delivery.status).toBe("delivered");
     expect(delivery.path).toBe("steered");
     expect(direct).toHaveBeenCalledTimes(1);
   });
@@ -2217,7 +2217,7 @@ describe("subagent announce formatting", () => {
     expect(call?.expectFinal).toBe(true);
   });
 
-  it("keeps direct announce delivery enabled for extension channels", async () => {
+  it("keeps extension route context on direct announce without automatic delivery", async () => {
     embeddedRunMock.isEmbeddedAgentRunActive.mockReturnValue(false);
     embeddedRunMock.isEmbeddedAgentRunStreaming.mockReturnValue(false);
 
@@ -2237,7 +2237,7 @@ describe("subagent announce formatting", () => {
       params?: Record<string, unknown>;
       expectFinal?: boolean;
     };
-    expect(call?.params?.deliver).toBe(true);
+    expect(call?.params?.deliver).toBe(false);
     expect(call?.params?.channel).toBe("imessage");
     expect(call?.params?.to).toBe("+1234567890");
     expect(call?.params?.accountId).toBe("acct-bb");
@@ -2932,7 +2932,7 @@ describe("subagent announce formatting", () => {
     expect(subagentRegistryMock.resolveRequesterForChildSession).not.toHaveBeenCalled();
   });
 
-  it("bubbles child announce to parent requester when requester subagent session is missing", async () => {
+  it("bubbles child announce to the root without bypassing its reply decision", async () => {
     subagentRegistryMock.isSubagentSessionRunActive.mockReturnValue(false);
     subagentRegistryMock.resolveRequesterForChildSession.mockReturnValue({
       requesterSessionKey: "agent:main:main",
@@ -2953,7 +2953,7 @@ describe("subagent announce formatting", () => {
     expect(didAnnounce).toBe(true);
     const call = getAgentCall() as { params?: Record<string, unknown> };
     expect(call?.params?.sessionKey).toBe("agent:main:main");
-    expect(call?.params?.deliver).toBe(true);
+    expect(call?.params?.deliver).toBe(false);
     expect(call?.params?.channel).toBe("whatsapp");
     expect(call?.params?.to).toBe("+1555");
     expect(call?.params?.accountId).toBe("acct-main");

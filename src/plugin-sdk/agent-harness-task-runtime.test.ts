@@ -16,7 +16,7 @@ vi.mock("../agents/subagent-announce-delivery.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../agents/subagent-announce-delivery.js")>();
   return {
     ...actual,
-    deliverSubagentAnnouncement: vi.fn(async () => ({ delivered: true, path: "steered" })),
+    deliverSubagentAnnouncement: vi.fn(async () => ({ status: "delivered", path: "steered" })),
     isInternalAnnounceRequesterSession: vi.fn(() => true),
   };
 });
@@ -188,16 +188,16 @@ describe("agent-harness-task-runtime", () => {
   it("checks durable direct delivery phases", () => {
     expect(
       isDurableAgentHarnessCompletionDelivery({
-        delivered: true,
+        status: "delivered",
         path: "direct",
-        phases: [{ phase: "direct-primary", delivered: true, path: "direct" }],
+        phases: [{ phase: "direct-primary", status: "delivered", path: "direct" }],
       }),
     ).toBe(true);
     expect(
       isDurableAgentHarnessCompletionDelivery({
-        delivered: true,
+        status: "delivered",
         path: "direct",
-        phases: [{ phase: "steer-fallback", delivered: true, path: "steered" }],
+        phases: [{ phase: "steer-fallback", status: "delivered", path: "steered" }],
       }),
     ).toBe(false);
   });

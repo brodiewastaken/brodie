@@ -581,7 +581,6 @@ export type DiagnosticHarnessRunCompletedEvent = DiagnosticHarnessRunBaseEvent &
   durationMs: number;
   outcome: DiagnosticHarnessRunOutcome;
   resultClassification?: "empty" | "reasoning-only" | "planning-only";
-  yieldDetected?: boolean;
   itemLifecycle?: {
     startedCount: number;
     completedCount: number;

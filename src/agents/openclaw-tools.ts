@@ -67,7 +67,6 @@ import { createSessionsHistoryTool } from "./tools/sessions-history-tool.js";
 import { createSessionsListTool } from "./tools/sessions-list-tool.js";
 import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
-import { createSessionsYieldTool } from "./tools/sessions-yield-tool.js";
 import { createSkillWorkshopTool } from "./tools/skill-workshop-tool.js";
 import { createSubagentsTool } from "./tools/subagents-tool.js";
 import { createTranscriptsTool } from "./tools/transcripts-tool.js";
@@ -195,8 +194,6 @@ export function createOpenClawTools(
      * subagents inherit the real workspace path instead of the sandbox copy.
      */
     spawnWorkspaceDir?: string;
-    /** Callback invoked when sessions_yield tool is called. */
-    onYield?: (message: string) => Promise<void> | void;
     /** Allow plugin tools for this tool set to late-bind the gateway subagent. */
     allowGatewaySubagentBinding?: boolean;
   } & SpawnedToolContext,
@@ -247,11 +244,6 @@ export function createOpenClawTools(
     trimmedRunSessionKey && isCronRunSessionKey(trimmedRunSessionKey)
       ? trimmedRunSessionKey
       : options?.agentSessionKey;
-  const mediaGenerationAsyncStartCallback = mediaGenerationAgentSessionKey
-    ? isCronRunSessionKey(mediaGenerationAgentSessionKey)
-      ? undefined
-      : options?.onYield
-    : options?.onYield;
   const skillWorkshopSessionKey = normalizeOptionalString(
     options?.runSessionKey ?? options?.agentSessionKey,
   );
@@ -292,7 +284,6 @@ export function createOpenClawTools(
         workspaceDir,
         sandbox,
         fsPolicy: options?.fsPolicy,
-        onAsyncTaskStarted: mediaGenerationAsyncStartCallback,
       })
     : null;
   options?.recordToolPrepStage?.("openclaw-tools:image-generate-tool");
@@ -306,7 +297,6 @@ export function createOpenClawTools(
         workspaceDir,
         sandbox,
         fsPolicy: options?.fsPolicy,
-        onAsyncTaskStarted: mediaGenerationAsyncStartCallback,
       })
     : null;
   options?.recordToolPrepStage?.("openclaw-tools:video-generate-tool");
@@ -320,7 +310,6 @@ export function createOpenClawTools(
         workspaceDir,
         sandbox,
         fsPolicy: options?.fsPolicy,
-        onAsyncTaskStarted: mediaGenerationAsyncStartCallback,
       })
     : null;
   options?.recordToolPrepStage?.("openclaw-tools:music-generate-tool");
@@ -554,10 +543,6 @@ export function createOpenClawTools(
           }),
         ]
       : []),
-    createSessionsYieldTool({
-      sessionId: options?.sessionId,
-      onYield: options?.onYield,
-    }),
     createSubagentsTool({
       agentSessionKey: options?.agentSessionKey,
     }),

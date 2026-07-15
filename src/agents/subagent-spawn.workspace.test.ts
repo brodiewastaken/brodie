@@ -349,7 +349,7 @@ describe("spawnSubagentDirect workspace inheritance", () => {
     expect(result.status).toBe("error");
     expect(result.error).toBe("spawn startup failed");
     expect(result.childSessionKey).toMatch(/^agent:main:subagent:/);
-    expect(hoisted.registerSubagentRunMock).not.toHaveBeenCalled();
+    expect(hoisted.registerSubagentRunMock).toHaveBeenCalledOnce();
 
     const deleteCall = findLastSessionDeleteCall();
     expect(deleteCall?.params?.key).toBe(result.childSessionKey);
@@ -357,7 +357,7 @@ describe("spawnSubagentDirect workspace inheritance", () => {
     expect(deleteCall?.params?.emitLifecycleHooks).toBe(false);
   });
 
-  it("keeps lifecycle hooks enabled when registerSubagentRun fails after thread binding succeeds", async () => {
+  it("fails before child dispatch when durable registration fails after thread binding", async () => {
     hoisted.registerSubagentRunMock.mockImplementation(() => {
       throw new Error("registry unavailable");
     });
@@ -398,7 +398,12 @@ describe("spawnSubagentDirect workspace inheritance", () => {
     expect(result.status).toBe("error");
     expect(result.error).toBe("Failed to register subagent run: registry unavailable");
     expect(result.childSessionKey).toMatch(/^agent:main:subagent:/);
-    expect(result.runId).toBe("run-thread-register-fail");
+    expect(result.runId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(
+      hoisted.callGatewayMock.mock.calls.some(
+        ([request]) => (request as { method?: string }).method === "agent",
+      ),
+    ).toBe(false);
 
     const deleteCall = findLastSessionDeleteCall();
     expect(deleteCall?.params?.key).toBe(result.childSessionKey);

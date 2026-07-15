@@ -3840,7 +3840,6 @@ async function runEmbeddedAgentInternal(
             timedOutDuringPrompt &&
             (attempt.assistantTexts ?? []).some((text) => text.trim().length > 0) &&
             !attempt.clientToolCalls &&
-            !attempt.yieldDetected &&
             !attempt.didSendViaMessagingTool &&
             !attempt.didSendDeterministicApprovalPrompt &&
             !attempt.lastToolError &&
@@ -4062,7 +4061,6 @@ async function runEmbeddedAgentInternal(
             !promptError &&
             !timedOut &&
             !attempt.clientToolCalls &&
-            !attempt.yieldDetected &&
             !attempt.didSendDeterministicApprovalPrompt &&
             !attempt.lastToolError &&
             !accumulatedReplayState.hadPotentialSideEffects &&
@@ -4253,7 +4251,6 @@ async function runEmbeddedAgentInternal(
             !promptError &&
             !timedOut &&
             !attempt.clientToolCalls &&
-            !attempt.yieldDetected &&
             !emptyAssistantReplyIsSilent;
           if (beforeAgentFinalizeRevisionReason && shouldHonorBeforeAgentFinalizeRevision) {
             beforeAgentFinalizeRevisionAttempts += 1;
@@ -4277,20 +4274,16 @@ async function runEmbeddedAgentInternal(
           );
           markAuthProfileSuccessAfterRun();
           const replayInvalid = resolveReplayInvalidForAttempt(null);
-          const livenessState = attempt.yieldDetected
-            ? "paused"
-            : resolveRunLivenessState({
-                payloadCount,
-                aborted,
-                timedOut,
-                attempt,
-                incompleteTurnText: null,
-              });
+          const livenessState = resolveRunLivenessState({
+            payloadCount,
+            aborted,
+            timedOut,
+            attempt,
+            incompleteTurnText: null,
+          });
           const stopReason = attempt.clientToolCalls
             ? "tool_calls"
-            : attempt.yieldDetected
-              ? "end_turn"
-              : (attemptAssistant?.stopReason as string | undefined);
+            : (attemptAssistant?.stopReason as string | undefined);
           const terminalPayloads = emptyAssistantReplyIsSilent
             ? [{ text: SILENT_REPLY_TOKEN }]
             : payloadsForTerminalPath;
@@ -4298,7 +4291,6 @@ async function runEmbeddedAgentInternal(
             replayInvalid,
             livenessState,
             stopReason,
-            yielded: attempt.yieldDetected === true,
           });
           return {
             payloads: terminalPayloads?.length ? terminalPayloads : undefined,
@@ -4316,7 +4308,6 @@ async function runEmbeddedAgentInternal(
               replayInvalid,
               livenessState,
               agentHarnessResultClassification: attempt.agentHarnessResultClassification,
-              ...(attempt.yieldDetected ? { yielded: true } : {}),
               ...(emptyAssistantReplyIsSilent
                 ? { terminalReplyKind: "silent-empty" as const }
                 : {}),

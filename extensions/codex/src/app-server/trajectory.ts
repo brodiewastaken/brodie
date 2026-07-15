@@ -275,7 +275,6 @@ export function recordCodexTrajectoryCompletion(
     threadId: string;
     turnId: string;
     timedOut: boolean;
-    yieldDetected?: boolean;
   },
 ): void {
   if (!recorder) {
@@ -285,7 +284,6 @@ export function recordCodexTrajectoryCompletion(
     threadId: params.threadId,
     turnId: params.turnId,
     timedOut: params.timedOut,
-    yieldDetected: params.yieldDetected ?? false,
     aborted: params.result.aborted,
     promptError: normalizeCodexTrajectoryError(params.result.promptError),
     usage: params.result.attemptUsage,

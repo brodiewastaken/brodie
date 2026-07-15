@@ -155,6 +155,23 @@ describe("handleAgentEnd", () => {
     });
   });
 
+  it("does not propagate legacy yielded state through terminal lifecycle events", async () => {
+    emitAgentEventMock.mockClear();
+    const onAgentEvent = vi.fn();
+    const ctx = createContext(undefined, { onAgentEvent });
+    ctx.state.yielded = true;
+
+    await handleAgentEnd(ctx);
+
+    const terminalEvent = emitAgentEventMock.mock.calls.find(
+      (call) => call[0]?.stream === "lifecycle" && call[0]?.data?.phase === "end",
+    )?.[0];
+    expect(terminalEvent?.data).not.toHaveProperty("yielded");
+    expect(onAgentEvent.mock.calls.flat()).not.toContainEqual(
+      expect.objectContaining({ yielded: true }),
+    );
+  });
+
   it("suppresses raw assistant error messages in user-facing lifecycle events", async () => {
     // Canary text proves provider error strings are sanitized before lifecycle
     // events reach channel integrations.

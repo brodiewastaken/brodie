@@ -143,11 +143,11 @@ vi.mock("./subagent-announce-delivery.js", () => ({
       gatewayCalls.push(request);
       try {
         await callGatewayImpl(request);
-        return { delivered: true, path: "direct" };
+        return { status: "delivered", path: "direct" };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/gateway timeout/i.test(message) || delayMs == null) {
-          return { delivered: false, path: "direct", error: message };
+          return { status: "failed", path: "direct", error: message };
         }
       }
     }

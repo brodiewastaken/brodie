@@ -707,7 +707,7 @@ describe("subagent registry seam flow", () => {
         "stable published timeout outcome",
       );
     });
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    await waitForFast(() => expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1));
     expect(mocks.captureSubagentCompletionReply).toHaveBeenCalledTimes(1);
   });
 
@@ -2056,7 +2056,7 @@ describe("subagent registry seam flow", () => {
     });
   });
 
-  it("keeps sessions_yield-ended subagent runs paused instead of announcing no output", async () => {
+  it("treats a legacy yielded wait result as an ordinary terminal completion", async () => {
     mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
       if (request.method === "agent.wait") {
         return {
@@ -2085,26 +2085,13 @@ describe("subagent registry seam flow", () => {
         .listSubagentRunsForRequester("agent:main:main")
         .find((entry) => entry.runId === "run-yield-paused");
       expect(run?.endedAt).toBe(222);
-      expect(run?.pauseReason).toBe("sessions_yield");
+      expect(run?.outcome?.status).toBe("ok");
     });
-    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
-    expect(mod.countPendingDescendantRuns("agent:main:main")).toBe(1);
-
-    expect(
-      mod.replaceSubagentRunAfterSteer({
-        previousRunId: "run-yield-paused",
-        nextRunId: "run-yield-continuation",
-      }),
-    ).toBe(true);
-    const replacement = mod
-      .listSubagentRunsForRequester("agent:main:main")
-      .find((entry) => entry.runId === "run-yield-continuation");
-    expect(replacement?.runId).toBe("run-yield-continuation");
-    expect(replacement?.pauseReason).toBeUndefined();
-    expect(replacement?.endedAt).toBeUndefined();
+    await waitForFast(() => expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1));
+    expect(mod.countPendingDescendantRuns("agent:main:main")).toBe(0);
   });
 
-  it("ignores a late yield lifecycle event after the paused run is killed", async () => {
+  it("does not revive a killed run when a legacy yielded event arrives late", async () => {
     mocks.callGateway.mockImplementation(async (request: { method?: string }) =>
       request.method === "agent.wait" ? { status: "pending" } : {},
     );
@@ -2124,22 +2111,17 @@ describe("subagent registry seam flow", () => {
     const lifecycleHandler = lastOnAgentEventCall?.[0];
     expect(lifecycleHandler).toBeTypeOf("function");
 
-    lifecycleHandler?.({
-      runId,
-      stream: "lifecycle",
-      data: { phase: "end", startedAt: 111, endedAt: 222, yielded: true },
-    });
+    const killedAt = Date.now();
     expect(mod.markSubagentRunTerminated({ runId, childSessionKey, reason: "killed" })).toBe(1);
     const killed = mod
       .listSubagentRunsForRequester("agent:main:main")
       .find((run) => run.runId === runId);
     expect(killed).toMatchObject({
-      endedAt: 222,
+      endedAt: killedAt,
       endedReason: SUBAGENT_ENDED_REASON_KILLED,
       cleanupHandled: true,
       suppressAnnounceReason: "killed",
     });
-    expect(killed?.pauseReason).toBeUndefined();
     const killedCleanupAt = killed?.cleanupCompletedAt;
 
     lifecycleHandler?.({
@@ -2152,16 +2134,15 @@ describe("subagent registry seam flow", () => {
       .listSubagentRunsForRequester("agent:main:main")
       .find((run) => run.runId === runId);
     expect(afterLateYield).toMatchObject({
-      endedAt: 222,
+      endedAt: killedAt,
       endedReason: SUBAGENT_ENDED_REASON_KILLED,
       cleanupHandled: true,
       cleanupCompletedAt: killedCleanupAt,
       suppressAnnounceReason: "killed",
     });
-    expect(afterLateYield?.pauseReason).toBeUndefined();
   });
 
-  it("accepts an authoritative late yield after non-kill cleanup started", async () => {
+  it("does not let a legacy yielded event reopen completed cleanup", async () => {
     mocks.callGateway.mockImplementation(async (request: { method?: string }) =>
       request.method === "agent.wait" ? { status: "pending" } : {},
     );
@@ -2200,21 +2181,16 @@ describe("subagent registry seam flow", () => {
     });
 
     expect(run).toMatchObject({
-      endedAt: 333,
-      pauseReason: "sessions_yield",
-      cleanupHandled: false,
-      delivery: { status: "pending" },
+      endedAt: 222,
+      cleanupHandled: true,
+      cleanupCompletedAt: 223,
+      delivery: { status: "delivered" },
+      endedReason: SUBAGENT_ENDED_REASON_COMPLETE,
+      outcome: { status: "ok" },
     });
-    expect(run?.endedReason).toBeUndefined();
-    expect(run?.outcome).toBeUndefined();
-    expect(run?.cleanupCompletedAt).toBeUndefined();
   });
 
-  it("keeps yield terminals paused when the lifecycle event also signals abort (#92448)", async () => {
-    // sessions_yield ends the turn by aborting the run signal, so a depth-1
-    // subagent's yield terminal can arrive carrying yielded plus aborted (or
-    // stopReason="aborted"). The event handler must still pause the run, not
-    // settle it `cancelled` and deliver a false notice to the requester.
+  it("does not let a legacy yielded flag override an aborted terminal", async () => {
     mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
       if (request.method === "agent.wait") {
         return { status: "pending" };
@@ -2222,57 +2198,35 @@ describe("subagent registry seam flow", () => {
       return {};
     });
 
-    const cases = [
-      { runId: "run-yield-stopreason-aborted", extra: { stopReason: "aborted" } },
-      { runId: "run-yield-aborted-flag", extra: { aborted: true } },
-    ];
-
-    for (const testCase of cases) {
-      mod.registerSubagentRun({
-        runId: testCase.runId,
-        childSessionKey: `agent:main:subagent:${testCase.runId}`,
-        requesterSessionKey: "agent:main:main",
-        requesterDisplayKey: "main",
-        task: "wait for child continuation",
-        cleanup: "keep",
-      });
-
-      const lastOnAgentEventCall = mocks.onAgentEvent.mock.calls[
-        mocks.onAgentEvent.mock.calls.length - 1
-      ] as unknown as
+    const runId = "run-yield-stopreason-aborted";
+    mod.registerSubagentRun({
+      runId,
+      childSessionKey: `agent:main:subagent:${runId}`,
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "finish normally or abort",
+      cleanup: "keep",
+    });
+    const lifecycleHandler = (
+      mocks.onAgentEvent.mock.calls.at(-1) as unknown as
         | [(evt: { runId: string; stream: string; data: Record<string, unknown> }) => void]
-        | undefined;
-      const lifecycleHandler = lastOnAgentEventCall?.[0];
-      expect(lifecycleHandler).toBeTypeOf("function");
-
-      lifecycleHandler?.({
-        runId: testCase.runId,
-        stream: "lifecycle",
-        data: {
-          phase: "end",
-          startedAt: 111,
-          endedAt: 222,
-          yielded: true,
-          ...testCase.extra,
-        },
-      });
-
-      await waitForFast(() => {
-        const run = mod
-          .listSubagentRunsForRequester("agent:main:main")
-          .find((entry) => entry.runId === testCase.runId);
-        expect(run?.pauseReason).toBe("sessions_yield");
-        expect(run?.outcome?.status).not.toBe("error");
-      });
-    }
-
-    // Paused, never killed → no farewell/cancellation notice reaches the requester.
-    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+        | undefined
+    )?.[0];
+    lifecycleHandler?.({
+      runId,
+      stream: "lifecycle",
+      data: { phase: "end", startedAt: 111, endedAt: 222, yielded: true, stopReason: "aborted" },
+    });
+    await waitForFast(() => {
+      const run = mod
+        .listSubagentRunsForRequester("agent:main:main")
+        .find((entry) => entry.runId === runId);
+      expect(run?.endedReason).toBe(SUBAGENT_ENDED_REASON_KILLED);
+      expect(run?.outcome?.status).toBe("error");
+    });
   });
 
-  it("cancels a pending grace timer when a yield follows an intermediate aborted terminal (#92448)", async () => {
-    // An earlier aborted terminal schedules a deferred kill grace timer; a
-    // following yield must clear it, or it fires and settles the now-paused run.
+  it("lets an ordinary completion supersede an earlier aborted grace timer", async () => {
     mocks.callGateway.mockImplementation(async (request: { method?: string }) => {
       if (request.method === "agent.wait") {
         return { status: "pending" };
@@ -2303,7 +2257,7 @@ describe("subagent registry seam flow", () => {
       stream: "lifecycle",
       data: { phase: "end", startedAt: 111, endedAt: 222, aborted: true },
     });
-    // Yield terminal → must pause and cancel the pending grace timer.
+    // A legacy yielded flag has no control semantics; this is an ordinary completion.
     lifecycleHandler?.({
       runId: "run-yield-after-pending-timeout",
       stream: "lifecycle",
@@ -2314,17 +2268,16 @@ describe("subagent registry seam flow", () => {
       const run = mod
         .listSubagentRunsForRequester("agent:main:main")
         .find((entry) => entry.runId === "run-yield-after-pending-timeout");
-      expect(run?.pauseReason).toBe("sessions_yield");
+      expect(run?.outcome?.status).toBe("ok");
     });
 
-    // Advancing well past the 15s grace window must not undo the pause.
+    // Advancing well past the grace window must not overwrite the completion.
     await vi.advanceTimersByTimeAsync(60_000);
     const run = mod
       .listSubagentRunsForRequester("agent:main:main")
       .find((entry) => entry.runId === "run-yield-after-pending-timeout");
-    expect(run?.pauseReason).toBe("sessions_yield");
-    expect(run?.outcome?.status).not.toBe("error");
-    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+    expect(run?.outcome?.status).toBe("ok");
+    await waitForFast(() => expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1));
   });
 
   it("cancels a pending timeout grace timer when the run is explicitly killed", async () => {
@@ -2367,7 +2320,7 @@ describe("subagent registry seam flow", () => {
     expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
   });
 
-  it("cancels a pending grace timer when agent.wait observes the yield after an aborted terminal (#92448)", async () => {
+  it("treats a legacy yielded agent.wait result as completion after an aborted grace event", async () => {
     let resolveWait: (value: {
       status: "ok";
       startedAt: number;
@@ -2417,16 +2370,15 @@ describe("subagent registry seam flow", () => {
       const run = mod
         .listSubagentRunsForRequester("agent:main:main")
         .find((entry) => entry.runId === "run-wait-yield-after-pending-timeout");
-      expect(run?.pauseReason).toBe("sessions_yield");
+      expect(run?.outcome?.status).toBe("ok");
     });
 
     await vi.advanceTimersByTimeAsync(60_000);
     const run = mod
       .listSubagentRunsForRequester("agent:main:main")
       .find((entry) => entry.runId === "run-wait-yield-after-pending-timeout");
-    expect(run?.pauseReason).toBe("sessions_yield");
-    expect(run?.outcome?.status).not.toBe("timeout");
-    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+    expect(run?.outcome?.status).toBe("ok");
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
   });
 
   it("announces blocked agent.wait snapshots as errors instead of success", async () => {
@@ -3348,12 +3300,11 @@ describe("subagent registry seam flow", () => {
     }
   });
 
-  it("uses the kill time when reconciling a yielded run", async () => {
+  it("uses the kill time when reconciling an active run", async () => {
     resetTaskRegistryForTests({ persist: false });
     resetTaskFlowRegistryForTests({ persist: false });
     try {
       const startedAt = Date.parse("2026-03-24T11:50:00Z");
-      const yieldedAt = Date.parse("2026-03-24T11:59:00Z");
       const completedAt = Date.parse("2026-03-24T11:59:30Z");
       const killedAt = Date.parse("2026-03-24T12:00:00Z");
       const runId = "run-yielded-before-kill";
@@ -3389,8 +3340,6 @@ describe("subagent registry seam flow", () => {
         expectsCompletionMessage: false,
         createdAt: startedAt,
         startedAt,
-        endedAt: yieldedAt,
-        pauseReason: "sessions_yield",
         cleanupHandled: false,
       });
 
@@ -3404,7 +3353,7 @@ describe("subagent registry seam flow", () => {
         .listSubagentRunsForRequester("agent:main:main")
         .find((entry) => entry.runId === runId);
       expect(killedRun).toMatchObject({
-        endedAt: yieldedAt,
+        endedAt: killedAt,
         cleanupCompletedAt: killedAt,
         endedReason: SUBAGENT_ENDED_REASON_KILLED,
       });
@@ -3934,7 +3883,7 @@ describe("subagent registry seam flow", () => {
         "swept session store observed start outcome",
       );
     });
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
+    await waitForFast(() => expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1));
   });
 
   it("requeues orphan recovery instead of keeping restart-aborted stale runs stuck as running", async () => {
@@ -4051,7 +4000,7 @@ describe("subagent registry seam flow", () => {
       "updated child session store entry",
     );
 
-    expect(mocks.persistSubagentRunsToDisk).toHaveBeenCalledTimes(4);
+    expect(mocks.persistSubagentRunsToDisk.mock.calls.length).toBeGreaterThanOrEqual(4);
     expect(mocks.persistSubagentRunsToDiskOrThrow).toHaveBeenCalledTimes(2);
   });
 
@@ -4765,7 +4714,7 @@ describe("subagent registry seam flow", () => {
     );
   });
 
-  it("deletes delete-mode completion runs when announce cleanup gives up after retry limit", async () => {
+  it("retains delete-mode completion runs after a failed scheduler handoff", async () => {
     mocks.runSubagentAnnounceFlow.mockResolvedValue(false);
     const endedAt = Date.parse("2026-03-24T12:00:00Z");
     mocks.callGateway.mockResolvedValueOnce({
@@ -4794,19 +4743,12 @@ describe("subagent registry seam flow", () => {
       "delete give-up run",
     );
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(2);
-
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(3);
-
-    await vi.advanceTimersByTimeAsync(4_000);
-    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(3);
+    expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1);
     expect(
       mod
         .listSubagentRunsForRequester("agent:main:main")
-        .find((entry) => entry.runId === "run-delete-give-up"),
-    ).toBeUndefined();
+        .find((entry) => entry.runId === "run-delete-give-up")?.delivery,
+    ).toMatchObject({ status: "pending", attemptCount: 1 });
   });
 
   it("finalizes retry-budgeted completion delete runs during resume", async () => {
@@ -5040,7 +4982,7 @@ describe("subagent registry seam flow", () => {
     });
   });
 
-  it("wakes a sessions_yield-paused parent when pending descendants settle", async () => {
+  it("does not reopen a completed parent when a descendant settles", async () => {
     mocks.loadSessionStore.mockReturnValue({
       "agent:main:subagent:parent": {
         sessionId: "sess-parent",
@@ -5057,15 +4999,20 @@ describe("subagent registry seam flow", () => {
       childSessionKey: "agent:main:subagent:parent",
       requesterSessionKey: "agent:main:main",
       requesterDisplayKey: "main",
-      task: "yielded parent waiting on descendants",
+      task: "completed parent",
       cleanup: "keep",
       createdAt: Date.parse("2026-06-26T02:17:00Z"),
       startedAt: Date.parse("2026-06-26T02:18:00Z"),
       endedAt: Date.parse("2026-06-26T02:19:00Z"),
-      pauseReason: "sessions_yield",
-      wakeOnDescendantSettle: true,
-      cleanupHandled: false,
-      cleanupCompletedAt: undefined,
+      endedReason: SUBAGENT_ENDED_REASON_COMPLETE,
+      outcome: { status: "ok" },
+      completion: {
+        required: true,
+        resultText: "parent done",
+        capturedAt: Date.parse("2026-06-26T02:19:00Z"),
+      },
+      cleanupHandled: true,
+      cleanupCompletedAt: Date.parse("2026-06-26T02:19:00Z"),
     });
 
     mod.registerSubagentRun({
@@ -5077,21 +5024,11 @@ describe("subagent registry seam flow", () => {
       cleanup: "keep",
     });
 
-    await waitForFast(() => {
-      expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(2);
-    });
+    await waitForFast(() => expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledTimes(1));
     expectRecordFields(
       getMockCallArg(mocks.runSubagentAnnounceFlow, 0, 0, "child finished announce"),
       { childRunId: "run-yielded-child-finished" },
       "child finished announce params",
-    );
-    expectRecordFields(
-      getMockCallArg(mocks.runSubagentAnnounceFlow, 1, 0, "yielded parent wake announce"),
-      {
-        childRunId: "run-yielded-parent",
-        wakeOnDescendantSettle: true,
-      },
-      "yielded parent wake announce params",
     );
   });
 
@@ -5464,6 +5401,42 @@ describe("subagent registry seam flow", () => {
         workspaceDir: undefined,
       });
     });
+  });
+
+  it("finalizes only the exact interrupted generation when a child session key was reused", async () => {
+    const childSessionKey = "agent:main:subagent:reused-interrupted";
+    for (const runId of ["run-interrupted-old", "run-interrupted-new"]) {
+      mod.addSubagentRunForTests({
+        runId,
+        childSessionKey,
+        controllerSessionKey: "agent:main:main",
+        requesterSessionKey: "agent:main:main",
+        requesterDisplayKey: "main",
+        task: runId,
+        cleanup: "keep",
+        expectsCompletionMessage: true,
+        spawnMode: "run",
+        createdAt: runId.endsWith("old") ? 1 : 2,
+        startedAt: runId.endsWith("old") ? 1 : 2,
+        sessionStartedAt: runId.endsWith("old") ? 1 : 2,
+        accumulatedRuntimeMs: 0,
+        cleanupHandled: false,
+      });
+    }
+
+    await expect(
+      mod.finalizeInterruptedSubagentRun({
+        runId: "run-interrupted-old",
+        childSessionKey,
+        error: "old generation interrupted",
+        endedAt: 3,
+      }),
+    ).resolves.toBe(1);
+
+    expect(mocks.runSubagentAnnounceFlow).not.toHaveBeenCalled();
+    const runs = mod.listSubagentRunsForRequester("agent:main:main");
+    expect(runs.find((entry) => entry.runId === "run-interrupted-old")).toBeUndefined();
+    expect(runs.find((entry) => entry.runId === "run-interrupted-new")?.endedAt).toBeUndefined();
   });
 
   it("loads plugin and context-engine runtime before released end hooks", async () => {

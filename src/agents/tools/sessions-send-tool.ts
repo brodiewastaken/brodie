@@ -21,7 +21,7 @@ import {
   toAgentStoreSessionKey,
 } from "../../routing/session-key.js";
 import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
-import { isCronRunSessionKey, parseAgentSessionKey } from "../../sessions/session-key-utils.js";
+import { isCronRunSessionKey } from "../../sessions/session-key-utils.js";
 import { SESSION_LABEL_MAX_LENGTH } from "../../sessions/session-label.js";
 import { stripFormattedReasoningMessage } from "../../shared/text/formatted-reasoning-message.js";
 import {
@@ -29,13 +29,6 @@ import {
   INTERNAL_MESSAGE_CHANNEL,
 } from "../../utils/message-channel.js";
 import { listAgentIds } from "../agent-scope.js";
-import {
-  type EmbeddedAgentQueueMessageOptions,
-  type EmbeddedAgentQueueMessageOutcome,
-  formatEmbeddedAgentQueueFailureSummary,
-  queueEmbeddedAgentMessageWithOutcomeAsync,
-  resolveActiveEmbeddedRunSessionId,
-} from "../embedded-agent-runner/runs.js";
 import { resolveNestedAgentLaneForSession } from "../lanes.js";
 import {
   type AgentWaitResult,
@@ -59,6 +52,11 @@ import {
 } from "./sessions-helpers.js";
 import { buildAgentToAgentMessageContext, resolvePingPongTurns } from "./sessions-send-helpers.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
+import {
+  ensureSessionsSendSchedulerProducerRegistered,
+  resolveCronRunScopedFallbackSessionKey,
+  startSessionsSendThroughScheduler,
+} from "./sessions-send-tool.scheduler.js";
 
 const SessionsSendToolSchema = Type.Object({
   sessionKey: Type.Optional(Type.String()),
@@ -201,145 +199,6 @@ function isPendingErrorAgentWaitTimeout(result: AgentWaitResult): boolean {
   );
 }
 
-function isRunScopedAgentSessionKey(sessionKey: string): boolean {
-  const parsed = parseAgentSessionKey(normalizeOptionalString(sessionKey));
-  return Boolean(parsed && /(?:^|:)run:[^:]+(?::|$)/.test(parsed.rest));
-}
-
-function resolveCronRunScopedFallbackSessionKey(sessionKey: string): string | undefined {
-  const normalizedSessionKey = normalizeOptionalString(sessionKey);
-  if (!normalizedSessionKey || !isCronRunSessionKey(normalizedSessionKey)) {
-    return undefined;
-  }
-  const parsed = parseAgentSessionKey(normalizedSessionKey);
-  if (!parsed) {
-    return undefined;
-  }
-  const runMarker = ":run:";
-  const runMarkerIndex = parsed.rest.lastIndexOf(runMarker);
-  if (runMarkerIndex <= 0) {
-    return undefined;
-  }
-  const runId = parsed.rest.slice(runMarkerIndex + runMarker.length);
-  if (!runId || runId.includes(":")) {
-    return undefined;
-  }
-  const fallbackRest = parsed.rest.slice(0, runMarkerIndex);
-  if (!fallbackRest) {
-    return undefined;
-  }
-  return `agent:${parsed.agentId}:${fallbackRest}`;
-}
-
-function shouldFallbackCronRunScopedActiveDelivery(
-  outcome: EmbeddedAgentQueueMessageOutcome,
-): boolean {
-  return (
-    !outcome.queued && (outcome.reason === "not_streaming" || outcome.reason === "no_active_run")
-  );
-}
-
-async function startAgentRun(params: {
-  callGateway: GatewayCaller;
-  runId: string;
-  sendParams: Record<string, unknown>;
-  sessionKey: string;
-  deliveryTimeoutMs?: number;
-  allowActiveRunQueueDelivery?: boolean;
-}): Promise<
-  | {
-      ok: true;
-      runId: string;
-      activeRunQueue?: boolean;
-      a2aSessionKey?: string;
-      a2aDisplayKey?: string;
-    }
-  | { ok: false; result: ReturnType<typeof jsonResult> }
-> {
-  try {
-    const activeRunSessionId =
-      params.allowActiveRunQueueDelivery && isRunScopedAgentSessionKey(params.sessionKey)
-        ? resolveActiveEmbeddedRunSessionId(params.sessionKey)
-        : undefined;
-    const messageText =
-      typeof params.sendParams.message === "string" ? params.sendParams.message : undefined;
-    if (activeRunSessionId && messageText) {
-      const sourceReplyDeliveryMode =
-        params.sendParams.sourceReplyDeliveryMode === "automatic" ||
-        params.sendParams.sourceReplyDeliveryMode === "message_tool_only"
-          ? params.sendParams.sourceReplyDeliveryMode
-          : undefined;
-      const queueOptions: EmbeddedAgentQueueMessageOptions = {
-        steeringMode: "all",
-        debounceMs: 0,
-        deliveryTimeoutMs: params.deliveryTimeoutMs,
-        waitForTranscriptCommit: true,
-        ...(sourceReplyDeliveryMode ? { sourceReplyDeliveryMode } : {}),
-      };
-      let queueOutcome = await queueEmbeddedAgentMessageWithOutcomeAsync(
-        activeRunSessionId,
-        messageText,
-        queueOptions,
-      );
-      if (!queueOutcome.queued && queueOutcome.reason === "transcript_commit_wait_unsupported") {
-        const bestEffortQueueOptions = { ...queueOptions };
-        delete bestEffortQueueOptions.waitForTranscriptCommit;
-        queueOutcome = await queueEmbeddedAgentMessageWithOutcomeAsync(
-          activeRunSessionId,
-          messageText,
-          bestEffortQueueOptions,
-        );
-      }
-      if (queueOutcome.queued) {
-        return { ok: true, runId: params.runId, activeRunQueue: true };
-      }
-      const fallbackSessionKey = resolveCronRunScopedFallbackSessionKey(params.sessionKey);
-      if (fallbackSessionKey && shouldFallbackCronRunScopedActiveDelivery(queueOutcome)) {
-        const response = await params.callGateway<{ runId: string }>({
-          method: "agent",
-          params: {
-            ...params.sendParams,
-            sessionKey: fallbackSessionKey,
-            idempotencyKey: crypto.randomUUID(),
-          },
-          timeoutMs: 10_000,
-        });
-        return {
-          ok: true,
-          runId:
-            typeof response?.runId === "string" && response.runId ? response.runId : params.runId,
-          a2aSessionKey: fallbackSessionKey,
-          a2aDisplayKey: fallbackSessionKey,
-        };
-      }
-      const queueSummary =
-        formatEmbeddedAgentQueueFailureSummary(queueOutcome) ?? "active run queue rejected";
-      throw new Error(queueSummary);
-    }
-    const response = await params.callGateway<{ runId: string }>({
-      method: "agent",
-      params: params.sendParams,
-      timeoutMs: 10_000,
-    });
-    return {
-      ok: true,
-      runId: typeof response?.runId === "string" && response.runId ? response.runId : params.runId,
-    };
-  } catch (err) {
-    const messageText =
-      err instanceof Error ? err.message : typeof err === "string" ? err : "error";
-    return {
-      ok: false,
-      result: jsonResult({
-        runId: params.runId,
-        status: "error",
-        error: messageText,
-        sessionKey: params.sessionKey,
-      }),
-    };
-  }
-}
-
 export function createSessionsSendTool(opts?: {
   agentSessionKey?: string;
   agentChannel?: GatewayMessageChannel;
@@ -347,6 +206,7 @@ export function createSessionsSendTool(opts?: {
   config?: OpenClawConfig;
   callGateway?: GatewayCaller;
 }): AnyAgentTool {
+  ensureSessionsSendSchedulerProducerRegistered();
   return {
     label: "Session Send",
     name: "sessions_send",
@@ -690,11 +550,12 @@ export function createSessionsSendTool(opts?: {
       };
 
       if (timeoutSeconds === 0) {
-        const start = await startAgentRun({
+        const start = await startSessionsSendThroughScheduler({
           callGateway: gatewayCall,
           runId,
           sendParams,
-          sessionKey: displayKey,
+          targetSessionKey: resolvedKey,
+          displayKey,
           deliveryTimeoutMs: announceTimeoutMs,
           allowActiveRunQueueDelivery: true,
         });
@@ -702,6 +563,15 @@ export function createSessionsSendTool(opts?: {
           return start.result;
         }
         runId = start.runId;
+        if (start.alreadyDelivered) {
+          return jsonResult({
+            runId,
+            status: "ok",
+            alreadyDelivered: true,
+            sessionKey: displayKey,
+            delivery,
+          });
+        }
         if (!start.activeRunQueue) {
           startA2AFlow(undefined, runId, start.a2aSessionKey, start.a2aDisplayKey, true);
         }
@@ -713,17 +583,27 @@ export function createSessionsSendTool(opts?: {
         });
       }
 
-      const start = await startAgentRun({
+      const start = await startSessionsSendThroughScheduler({
         callGateway: gatewayCall,
         runId,
         sendParams,
-        sessionKey: displayKey,
+        targetSessionKey: resolvedKey,
+        displayKey,
         deliveryTimeoutMs: announceTimeoutMs,
       });
       if (!start.ok) {
         return start.result;
       }
       runId = start.runId;
+      if (start.alreadyDelivered) {
+        return jsonResult({
+          runId,
+          status: "ok",
+          alreadyDelivered: true,
+          sessionKey: displayKey,
+          delivery,
+        });
+      }
       const result = await waitForAgentRunAndReadUpdatedAssistantReply({
         runId,
         sessionKey: resolvedKey,

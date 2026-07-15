@@ -4,11 +4,24 @@
  * Image, video, and music generation use this to track tasks, wake sessions, and deliver generated media.
  */
 import crypto from "node:crypto";
+import { getRuntimeConfig } from "../../config/io.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { clearAgentRunContext, registerAgentRunContext } from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import type {
+  JsonValue,
+  SchedulerDispatchBatch,
+  SchedulerDispatchResult,
+} from "../../scheduler/conversation-scheduler.js";
+import { getRuntimeConversationScheduler } from "../../scheduler/runtime-conversation-scheduler.js";
+import {
+  beginRuntimeProducerDispatch,
+  buildRuntimeProducerEvent,
+  completeRuntimeProducerDispatch,
+  resolveRuntimeProducerRoute,
+} from "../../scheduler/runtime-producer-admission.js";
 import {
   completeTaskRunByRunId,
   createRunningTaskRun,
@@ -36,6 +49,7 @@ import {
 } from "../subagent-announce-delivery.js";
 import type { SubagentAnnounceDeliveryFailureReason } from "../subagent-announce-dispatch.js";
 import { resolveAnnounceOrigin } from "../subagent-announce-origin.js";
+import { ensureMediaGenerationCompletionSchedulerProducerRegistered } from "./media-generate-background-scheduler-registration.js";
 
 const log = createSubsystemLogger("agents/tools/media-generate-background-shared");
 const MEDIA_GENERATION_TASK_KEEPALIVE_INTERVAL_MS = 60_000;
@@ -44,6 +58,24 @@ const MEDIA_DIRECT_FALLBACK_DELIVERY_REASONS = new Set<SubagentAnnounceDeliveryF
   "message_tool_delivery_missing",
   "visible_reply_missing",
 ]);
+
+type ScheduledMediaGenerationCompletion = {
+  version: 1;
+  kind: "media_generation_completion";
+  handle: MediaGenerationTaskHandle;
+  status: "ok" | "error";
+  statusLabel: string;
+  result: string;
+  attachments?: AgentGeneratedAttachment[];
+  mediaUrls?: string[];
+  statsLine?: string;
+  eventSource: AgentInternalEvent["source"];
+  announceType: string;
+  toolName: string;
+  completionLabel: string;
+};
+
+const pendingMediaCompletionResults = new Map<string, Set<(delivered: boolean) => void>>();
 
 /** Handle for a detached media generation task registered in the task ledger. */
 export type MediaGenerationTaskHandle = {
@@ -517,7 +549,142 @@ export function scheduleMediaGenerationTaskCompletion<
   });
 }
 
+function normalizeScheduledMediaCompletion(payload: ScheduledMediaGenerationCompletion): JsonValue {
+  // JSON normalization intentionally strips optional undefined values before durable admission.
+  // eslint-disable-next-line unicorn/prefer-structured-clone
+  return JSON.parse(JSON.stringify(payload)) as JsonValue;
+}
+
+function parseScheduledMediaCompletion(value: JsonValue): ScheduledMediaGenerationCompletion {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("scheduled media completion payload must be an object");
+  }
+  const payload = value as unknown as Partial<ScheduledMediaGenerationCompletion>;
+  if (
+    payload.version !== 1 ||
+    payload.kind !== "media_generation_completion" ||
+    !payload.handle ||
+    typeof payload.handle.taskId !== "string" ||
+    typeof payload.handle.runId !== "string" ||
+    typeof payload.handle.requesterSessionKey !== "string" ||
+    (payload.status !== "ok" && payload.status !== "error") ||
+    typeof payload.toolName !== "string"
+  ) {
+    throw new Error("scheduled media completion payload is invalid");
+  }
+  return payload as ScheduledMediaGenerationCompletion;
+}
+
+export async function dispatchScheduledMediaCompletion(
+  batch: SchedulerDispatchBatch,
+): Promise<SchedulerDispatchResult> {
+  const runCorrelationId = beginRuntimeProducerDispatch(batch);
+  const failures: Array<{ eventId: string; reason: string }> = [];
+  for (const event of batch.events) {
+    let delivered = false;
+    try {
+      delivered = await wakeMediaGenerationTaskCompletionDirect({
+        ...parseScheduledMediaCompletion(event.payload),
+        config: getRuntimeConfig(),
+      });
+      if (!delivered) {
+        failures.push({ eventId: event.id, reason: "media completion delivery was not confirmed" });
+      }
+    } catch (error) {
+      failures.push({ eventId: event.id, reason: formatErrorMessage(error) });
+    }
+    for (const resolve of pendingMediaCompletionResults.get(event.id) ?? []) {
+      resolve(delivered);
+    }
+    pendingMediaCompletionResults.delete(event.id);
+  }
+  if (failures.length > 0) {
+    return {
+      outcome: "failed",
+      failure: { kind: "media_generation_completion_failed", failures },
+      runCorrelationId,
+    };
+  }
+  return completeRuntimeProducerDispatch({ batch, runCorrelationId });
+}
+
 async function wakeMediaGenerationTaskCompletion(params: {
+  config?: OpenClawConfig;
+  handle: MediaGenerationTaskHandle | null;
+  status: "ok" | "error";
+  statusLabel: string;
+  result: string;
+  attachments?: AgentGeneratedAttachment[];
+  mediaUrls?: string[];
+  statsLine?: string;
+  eventSource: AgentInternalEvent["source"];
+  announceType: string;
+  toolName: string;
+  completionLabel: string;
+}): Promise<boolean> {
+  if (!params.handle) {
+    return true;
+  }
+  ensureMediaGenerationCompletionSchedulerProducerRegistered();
+  const agentId = resolveAgentIdFromSessionKey(params.handle.requesterSessionKey);
+  const payload: ScheduledMediaGenerationCompletion = {
+    version: 1,
+    kind: "media_generation_completion",
+    handle: params.handle,
+    status: params.status,
+    statusLabel: params.statusLabel,
+    result: params.result,
+    attachments: params.attachments,
+    mediaUrls: params.mediaUrls,
+    statsLine: params.statsLine,
+    eventSource: params.eventSource,
+    announceType: params.announceType,
+    toolName: params.toolName,
+    completionLabel: params.completionLabel,
+  };
+  const event = buildRuntimeProducerEvent({
+    id: `${params.toolName}:${params.handle.taskId}:${params.handle.runId}:${params.status}`,
+    route: resolveRuntimeProducerRoute({
+      sessionKey: params.handle.requesterSessionKey,
+      agentId,
+    }),
+    producerKind: "media_generation_completion",
+    payload: normalizeScheduledMediaCompletion(payload),
+  });
+  let resolveResult!: (delivered: boolean) => void;
+  const completion = new Promise<boolean>((resolve) => {
+    resolveResult = resolve;
+  });
+  const pending = pendingMediaCompletionResults.get(event.id) ?? new Set();
+  pending.add(resolveResult);
+  pendingMediaCompletionResults.set(event.id, pending);
+  const scheduler = getRuntimeConversationScheduler();
+  const admission = await scheduler.admit(event);
+  if (admission.accepted) {
+    const terminal = scheduler.waitForReceiptTerminal?.(admission.receiptId);
+    if (terminal) {
+      void terminal.then((state) => {
+        const waiters = pendingMediaCompletionResults.get(event.id);
+        if (!waiters?.has(resolveResult)) {
+          return;
+        }
+        waiters.delete(resolveResult);
+        if (waiters.size === 0) {
+          pendingMediaCompletionResults.delete(event.id);
+        }
+        resolveResult(state === "delivered");
+      });
+    }
+    return await completion;
+  }
+  pending.delete(resolveResult);
+  if (pending.size === 0) {
+    pendingMediaCompletionResults.delete(event.id);
+  }
+  return await wakeMediaGenerationTaskCompletionDirect(params);
+}
+
+async function wakeMediaGenerationTaskCompletionDirect(params: {
   config?: OpenClawConfig;
   handle: MediaGenerationTaskHandle | null;
   status: "ok" | "error";
@@ -584,10 +751,10 @@ async function wakeMediaGenerationTaskCompletion(params: {
     bestEffortDeliver: true,
     directIdempotencyKey: announceId,
   });
-  if (delivery.delivered) {
+  if (delivery.status === "delivered") {
     return true;
   }
-  if (delivery.terminal) {
+  if (delivery.status === "terminal_failure") {
     log.warn("Media generation completion delivery stopped after terminal fallback", {
       taskId: params.handle.taskId,
       runId: params.handle.runId,
@@ -597,7 +764,9 @@ async function wakeMediaGenerationTaskCompletion(params: {
     return true;
   }
   const canTryDirectCompletionFallback =
-    delivery.reason != null && MEDIA_DIRECT_FALLBACK_DELIVERY_REASONS.has(delivery.reason);
+    delivery.status === "failed" &&
+    delivery.reason != null &&
+    MEDIA_DIRECT_FALLBACK_DELIVERY_REASONS.has(delivery.reason);
   if (params.status === "ok" && canTryDirectCompletionFallback) {
     // Direct fallback is only for successful media where missing attachments would lose the result.
     const label = `${params.completionLabel[0]?.toUpperCase() ?? "M"}${params.completionLabel.slice(1)}`;
@@ -629,7 +798,7 @@ async function wakeMediaGenerationTaskCompletion(params: {
       return true;
     }
   }
-  if (delivery.error) {
+  if (delivery.status === "failed" && delivery.error) {
     log.error("Media generation completion wake failed; requester session was not woken", {
       taskId: params.handle.taskId,
       runId: params.handle.runId,
@@ -697,6 +866,7 @@ export function createMediaGenerationTaskLifecycle(params: {
   announceType: string;
   completionLabel: string;
 }): MediaGenerationTaskLifecycle {
+  ensureMediaGenerationCompletionSchedulerProducerRegistered();
   return {
     createTaskRun(runParams: CreateMediaGenerationTaskRunParams): MediaGenerationTaskHandle | null {
       return createMediaGenerationTaskRun({

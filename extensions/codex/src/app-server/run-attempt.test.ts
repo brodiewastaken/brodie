@@ -257,7 +257,6 @@ async function buildDynamicToolsForTest(
     runAbortController: new AbortController(),
     sessionAgentId: "main",
     pluginConfig: {},
-    onYieldDetected: () => undefined,
     ...options,
   });
 }
@@ -366,7 +365,6 @@ async function startThreadWithDisabledNativeSurfaceForTest(
     runAbortController: new AbortController(),
     sessionAgentId: "main",
     pluginConfig: options.pluginConfig ?? {},
-    onYieldDetected: () => undefined,
   });
   const request = vi.fn(async (method: string, _requestParams?: unknown) => {
     if (method === "thread/start") {
@@ -536,7 +534,6 @@ describe("runCodexAppServerAttempt", () => {
       runAbortController: new AbortController(),
       sessionAgentId: "main",
       pluginConfig: {},
-      onYieldDetected: () => undefined,
     });
     const request = vi.fn(async (method: string, _requestParams?: unknown) => {
       if (method === "thread/start") {
@@ -645,7 +642,6 @@ describe("runCodexAppServerAttempt", () => {
             experimental: { sandboxExecServer: true },
           },
         },
-        onYieldDetected: () => undefined,
       });
       const environment = await ensureCodexSandboxExecServerEnvironment({
         client: client as never,
@@ -1621,8 +1617,7 @@ describe("runCodexAppServerAttempt", () => {
     expect(agentsList).not.toHaveProperty("deferLoading");
     expect(sessionsSpawn).not.toHaveProperty("namespace");
     expect(sessionsSpawn).not.toHaveProperty("deferLoading");
-    expect(sessionsYield).not.toHaveProperty("namespace");
-    expect(sessionsYield).not.toHaveProperty("deferLoading");
+    expect(sessionsYield).toBeUndefined();
   });
 
   it("registers the ring-zero crestodian tool directly without a per-run plugin config", () => {

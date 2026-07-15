@@ -11,6 +11,11 @@ import type { ContextEngine, SubagentEndReason } from "../context-engine/types.j
 import { callGateway } from "../gateway/call.js";
 import { getAgentRunContext, onAgentEvent } from "../infra/agent-events.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import type { AdmissionResult, ScheduledEvent } from "../scheduler/conversation-scheduler.js";
+import {
+  getRuntimeConversationScheduler,
+  registerRuntimeConversationSchedulerProducer,
+} from "../scheduler/runtime-conversation-scheduler.js";
 import {
   formatAbandonedLivenessError,
   formatBlockedLivenessError,
@@ -58,8 +63,6 @@ import {
   ANNOUNCE_EXPIRY_MS,
   MAX_ANNOUNCE_RETRY_COUNT,
   PROVISIONAL_KILL_RECONCILIATION_MS,
-  reconcileOrphanedRestoredRuns,
-  reconcileOrphanedRun,
   resolveAnnounceRetryDelayMs,
   safeRemoveAttachmentsDir,
 } from "./subagent-registry-helpers.js";
@@ -80,7 +83,6 @@ import {
 } from "./subagent-registry-queries.js";
 import {
   createSubagentRunManager,
-  markSubagentRunPausedAfterYield,
   type RegisterSubagentRunParams,
 } from "./subagent-registry-run-manager.js";
 import {
@@ -100,7 +102,6 @@ import {
 import {
   loadSubagentSessionEntry,
   resolveCompletionFromSessionEntry,
-  resolveSubagentRunOrphanReason,
   resolveSubagentSessionCompletion,
   resolveSubagentSessionStartedAt,
   type SubagentSessionStoreCache,
@@ -114,6 +115,7 @@ export {
   resolveSubagentSessionStatus,
 } from "./subagent-registry-helpers.js";
 const log = createSubsystemLogger("agents/subagent-registry");
+let unregisterSubagentCompletionProducer: (() => void) | undefined;
 
 type SubagentAnnounceModule = Pick<
   typeof import("./subagent-announce.js"),
@@ -136,6 +138,9 @@ type SubagentRegistryDeps = {
   resolveAgentTimeoutMs: typeof resolveAgentTimeoutMs;
   restoreSubagentRunsFromDisk: typeof restoreSubagentRunsFromDisk;
   runSubagentAnnounceFlow: SubagentAnnounceModule["runSubagentAnnounceFlow"];
+  admitScheduledEvent(event: ScheduledEvent): Promise<AdmissionResult>;
+  retryScheduledReceipt(receiptId: string): Promise<void>;
+  cancelScheduledReceipt(receiptId: string): Promise<boolean>;
   ensureContextEnginesInitialized?: () => void;
   ensureRuntimePluginsLoaded?: (
     params: Parameters<typeof ensureRuntimePluginsLoadedFn>[0],
@@ -178,6 +183,14 @@ const defaultSubagentRegistryDeps: SubagentRegistryDeps = {
   restoreSubagentRunsFromDisk,
   runSubagentAnnounceFlow: async (params) =>
     (await loadSubagentAnnounceModule()).runSubagentAnnounceFlow(params),
+  admitScheduledEvent: async (event) => {
+    ensureSubagentCompletionProducerRegistered();
+    return await getRuntimeConversationScheduler().admit(event);
+  },
+  retryScheduledReceipt: async (receiptId) =>
+    await getRuntimeConversationScheduler().retryReceipt(receiptId),
+  cancelScheduledReceipt: async (receiptId) =>
+    await getRuntimeConversationScheduler().cancelReceipt(receiptId),
 };
 
 let subagentRegistryDeps: SubagentRegistryDeps = defaultSubagentRegistryDeps;
@@ -496,8 +509,7 @@ async function completeSubagentRunWithRecovery(params: CompleteSubagentRunParams
   if (
     !latest ||
     typeof latest.endedAt !== "number" ||
-    typeof latest.cleanupCompletedAt === "number" ||
-    latest.pauseReason === "sessions_yield"
+    typeof latest.cleanupCompletedAt === "number"
   ) {
     return;
   }
@@ -572,7 +584,7 @@ function schedulePendingLifecycleTimeout(params: {
     if (!entry) {
       return;
     }
-    if (entry.outcome?.status === "ok" || entry.pauseReason === "sessions_yield") {
+    if (entry.outcome?.status === "ok") {
       return;
     }
     const completionParams = {
@@ -705,6 +717,9 @@ const subagentLifecycleController = createSubagentRegistryLifecycleController({
   cleanupBrowserSessionsForLifecycleEnd: (args) =>
     subagentRegistryDeps.cleanupBrowserSessionsForLifecycleEnd(args),
   runSubagentAnnounceFlow: (params) => subagentRegistryDeps.runSubagentAnnounceFlow(params),
+  admitScheduledEvent: (event) => subagentRegistryDeps.admitScheduledEvent(event),
+  retryScheduledReceipt: (receiptId) => subagentRegistryDeps.retryScheduledReceipt(receiptId),
+  cancelScheduledReceipt: (receiptId) => subagentRegistryDeps.cancelScheduledReceipt(receiptId),
   warn: (message, meta) => log.warn(message, meta),
 });
 
@@ -712,10 +727,25 @@ const {
   clearScheduledResumeTimers,
   completeCleanupBookkeeping,
   completeSubagentRun,
+  dispatchScheduledCompletion,
+  settleScheduledCompletion,
   finalizeResumedAnnounceGiveUp,
   refreshFrozenResultFromSession,
   startSubagentAnnounceCleanupFlow,
 } = subagentLifecycleController;
+
+function ensureSubagentCompletionProducerRegistered(): void {
+  unregisterSubagentCompletionProducer ??= registerRuntimeConversationSchedulerProducer({
+    producerKinds: [
+      "subagent_completion",
+      "subagent_failure",
+      "subagent_timeout",
+      "subagent_interruption",
+    ],
+    dispatch: dispatchScheduledCompletion,
+    settle: settleScheduledCompletion,
+  });
+}
 
 function resumeSubagentRun(runId: string) {
   if (!runId || resumedRuns.has(runId)) {
@@ -729,11 +759,6 @@ function resumeSubagentRun(runId: string) {
     return;
   }
   if (typeof entry.endedAt === "number" && isDeliverySuspended(entry)) {
-    return;
-  }
-  // Yielded runs stay paused until explicitly steered, except orchestrators
-  // waiting on descendants: their settle retry must reach the wake path.
-  if (entry.pauseReason === "sessions_yield" && entry.wakeOnDescendantSettle !== true) {
     return;
   }
   // Skip entries that have exhausted their retry budget or expired (#18264).
@@ -786,22 +811,6 @@ function resumeSubagentRun(runId: string) {
       resumedRuns.add(runId);
       return;
     }
-    const orphanReason = resolveSubagentRunOrphanReason({ entry });
-    if (orphanReason) {
-      if (
-        reconcileOrphanedRun({
-          runId,
-          entry,
-          reason: orphanReason,
-          source: "resume",
-          runs: subagentRuns,
-          resumedRuns,
-        })
-      ) {
-        persistSubagentRuns();
-      }
-      return;
-    }
     if (suppressAnnounceForSteerRestart(entry)) {
       resumedRuns.add(runId);
       return;
@@ -832,14 +841,6 @@ function restoreSubagentRunsOnce() {
     });
     if (restoredCount === 0) {
       return;
-    }
-    if (
-      reconcileOrphanedRestoredRuns({
-        runs: subagentRuns,
-        resumedRuns,
-      })
-    ) {
-      persistSubagentRuns();
     }
     if (subagentRuns.size === 0) {
       return;
@@ -1046,25 +1047,6 @@ async function sweepSubagentRuns() {
         const hasLiveRunContext = Boolean(getAgentRunContext(runId));
         const activeAgeMs = now - (entry.startedAt ?? entry.createdAt);
         if (!hasLiveRunContext && activeAgeMs >= STALE_ACTIVE_SUBAGENT_GRACE_MS) {
-          const orphanReason = resolveSubagentRunOrphanReason({
-            entry,
-          });
-          if (orphanReason) {
-            if (
-              reconcileOrphanedRun({
-                runId,
-                entry,
-                reason: orphanReason,
-                source: "resume",
-                runs: subagentRuns,
-                resumedRuns,
-              })
-            ) {
-              mutated = true;
-            }
-            continue;
-          }
-
           const sessionEntry = loadSubagentSessionEntry({
             childSessionKey: entry.childSessionKey,
             storeCache,
@@ -1452,25 +1434,6 @@ function ensureListener() {
       const livenessState =
         typeof evt.data?.livenessState === "string" ? evt.data.livenessState : undefined;
       const stopReason = typeof evt.data?.stopReason === "string" ? evt.data.stopReason : undefined;
-      // sessions_yield ends the turn by aborting the run signal, so a yielded
-      // terminal can also look aborted. An explicit yield is authoritative — pause,
-      // don't kill — else the tracking task settles `cancelled` with a false notice (#92448).
-      if (evt.data?.yielded === true) {
-        // Drop any grace timer from an earlier aborted/error terminal so it can't
-        // later fire and settle this now-paused run with a false notice.
-        clearPendingLifecycleError(evt.runId);
-        clearPendingLifecycleTimeout(evt.runId);
-        if (
-          markSubagentRunPausedAfterYield({
-            entry,
-            endedAt,
-            startedAt: startedAt ?? entry.startedAt,
-          })
-        ) {
-          persistSubagentRuns();
-        }
-        return;
-      }
       if (isAbortedAgentStopReason(stopReason)) {
         clearPendingLifecycleError(evt.runId);
         clearPendingLifecycleTimeout(evt.runId);
@@ -1607,6 +1570,8 @@ export function registerSubagentRun(params: RegisterSubagentRunParams) {
 }
 
 export function resetSubagentRegistryForTests(opts?: { persist?: boolean }) {
+  unregisterSubagentCompletionProducer?.();
+  unregisterSubagentCompletionProducer = undefined;
   clearScheduledResumeTimers();
   for (const timer of resumeRetryTimers) {
     clearTimeout(timer);
@@ -1668,10 +1633,10 @@ export async function finalizeInterruptedSubagentRun(params: {
   endedAt?: number;
 }): Promise<number> {
   const runIds = new Set<string>();
-  if (typeof params.runId === "string" && params.runId.trim()) {
-    runIds.add(params.runId.trim());
-  }
-  if (typeof params.childSessionKey === "string" && params.childSessionKey.trim()) {
+  const exactRunId = typeof params.runId === "string" ? params.runId.trim() : "";
+  if (exactRunId) {
+    runIds.add(exactRunId);
+  } else if (typeof params.childSessionKey === "string" && params.childSessionKey.trim()) {
     const childSessionKey = params.childSessionKey.trim();
     for (const [runId, entry] of subagentRuns.entries()) {
       if (entry.childSessionKey === childSessionKey) {

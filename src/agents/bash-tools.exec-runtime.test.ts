@@ -7,7 +7,27 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAX_SAFE_TIMEOUT_DELAY_MS } from "../utils/timer-delay.js";
 
 const requestHeartbeatMock = vi.hoisted(() => vi.fn());
-const enqueueSystemEventMock = vi.hoisted(() => vi.fn());
+const admitRuntimeHeartbeatWakeMock = vi.hoisted(() =>
+  vi.fn<typeof import("../infra/heartbeat-runner.js").admitRuntimeHeartbeatWake>(async () => ({
+    accepted: false,
+    reason: "disabled",
+  })),
+);
+const enqueueSystemEventEntryMock = vi.hoisted(() =>
+  vi.fn<typeof import("../infra/system-events.js").enqueueSystemEventEntry>((text, options) => ({
+    text,
+    ts: 1,
+    contextKey: options.contextKey ?? null,
+    deliveryContext: options.deliveryContext,
+  })),
+);
+const normalizeSystemEventEntryMock = vi.hoisted(() =>
+  vi.fn((text: string, options: { contextKey?: string | null; deliveryContext?: unknown }) => ({
+    text,
+    contextKey: options.contextKey ?? null,
+    deliveryContext: options.deliveryContext,
+  })),
+);
 const supervisorMock = vi.hoisted(() => ({
   spawn: vi.fn(),
 }));
@@ -16,8 +36,13 @@ vi.mock("../infra/heartbeat-wake.js", () => ({
   requestHeartbeat: requestHeartbeatMock,
 }));
 
+vi.mock("../infra/heartbeat-runner.js", () => ({
+  admitRuntimeHeartbeatWake: admitRuntimeHeartbeatWakeMock,
+}));
+
 vi.mock("../infra/system-events.js", () => ({
-  enqueueSystemEvent: enqueueSystemEventMock,
+  enqueueSystemEventEntry: enqueueSystemEventEntryMock,
+  normalizeSystemEventEntry: normalizeSystemEventEntryMock,
 }));
 
 vi.mock("../process/supervisor/index.js", () => ({
@@ -48,7 +73,10 @@ beforeAll(async () => {
 
 beforeEach(() => {
   requestHeartbeatMock.mockClear();
-  enqueueSystemEventMock.mockClear();
+  admitRuntimeHeartbeatWakeMock.mockClear();
+  admitRuntimeHeartbeatWakeMock.mockResolvedValue({ accepted: false, reason: "disabled" });
+  enqueueSystemEventEntryMock.mockClear();
+  normalizeSystemEventEntryMock.mockClear();
   supervisorMock.spawn.mockReset();
 });
 
@@ -68,7 +96,7 @@ function expectExecTarget(
 }
 
 function requireSystemEventCall(): [string, Record<string, unknown>] {
-  const call = enqueueSystemEventMock.mock.calls[0];
+  const call = enqueueSystemEventEntryMock.mock.calls[0];
   if (!call) {
     throw new Error("expected system event call");
   }
@@ -439,7 +467,7 @@ describe("exec notifyOnExit suppression", () => {
     const outcome = await runBackgroundedExit({ reason: "manual-cancel" });
 
     expect(outcome.status).toBe("failed");
-    expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+    expect(enqueueSystemEventEntryMock).not.toHaveBeenCalled();
     expect(requestHeartbeatMock).not.toHaveBeenCalled();
   });
 
@@ -467,6 +495,48 @@ describe("exec notifyOnExit suppression", () => {
     expect(heartbeat.coalesceMs).toBe(0);
     expect(heartbeat.reason).toBe("exec-event");
     expect(heartbeat.sessionKey).toBe("agent:main:main");
+  });
+
+  it("durably admits exec completion before skipping the native wake fallback", async () => {
+    admitRuntimeHeartbeatWakeMock.mockResolvedValueOnce({
+      accepted: true,
+      completion: Promise.resolve({ status: "ran", durationMs: 1 }),
+    });
+
+    await runBackgroundedExit({ reason: "overall-timeout" });
+
+    expect(admitRuntimeHeartbeatWakeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:main",
+        source: "exec-event",
+        producerKind: "exec_completion",
+        sourceGeneration: expect.stringMatching(/^[^:]+:\d+:/),
+        systemEvent: expect.objectContaining({
+          text: expect.stringContaining("Exec failed"),
+          contextKey: null,
+        }),
+      }),
+    );
+    expect(requestHeartbeatMock).not.toHaveBeenCalled();
+  });
+
+  it("persists normalized exec text even when the ephemeral queue dedupes it", async () => {
+    enqueueSystemEventEntryMock.mockReturnValueOnce(null);
+    admitRuntimeHeartbeatWakeMock.mockResolvedValueOnce({
+      accepted: true,
+      completion: Promise.resolve({ status: "ran", durationMs: 1 }),
+    });
+
+    await runBackgroundedExit({ reason: "overall-timeout" });
+
+    expect(admitRuntimeHeartbeatWakeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemEvent: expect.objectContaining({
+          text: expect.stringContaining("Exec failed"),
+        }),
+      }),
+    );
+    expect(requestHeartbeatMock).not.toHaveBeenCalled();
   });
 
   it("keeps background exec exit-notification snippets on a UTF-16 boundary", async () => {

@@ -313,7 +313,6 @@ describe("runEmbeddedAgent silent-error retry", () => {
       "client tool calls",
       { clientToolCalls: [{ name: "browser", params: { url: "https://example.com" } }] },
     ],
-    ["yield", { yieldDetected: true }],
     ["approval prompts", { didSendDeterministicApprovalPrompt: true }],
     [
       "heartbeat responses",

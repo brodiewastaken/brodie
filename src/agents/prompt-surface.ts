@@ -30,7 +30,6 @@ export function buildOpenClawToolFallbackText(params: {
       "- sessions_history: fetch session history",
       "- sessions_send: send to another session",
       "- sessions_spawn: spawn an isolated sub-agent session",
-      "- sessions_yield: end this turn and wait for sub-agent completion events",
       "- subagents: list active/recent sub-agent runs",
       '- session_status: show usage/time/model state and answer "what model are we using?"',
     ].join("\n");

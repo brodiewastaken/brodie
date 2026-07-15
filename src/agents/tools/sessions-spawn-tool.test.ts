@@ -316,6 +316,7 @@ describe("sessions_spawn tool", () => {
       agentId: "main",
       model: "anthropic/claude-sonnet-4-6",
       thinking: "medium",
+      fastMode: true,
       cwd: "/workspace/requester",
       thread: true,
       mode: "session",
@@ -333,6 +334,7 @@ describe("sessions_spawn tool", () => {
     expect(spawnArgs.agentId).toBe("main");
     expect(spawnArgs.model).toBe("anthropic/claude-sonnet-4-6");
     expect(spawnArgs.thinking).toBe("medium");
+    expect(spawnArgs.fastMode).toBe(true);
     expect(spawnArgs.cwd).toBe("/workspace/requester");
     expect(spawnArgs).not.toHaveProperty("runTimeoutSeconds");
     expect(spawnArgs.thread).toBe(true);

@@ -18,12 +18,12 @@ import {
   emitAgentEvent,
 } from "../../infra/agent-events.js";
 import { emitTrustedDiagnosticEvent } from "../../infra/diagnostic-events.js";
+import { admitDurableSystemEventWake as admitDurableSystemEventWakeImpl } from "../../infra/durable-system-event-wake.js";
 import { isTruthyEnvValue } from "../../infra/env.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
   resolveEventSessionKeyForPolicy,
   resolveEventSessionRoutingPolicy,
-  scopedHeartbeatWakeOptionsForPolicy,
 } from "../../infra/event-session-routing.js";
 import { requestHeartbeat as requestHeartbeatImpl } from "../../infra/heartbeat-wake.js";
 import { sanitizeHostExecEnv } from "../../infra/host-env-security.js";
@@ -108,6 +108,7 @@ const executeDeps = {
   getProcessSupervisor: getProcessSupervisorImpl,
   enqueueSystemEvent: enqueueSystemEventImpl,
   requestHeartbeat: requestHeartbeatImpl,
+  admitDurableSystemEventWake: admitDurableSystemEventWakeImpl,
   writeCliSystemPromptFile,
 };
 
@@ -610,7 +611,6 @@ export async function executePreparedCliRun(
         : undefined;
       let gatewayCaptureKey: string | undefined;
       let cleanupMcpCaptureAttempt: (() => Promise<void>) | undefined;
-      let yielded = false;
       let didSendViaMessagingTool = false;
       let messageToolDeliveryState: MessageToolDeliveryState | undefined;
       let didDeliverSourceReplyViaMessageTool = false;
@@ -835,7 +835,6 @@ export async function executePreparedCliRun(
       const withExecutionEvidence = (output: CliOutput): CliOutput => {
         return {
           ...output,
-          ...(yielded ? { yielded: true as const } : {}),
           ...(didSendViaMessagingTool ? { didSendViaMessagingTool: true } : {}),
           ...(messageToolDeliveryState ? { messageToolDeliveryState } : {}),
           ...(didDeliverSourceReplyViaMessageTool
@@ -1068,9 +1067,6 @@ export async function executePreparedCliRun(
           };
           beginMcpLoopbackToolCallCapture({
             captureKey: gatewayCaptureKey,
-            onYield: () => {
-              yielded = true;
-            },
             onRequestStart: () => {
               inFlightUnclassifiedMcpRequests += 1;
             },
@@ -1716,20 +1712,27 @@ export async function executePreparedCliRun(
                   channel: params.messageProvider,
                   accountId: params.agentAccountId,
                 });
-                executeDeps.enqueueSystemEvent(stallNotice, {
-                  sessionKey: resolveEventSessionKeyForPolicy(params.sessionKey, eventRouting),
-                });
-                executeDeps.requestHeartbeat(
-                  scopedHeartbeatWakeOptionsForPolicy(
-                    params.sessionKey,
-                    {
-                      source: "cli-watchdog",
-                      intent: "event",
-                      reason: "cli:watchdog:stall",
-                    },
-                    eventRouting,
-                  ),
+                const eventSessionKey = resolveEventSessionKeyForPolicy(
+                  params.sessionKey,
+                  eventRouting,
                 );
+                await executeDeps.admitDurableSystemEventWake({
+                  cfg: params.config,
+                  sessionKey: eventSessionKey,
+                  systemEvent: { text: stallNotice },
+                  source: "cli-watchdog",
+                  intent: "event",
+                  reason: "cli:watchdog:stall",
+                  sourceGeneration: crypto
+                    .createHash("sha256")
+                    .update(params.provider)
+                    .update("\0")
+                    .update(params.sessionKey)
+                    .update("\0")
+                    .update(String(context.started))
+                    .digest("hex"),
+                  producerKind: "exec_completion",
+                });
               }
               throw new FailoverError(timeoutReason, {
                 reason: "timeout",
