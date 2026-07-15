@@ -914,11 +914,15 @@ export async function runCodexAppServerAttempt(
     !activeContextEngine && initialStartupBindingHadInactiveThreadBootstrap
       ? []
       : ((await readMirroredSessionHistoryMessages(activeTranscriptTarget)) ?? []);
+  const contextWindowTokens =
+    params.contextBudget?.contextWindowTokens ?? params.contextWindowInfo?.tokens;
+  const usablePromptTokenBudget =
+    params.contextBudget?.usablePromptTokenBudget ?? contextWindowTokens;
   const hookContextWindowFields = {
     ...(params.contextWindowInfo?.tokens
       ? { contextTokenBudget: params.contextWindowInfo.tokens }
-      : params.contextTokenBudget
-        ? { contextTokenBudget: params.contextTokenBudget }
+      : contextWindowTokens
+        ? { contextTokenBudget: contextWindowTokens }
         : {}),
     ...(params.contextWindowInfo?.source
       ? { contextWindowSource: params.contextWindowInfo.source }
@@ -950,7 +954,7 @@ export async function runCodexAppServerAttempt(
       agentDir,
       activeAgentId: sessionAgentId,
       contextEnginePluginId: activeContextEnginePluginId,
-      tokenBudget: params.contextTokenBudget,
+      tokenBudget: usablePromptTokenBudget,
     });
   if (activeContextEngine) {
     await bootstrapHarnessContextEngine({
@@ -1001,7 +1005,7 @@ export async function runCodexAppServerAttempt(
   let developerInstructions = baseDeveloperInstructions;
   let prePromptMessageCount = historyMessages.length;
   const codexContextProjectionMaxChars = resolveCodexContextEngineProjectionMaxChars({
-    contextTokenBudget: params.contextTokenBudget,
+    contextTokenBudget: contextWindowTokens,
     reserveTokens: resolveCodexContextEngineProjectionReserveTokens({
       config: params.config,
     }),
@@ -1033,7 +1037,7 @@ export async function runCodexAppServerAttempt(
       sessionId: activeSessionId,
       sessionKey: contextSessionKey,
       messages: historyMessages,
-      tokenBudget: params.contextTokenBudget,
+      tokenBudget: usablePromptTokenBudget,
       availableTools: new Set(
         flattenCodexDynamicToolFunctions(toolBridge.availableSpecs)
           .map((tool) => tool.name)
@@ -3428,7 +3432,7 @@ export async function runCodexAppServerAttempt(
         sessionFile: activeSessionFile,
         messagesSnapshot: finalMessages,
         prePromptMessageCount,
-        tokenBudget: params.contextTokenBudget,
+        tokenBudget: usablePromptTokenBudget,
         runtimeContext: buildHarnessContextEngineRuntimeContextFromUsage({
           attempt: buildActiveRunAttemptParams(),
           workspaceDir: effectiveWorkspace,
@@ -3436,7 +3440,7 @@ export async function runCodexAppServerAttempt(
           agentDir,
           activeAgentId: sessionAgentId,
           contextEnginePluginId: activeContextEnginePluginIdLocal,
-          tokenBudget: params.contextTokenBudget,
+          tokenBudget: usablePromptTokenBudget,
           lastCallUsage: result.attemptUsage,
           promptCache: result.promptCache,
         }),

@@ -1,4 +1,5 @@
 // Tests current-turn native image hydration from inbound media paths.
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -57,6 +58,12 @@ describe("resolveCurrentTurnImages", () => {
           },
         ],
         imageOrder: ["inline"],
+        nativeImageInputs: [
+          {
+            attachmentIndex: 0,
+            contentHash: `sha256:${crypto.createHash("sha256").update(imageBytes).digest("hex")}`,
+          },
+        ],
       });
     });
   });
@@ -181,6 +188,76 @@ describe("resolveCurrentTurnImages", () => {
         "current-photo",
       ]);
       expect(result.imageOrder).toEqual(["inline", "inline"]);
+    });
+  });
+
+  it("retains only the configured native-image ceiling and reports every overflow", async () => {
+    await withTempDir({ prefix: "openclaw-current-turn-ceiling-" }, async (base) => {
+      const firstPath = path.join(base, "first.png");
+      const secondPath = path.join(base, "second.png");
+      await fs.writeFile(firstPath, "first-image");
+      await fs.writeFile(secondPath, "second-image");
+
+      const result = await resolveCurrentTurnImages({
+        ctx: {
+          Body: "compare",
+          MediaPaths: [firstPath, secondPath],
+          MediaTypes: ["image/png", "image/png"],
+          MediaWorkspaceDir: base,
+        } satisfies MsgContext,
+        cfg: {} as OpenClawConfig,
+        maxNativeImages: 1,
+      });
+
+      expect(result.images).toHaveLength(1);
+      expect(result.nativeImageInputs).toEqual([
+        { attachmentIndex: 0, contentHash: expect.stringMatching(/^sha256:/u) },
+      ]);
+      expect(result.nativeImageOmissions).toEqual([
+        { attachmentIndex: 1, reason: "policy_ceiling" },
+      ]);
+    });
+  });
+
+  it("binds quoted and current image bytes to their exact source identities", async () => {
+    await withTempDir({ prefix: "openclaw-current-turn-quoted-" }, async (base) => {
+      const quotedPath = path.join(base, "quoted.png");
+      const currentPath = path.join(base, "current.png");
+      await fs.writeFile(quotedPath, "quoted-image");
+      await fs.writeFile(currentPath, "current-image");
+
+      const result = await resolveCurrentTurnImages({
+        ctx: {
+          Body: "compare these",
+          MessageSid: "current-message",
+          MediaPaths: [currentPath],
+          MediaTypes: ["image/png"],
+          MediaSourceMessageIds: ["current-message"],
+          MediaSourceIndexes: [0],
+          ReplyToId: "quoted-message",
+          ReplyToMediaPaths: [quotedPath],
+          ReplyToMediaTypes: ["image/png"],
+          MediaWorkspaceDir: base,
+        } satisfies MsgContext,
+        cfg: {} as OpenClawConfig,
+      });
+
+      expect(result.images?.map((image) => Buffer.from(image.data, "base64").toString())).toEqual([
+        "quoted-image",
+        "current-image",
+      ]);
+      expect(result.nativeImageInputs).toEqual([
+        expect.objectContaining({
+          attachmentIndex: 0,
+          sourceMessageId: "quoted-message",
+          sourceIndex: 0,
+        }),
+        expect.objectContaining({
+          attachmentIndex: 1,
+          sourceMessageId: "current-message",
+          sourceIndex: 0,
+        }),
+      ]);
     });
   });
 });

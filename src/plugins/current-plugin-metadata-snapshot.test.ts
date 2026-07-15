@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   captureCurrentPluginMetadataSnapshotState,
   clearCurrentPluginMetadataSnapshot,
@@ -11,8 +11,17 @@ import {
   setCurrentPluginMetadataSnapshot,
 } from "./current-plugin-metadata-snapshot.js";
 import { resolveInstalledPluginIndexPolicyHash } from "./installed-plugin-index-policy.js";
-import { writePersistedInstalledPluginIndexSync } from "./installed-plugin-index-store.js";
+import {
+  writePersistedInstalledPluginIndex,
+  writePersistedInstalledPluginIndexSync,
+} from "./installed-plugin-index-store.js";
+import { getPluginManifestMetadataSnapshot } from "./manifest-metadata-cache.js";
+import { resolveOpenClawPluginManifestMetadataSnapshot } from "./manifest-metadata-scan.js";
+import { registerPluginMetadataProcessMemoLifecycleClear } from "./plugin-metadata-lifecycle.js";
 import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.js";
+
+const clearProcessMemo = vi.fn();
+registerPluginMetadataProcessMemoLifecycleClear(clearProcessMemo);
 
 function createSnapshot(
   params: {
@@ -66,6 +75,85 @@ function createSnapshot(
 }
 
 describe("current plugin metadata snapshot", () => {
+  beforeEach(() => {
+    clearCurrentPluginMetadataSnapshot();
+    clearProcessMemo.mockClear();
+  });
+
+  afterEach(() => {
+    clearCurrentPluginMetadataSnapshot();
+    clearProcessMemo.mockClear();
+  });
+
+  it("invalidates process memos when the snapshot changes but not when it is reinstalled", () => {
+    const first = createSnapshot();
+    setCurrentPluginMetadataSnapshot(first);
+    expect(clearProcessMemo).toHaveBeenCalledTimes(1);
+    setCurrentPluginMetadataSnapshot(first);
+    expect(clearProcessMemo).toHaveBeenCalledTimes(1);
+
+    const replacement = createSnapshot();
+    setCurrentPluginMetadataSnapshot(replacement);
+    expect(clearProcessMemo).toHaveBeenCalledTimes(2);
+    expect(getCurrentPluginMetadataSnapshot()).toBe(replacement);
+  });
+
+  it("invalidates process memos when restoring a different snapshot", () => {
+    setCurrentPluginMetadataSnapshot(createSnapshot());
+    const captured = captureCurrentPluginMetadataSnapshotState();
+    setCurrentPluginMetadataSnapshot(createSnapshot());
+    clearProcessMemo.mockClear();
+
+    restoreCurrentPluginMetadataSnapshotState(captured);
+    expect(clearProcessMemo).toHaveBeenCalledTimes(1);
+    restoreCurrentPluginMetadataSnapshotState(captured);
+    expect(clearProcessMemo).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes real manifest facts after snapshot replacement and clear/restore", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-manifest-generation-"));
+    const bundledRoot = path.join(root, "extensions");
+    const pluginDir = path.join(bundledRoot, "qa-generation");
+    fs.mkdirSync(pluginDir, { recursive: true });
+    const env = {
+      ...process.env,
+      OPENCLAW_STATE_DIR: path.join(root, "state"),
+      OPENCLAW_BUNDLED_PLUGINS_DIR: bundledRoot,
+      OPENCLAW_TEST_TRUST_BUNDLED_PLUGINS_DIR: "1",
+    };
+    const writeVersion = (version: string) =>
+      fs.writeFileSync(
+        path.join(pluginDir, "openclaw.plugin.json"),
+        JSON.stringify({ id: "qa-generation", version }),
+      );
+    const versionOf = (snapshot: ReturnType<typeof getPluginManifestMetadataSnapshot>) =>
+      snapshot.records.find((record) => record.manifest.id === "qa-generation")?.manifest.version;
+
+    try {
+      writeVersion("first");
+      const first = createSnapshot();
+      setCurrentPluginMetadataSnapshot(first, { env });
+      expect(versionOf(getPluginManifestMetadataSnapshot(env))).toBe("first");
+
+      writeVersion("second-longer");
+      expect(versionOf(resolveOpenClawPluginManifestMetadataSnapshot(env))).toBe("second-longer");
+      setCurrentPluginMetadataSnapshot(first, { env });
+      expect(versionOf(getPluginManifestMetadataSnapshot(env))).toBe("first");
+
+      const replacement = createSnapshot();
+      setCurrentPluginMetadataSnapshot(replacement, { env });
+      expect(versionOf(getPluginManifestMetadataSnapshot(env))).toBe("second-longer");
+      expect(getCurrentPluginMetadataSnapshot()).toBe(replacement);
+
+      const captured = captureCurrentPluginMetadataSnapshotState();
+      clearCurrentPluginMetadataSnapshot();
+      writeVersion("third");
+      restoreCurrentPluginMetadataSnapshotState(captured);
+      expect(versionOf(getPluginManifestMetadataSnapshot(env))).toBe("third");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
   it("returns the current snapshot only for matching config policy and workspace", () => {
     const config = { plugins: { allow: ["demo"] } };
     const snapshot = createSnapshot({ config, workspaceDir: "/workspace/a" });
@@ -331,16 +419,24 @@ describe("current plugin metadata snapshot", () => {
     expect(getCurrentPluginMetadataSnapshot({ config: secondConfig })).toBeUndefined();
   });
 
-  it("clears the current snapshot when the persisted installed index changes", () => {
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-plugin-metadata-"));
-    try {
-      setCurrentPluginMetadataSnapshot(createSnapshot());
+  it.each(["sync", "async"])(
+    "clears snapshot and memos after a %s installed-index write",
+    async (mode) => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-plugin-metadata-"));
+      try {
+        setCurrentPluginMetadataSnapshot(createSnapshot());
+        clearProcessMemo.mockClear();
+        if (mode === "sync") {
+          writePersistedInstalledPluginIndexSync(createSnapshot().index, { stateDir: tempDir });
+        } else {
+          await writePersistedInstalledPluginIndex(createSnapshot().index, { stateDir: tempDir });
+        }
 
-      writePersistedInstalledPluginIndexSync(createSnapshot().index, { stateDir: tempDir });
-
-      expect(getCurrentPluginMetadataSnapshot()).toBeUndefined();
-    } finally {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+        expect(getCurrentPluginMetadataSnapshot()).toBeUndefined();
+        expect(clearProcessMemo).toHaveBeenCalledTimes(1);
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

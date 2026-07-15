@@ -29,6 +29,9 @@ export const MemorySearchSchema = Type.Object({
   maxResults: Type.Optional(Type.Integer({ minimum: 1 })),
   minScore: optionalFiniteNumberSchema(),
   corpus: Type.Optional(stringEnum(["memory", "wiki", "all", "sessions"])),
+  collections: Type.Optional(
+    Type.Array(Type.String({ minLength: 1 }), { minItems: 1, uniqueItems: true }),
+  ),
 });
 
 export const MemoryGetSchema = Type.Object({
@@ -102,9 +105,9 @@ export function createMemoryTool(params: {
     name: params.name,
     description: params.description,
     parameters: params.parameters,
-    execute: async (toolCallId, toolParams) => {
+    execute: async (toolCallId, toolParams, signal, onUpdate) => {
       const latestCtx = resolveMemoryToolContext(params.options) ?? ctx;
-      return await params.execute(latestCtx)(toolCallId, toolParams);
+      return await params.execute(latestCtx)(toolCallId, toolParams, signal, onUpdate);
     },
   };
 }

@@ -60,12 +60,14 @@ function managedCollections(): QmdRuntimeManagedCollection[] {
       kind: "memory",
       path: "/repo/project-notes",
       pattern: "*.md",
+      includeByDefault: true,
     },
     {
       name: "sessions",
       kind: "sessions",
       path: "/repo/sessions",
       pattern: "*",
+      includeByDefault: true,
     },
   ];
 }
@@ -167,21 +169,33 @@ describe("qmd-runtime-cache", () => {
 
       expect(await writeQmdCollectionValidationCache(context, 3_500)).toBe(true);
 
-      const changedContext: QmdRuntimeCollectionValidationCacheContext = {
-        ...context,
-        collections: context.collections.map((collection) =>
-          collection.name === "project-notes"
-            ? {
-                name: collection.name,
-                kind: collection.kind,
-                path: `${collection.path}-moved`,
-                pattern: collection.pattern,
-              }
-            : collection,
-        ),
-      };
+      const changedContext = structuredClone(context);
+      for (const collection of changedContext.collections) {
+        if (collection.name === "project-notes") {
+          collection.path = `${collection.path}-moved`;
+        }
+      }
 
       expect(await readQmdCollectionValidationCache(changedContext, 3_501)).toStrictEqual({
+        state: "miss",
+      });
+    });
+  });
+
+  it("misses collection validation cache when default inclusion changes", async () => {
+    await withWorkspace(async (workspaceDir) => {
+      const context = collectionValidationContext(workspaceDir);
+
+      expect(await writeQmdCollectionValidationCache(context, 3_550)).toBe(true);
+
+      const changedContext = structuredClone(context);
+      for (const collection of changedContext.collections) {
+        if (collection.name === "project-notes") {
+          collection.includeByDefault = false;
+        }
+      }
+
+      expect(await readQmdCollectionValidationCache(changedContext, 3_551)).toStrictEqual({
         state: "miss",
       });
     });

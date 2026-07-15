@@ -37,6 +37,7 @@ describe("context engine runtime settings", () => {
       executionHost: {
         id: OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST.id,
         label: OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST.label,
+        capabilities: OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST.capabilities,
       },
       limits: {
         promptTokenBudget: 128_000,
@@ -106,5 +107,14 @@ describe("context engine runtime settings", () => {
       source: "unknown",
     });
     expect(settings.executionHost.id).toBeNull();
+  });
+
+  it("keeps execution host capabilities optional for legacy runtime settings", () => {
+    const legacyExecutionHost = {
+      id: "legacy-host",
+      label: "Legacy host",
+    } satisfies import("./types.js").ContextEngineRuntimeSettings["executionHost"];
+
+    expect(legacyExecutionHost).not.toHaveProperty("capabilities");
   });
 });

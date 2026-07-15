@@ -43,6 +43,42 @@ function toPositiveInt(value: unknown): number | undefined {
   return Math.floor(value);
 }
 
+/** Resolves the reserve-token budget without requiring a harness settings manager. */
+export function resolveAgentCompactionReserveTokens(params: {
+  cfg?: OpenClawConfig;
+  contextTokenBudget?: number;
+  currentReserveTokens?: number;
+}): number {
+  const compactionCfg = params.cfg?.agents?.defaults?.compaction;
+  const configuredReserveTokens = toNonNegativeInt(compactionCfg?.reserveTokens);
+  let reserveTokensFloor = resolveCompactionReserveTokensFloor(params.cfg);
+  let maxReserveTokens: number | undefined;
+
+  // Cap the floor to a safe fraction of the context window so small-context
+  // models retain prompt room. Without it every prompt can overflow forever.
+  const contextTokenBudget = toPositiveInt(params.contextTokenBudget);
+  if (contextTokenBudget !== undefined) {
+    const minPromptBudget = Math.min(
+      MIN_PROMPT_BUDGET_TOKENS,
+      Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
+    );
+    maxReserveTokens = Math.max(0, contextTokenBudget - minPromptBudget);
+    reserveTokensFloor = Math.min(reserveTokensFloor, maxReserveTokens);
+  }
+
+  let reserveTokens = Math.max(
+    configuredReserveTokens ?? toNonNegativeInt(params.currentReserveTokens) ?? reserveTokensFloor,
+    reserveTokensFloor,
+  );
+  if (maxReserveTokens !== undefined) {
+    // Cap explicit and harness values too, or they can undo the floor cap and
+    // make compaction trigger from the first token.
+    reserveTokens = Math.min(reserveTokens, maxReserveTokens);
+  }
+
+  return reserveTokens;
+}
+
 /** Applies configured compaction reserve/keep-recent settings to an agent settings manager. */
 export function applyAgentCompactionSettingsFromConfig(params: {
   settingsManager: AgentSettingsManagerLike;
@@ -55,38 +91,14 @@ export function applyAgentCompactionSettingsFromConfig(params: {
 } {
   const currentReserveTokens = params.settingsManager.getCompactionReserveTokens();
   const currentKeepRecentTokens = params.settingsManager.getCompactionKeepRecentTokens();
-  const compactionCfg = params.cfg?.agents?.defaults?.compaction;
-
-  const configuredReserveTokens = toNonNegativeInt(compactionCfg?.reserveTokens);
-  const configuredKeepRecentTokens = toPositiveInt(compactionCfg?.keepRecentTokens);
-  let reserveTokensFloor = resolveCompactionReserveTokensFloor(params.cfg);
-  let maxReserveTokens: number | undefined;
-
-  // Cap the floor to a safe fraction of the context window so that
-  // small-context models (e.g. Ollama with 16 K tokens) are not starved of
-  // prompt budget.  Without this cap the default floor of 20 000 can exceed
-  // the entire context window, causing every prompt to be classified as an
-  // overflow and triggering an infinite compaction loop.
-  const contextTokenBudget = toPositiveInt(params.contextTokenBudget);
-  if (contextTokenBudget !== undefined) {
-    const minPromptBudget = Math.min(
-      MIN_PROMPT_BUDGET_TOKENS,
-      Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
-    );
-    maxReserveTokens = Math.max(0, contextTokenBudget - minPromptBudget);
-    reserveTokensFloor = Math.min(reserveTokensFloor, maxReserveTokens);
-  }
-
-  let targetReserveTokens = Math.max(
-    configuredReserveTokens ?? currentReserveTokens,
-    reserveTokensFloor,
-  );
-  if (maxReserveTokens !== undefined) {
-    // Cap the effective value too: the harness default or explicit config can otherwise
-    // undo the floor cap and make shouldCompact() true from the first token.
-    targetReserveTokens = Math.min(targetReserveTokens, maxReserveTokens);
-  }
-  const targetKeepRecentTokens = configuredKeepRecentTokens ?? currentKeepRecentTokens;
+  const targetReserveTokens = resolveAgentCompactionReserveTokens({
+    cfg: params.cfg,
+    contextTokenBudget: params.contextTokenBudget,
+    currentReserveTokens,
+  });
+  const targetKeepRecentTokens =
+    toPositiveInt(params.cfg?.agents?.defaults?.compaction?.keepRecentTokens) ??
+    currentKeepRecentTokens;
 
   const overrides: { reserveTokens?: number; keepRecentTokens?: number } = {};
   if (targetReserveTokens !== currentReserveTokens) {

@@ -27,6 +27,7 @@ export function buildUsageWithNoCost(params: {
   output?: number;
   cacheRead?: number;
   cacheWrite?: number;
+  contextUsage?: Usage["contextUsage"];
   totalTokens?: number;
 }): Usage {
   const input = params.input ?? 0;
@@ -38,6 +39,7 @@ export function buildUsageWithNoCost(params: {
     output,
     cacheRead,
     cacheWrite,
+    ...(params.contextUsage ? { contextUsage: params.contextUsage } : {}),
     totalTokens: params.totalTokens ?? input + output,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };

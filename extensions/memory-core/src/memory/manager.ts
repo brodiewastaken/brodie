@@ -619,10 +619,14 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       onDebug?: (debug: MemorySearchRuntimeDebug) => void;
       /** When set, only these chunk sources are considered (must be enabled for this manager). */
       sources?: MemorySource[];
+      collections?: string[];
       /** Caller-owned cancellation; aborts in-flight embedding work when the caller stops waiting. */
       signal?: AbortSignal;
     },
   ): Promise<MemorySearchResult[]> {
+    if (opts?.collections?.length) {
+      throw new Error("memory search collection filters require the QMD backend");
+    }
     opts?.onDebug?.({ backend: "builtin" });
     if (this.providerRequirement.mode === "required") {
       await this.ensureProviderInitialized();

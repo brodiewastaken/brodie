@@ -1,5 +1,8 @@
 // Verifies provider attribution headers and endpoint classification policies.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { setCurrentPluginMetadataSnapshotState } from "../plugins/current-plugin-metadata-state.js";
+import { resolveOpenClawPluginManifestMetadataSnapshot } from "../plugins/manifest-metadata-scan.js";
+import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 
 function expectRecordFields(record: unknown, expected: Record<string, unknown>) {
   // Policy helpers return broad records; assertions pin only the relevant fields.
@@ -118,6 +121,7 @@ const providerEndpointPlugins = vi.hoisted(() => [
     },
   },
 ]);
+const manifestSnapshotState = vi.hoisted(() => ({ key: "provider-endpoint-fixture-v1" }));
 
 vi.mock("../plugins/plugin-registry.js", () => ({
   loadPluginManifestRegistryForPluginRegistry: () => ({
@@ -133,6 +137,14 @@ vi.mock("../plugins/manifest-metadata-scan.js", () => ({
       manifest,
       origin: "bundled",
     })),
+  resolveOpenClawPluginManifestMetadataSnapshot: vi.fn(() => ({
+    key: manifestSnapshotState.key,
+    records: providerEndpointPlugins.map((manifest, index) => ({
+      pluginDir: `provider-endpoint-fixture-${index}`,
+      manifest,
+      origin: "bundled",
+    })),
+  })),
 }));
 
 import {
@@ -146,6 +158,35 @@ import {
 } from "./provider-attribution.js";
 
 describe("provider attribution", () => {
+  afterEach(() => {
+    clearPluginMetadataLifecycleCaches();
+  });
+
+  it("reuses manifest metadata across request-policy lookups in one plugin lifecycle", () => {
+    setCurrentPluginMetadataSnapshotState({ generation: "test" }, "test");
+    vi.mocked(resolveOpenClawPluginManifestMetadataSnapshot).mockClear();
+
+    const input = { provider: "openai", baseUrl: "https://api.openai.com/v1" };
+    const first = resolveProviderRequestCapabilities(input);
+    for (let index = 0; index < 10; index += 1) {
+      expect(resolveProviderRequestCapabilities(input)).toEqual(first);
+    }
+
+    expect(resolveOpenClawPluginManifestMetadataSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("invalidates provider endpoint caches when the manifest snapshot changes", () => {
+    providerEndpointPlugins[0].providerEndpoints.push({
+      endpointClass: "openrouter",
+      hosts: ["dynamic.example"],
+    });
+    manifestSnapshotState.key = "provider-endpoint-fixture-v2";
+    expect(resolveProviderEndpoint("https://dynamic.example/v1").endpointClass).toBe("openrouter");
+
+    providerEndpointPlugins[0].providerEndpoints.pop();
+    manifestSnapshotState.key = "provider-endpoint-fixture-v3";
+    expect(resolveProviderEndpoint("https://dynamic.example/v1").endpointClass).toBe("custom");
+  });
   it("resolves the canonical OpenClaw product and runtime version", () => {
     const identity = resolveProviderAttributionIdentity({
       OPENCLAW_VERSION: "2026.3.99",

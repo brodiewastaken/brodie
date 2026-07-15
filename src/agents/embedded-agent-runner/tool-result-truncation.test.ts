@@ -568,6 +568,41 @@ describe("truncateOversizedToolResultsInMessages", () => {
     );
   });
 
+  it("uses a bounded aggregate cap to shrink under-cap results without breaking tool ownership", () => {
+    const messages: AgentMessage[] = [
+      makeUserMessage("hello"),
+      makeAssistantMessage("calling tools"),
+      ...Array.from({ length: 6 }, (_, index) =>
+        makeToolResult("x".repeat(68_000), `call_${index}`),
+      ),
+    ];
+
+    const { messages: result, truncatedCount } = truncateOversizedToolResultsInMessages(
+      messages,
+      272_000,
+      69_000,
+      397_686,
+    );
+    const resultToolMessages = result.filter((message) => message.role === "toolResult");
+    const totalChars = resultToolMessages.reduce(
+      (sum, message) => sum + getToolResultTextLength(message),
+      0,
+    );
+
+    expect(truncatedCount).toBeGreaterThan(0);
+    expect(totalChars).toBeLessThanOrEqual(397_686);
+    expect(resultToolMessages).toHaveLength(6);
+    expect(resultToolMessages.map((message) => message.toolCallId)).toEqual([
+      "call_0",
+      "call_1",
+      "call_2",
+      "call_3",
+      "call_4",
+      "call_5",
+    ]);
+    expect(resultToolMessages.every((message) => message.toolName === "read")).toBe(true);
+  });
+
   it("keeps prompt projections stable while enforcing aggregate recovery as history grows", () => {
     const prefix = [
       makeToolResult("p".repeat(15_000), "prefix_1"),

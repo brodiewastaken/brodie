@@ -2750,8 +2750,8 @@ async function runAgentTurnWithFallbackInternal(
                         : runPolicy?.source.maxNativeImages === "default"
                           ? "default"
                           : runPolicy
-                             ? "global"
-                             : undefined,
+                            ? "global"
+                            : undefined,
                     extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
                     sourceReplyDeliveryMode: params.followupRun.run.sourceReplyDeliveryMode,
                     allowedConversationalActions:

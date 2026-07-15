@@ -240,6 +240,13 @@ export {
  * migration. Callers must migrate away from reading or writing sessions.json.
  */
 export { saveSessionStore, updateSessionStore } from "../config/sessions/store.js";
+export {
+  archiveCronSessionGeneration,
+  findLatestCronSessionArchiveInStore,
+  isStableCronSessionKey,
+  relocateCronSessionEntryInStore,
+  type CronSessionArchiveReceipt,
+} from "../cron/session-lifecycle.js";
 // Maintainer note: keep saveSessionStore/updateSessionStore grouped as one
 // compatibility operation. A SQLite bridge must diff before/after store shapes,
 // apply changed/deleted rows in one write transaction, and publish after commit.
@@ -251,4 +258,5 @@ export {
   resolveThreadFlag,
 } from "../config/sessions/reset.js";
 export { resolveSendPolicy } from "../sessions/send-policy.js";
+export { listAgentIds } from "../agents/agent-scope-config.js";
 export type { SessionEntry, SessionScope } from "../config/sessions/types.js";

@@ -1,6 +1,7 @@
 /** Shared inbound message context types used by prompt templating and reply dispatch. */
 import type { InboundEventKind } from "../channels/inbound-event/kind.js";
 import type { ReplyToMode } from "../config/types.base.js";
+import type { ContextEngineExternalFile } from "../context-engine/external-files.js";
 import type {
   MediaUnderstandingDecision,
   MediaUnderstandingOutput,
@@ -232,6 +233,12 @@ export type MsgContext = {
   MediaPaths?: string[];
   MediaUrls?: string[];
   MediaTypes?: string[];
+  /** Source message id for each flattened attachment in a scheduler batch. */
+  MediaSourceMessageIds?: string[];
+  /** Attachment index within each original source message. */
+  MediaSourceIndexes?: number[];
+  /** Non-native current-turn files made available to the context engine. */
+  ExternalFiles?: ContextEngineExternalFile[];
   /** Original message modality before transcription or other media normalization. */
   SourceModality?: InboundSourceModality;
   MediaWorkspaceDir?: string;

@@ -3,6 +3,7 @@ import { normalizeOptionalString } from "@openclaw/normalization-core/string-coe
 import type { AcpTurnAttachment as AgentTurnAttachment } from "../../acp/control-plane/manager.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
+import { resolveAttachmentKind } from "../../media-understanding/attachments.normalize.js";
 import type { MediaAttachment } from "../../media-understanding/types.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import type { MsgContext } from "../templating.js";
@@ -34,7 +35,7 @@ const AGENT_TURN_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 const AGENT_TURN_ATTACHMENT_TIMEOUT_MS = 1_000;
 
 function isImageAgentTurnAttachment(attachment: MediaAttachment): boolean {
-  return attachment.mime?.startsWith("image/") === true;
+  return resolveAttachmentKind(attachment) === "image";
 }
 
 function hasInboundHistoryMedia(ctx: MsgContext): boolean {

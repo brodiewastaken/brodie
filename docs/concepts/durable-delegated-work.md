@@ -20,6 +20,8 @@ Controllers do not poll and there is no `sessions_yield` tool. A controller with
 
 An isolated cron controller retains its execution policy when a child finishes after the initial turn. The exact cron run stores its provider, model, requested reasoning, explicit Fast override, and effective fallback chain before inference. Its late internal completion turn uses that policy instead of the gateway defaults. An explicit empty fallback chain remains empty; configured fallbacks remain available. Implicit Fast defaults remain model-owned. A deliberate live model switch still takes precedence.
 
+Completion content is prompt-local model input. A transcript-backed context engine may omit that temporary message from its stored history; the final provider boundary preserves the current completion once without persisting it as a human message.
+
 Delivery remains pending until the controller handoff records transcript evidence. Cleanup starts only after that evidence and terminal hooks settle, so managed attachments cannot disappear before the controller consumes the result.
 
 ## Restart recovery

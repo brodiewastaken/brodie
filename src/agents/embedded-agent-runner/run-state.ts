@@ -9,6 +9,7 @@ import {
   resolveActiveReplyRunSessionId,
   type ReplyBackendQueueMessageOptions,
 } from "../../auto-reply/reply/reply-run-registry.js";
+import type { ImageContent } from "../../llm/types.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 
 /**
@@ -36,7 +37,10 @@ export type EmbeddedAgentQueueHandle = {
   };
 };
 
-export type EmbeddedAgentQueueMessageOptions = ReplyBackendQueueMessageOptions;
+export type EmbeddedAgentQueueMessageOptions = ReplyBackendQueueMessageOptions & {
+  /** Native image attachments delivered with the steered user message. */
+  images?: ImageContent[];
+};
 
 export type ActiveEmbeddedRunSnapshot = {
   transcriptLeafId: string | null;

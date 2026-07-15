@@ -4,6 +4,10 @@ import { mimeTypeFromFilePath } from "@openclaw/media-core/mime";
 import type { AgentMessage } from "../../packages/agent-core/src/types.js";
 import { persistSessionTranscriptTurn } from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  normalizeQueueBatchIdentity,
+  type QueueBatchIdentity,
+} from "../scheduler/queue-batch-identity.js";
 import { applyInputProvenanceToUserMessage, normalizeInputProvenance } from "./input-provenance.js";
 import type {
   PersistedUserTurnMediaInput,
@@ -99,6 +103,33 @@ type PersistedUserTurnMediaFieldSource = {
 function normalizeOptionalText(value: string | null | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
+}
+
+function readMessageQueueBatchIdentity(message: AgentMessage): QueueBatchIdentity | undefined {
+  const openclaw = (message as unknown as { __openclaw?: unknown })["__openclaw"];
+  if (!openclaw || typeof openclaw !== "object" || Array.isArray(openclaw)) {
+    return undefined;
+  }
+  return normalizeQueueBatchIdentity(
+    (openclaw as { queueBatchIdentity?: unknown }).queueBatchIdentity,
+  );
+}
+
+function mergeMessageOpenClawMetadata(
+  runtimeMessage: AgentMessage,
+  preparedMessage: PersistedUserTurnMessage,
+): Record<string, unknown> | undefined {
+  const runtimeMetadata = (runtimeMessage as unknown as { __openclaw?: unknown })["__openclaw"];
+  const preparedMetadata = (preparedMessage as unknown as { __openclaw?: unknown })["__openclaw"];
+  const runtimeRecord =
+    runtimeMetadata && typeof runtimeMetadata === "object" && !Array.isArray(runtimeMetadata)
+      ? (runtimeMetadata as Record<string, unknown>)
+      : undefined;
+  const preparedRecord =
+    preparedMetadata && typeof preparedMetadata === "object" && !Array.isArray(preparedMetadata)
+      ? (preparedMetadata as Record<string, unknown>)
+      : undefined;
+  return runtimeRecord || preparedRecord ? { ...runtimeRecord, ...preparedRecord } : undefined;
 }
 
 function normalizeTranscriptText(value: string | null | undefined): string {
@@ -273,6 +304,8 @@ export function buildPersistedUserTurnMessage(params: UserTurnInput): PersistedU
   const senderMeta = buildUserTurnSenderMeta(params.sender);
   const openClawMeta = {
     ...(params.senderIsOwner === undefined ? {} : { senderIsOwner: params.senderIsOwner }),
+    ...(params.queueBatchIdentity ? { queueBatchIdentity: params.queueBatchIdentity } : {}),
+    ...(params.humanInboundBatch ? { humanInboundBatch: params.humanInboundBatch } : {}),
     ...senderMeta,
   };
   const message = {
@@ -385,12 +418,14 @@ export function mergePreparedUserTurnMessageForRuntime(params: {
   }
   const runtimeMessage = params.runtimeMessage as unknown as Record<string, unknown>;
   const preparedMessage = params.preparedMessage as unknown as Record<string, unknown>;
-  const runtimeMeta = readOpenClawMessageMeta(params.runtimeMessage);
-  const preparedMeta = readOpenClawMessageMeta(params.preparedMessage);
+  const openclawMetadata = mergeMessageOpenClawMetadata(
+    params.runtimeMessage,
+    params.preparedMessage,
+  );
   return {
     ...runtimeMessage,
     ...preparedMessage,
-    ...(preparedMeta ? { __openclaw: { ...runtimeMeta, ...preparedMeta } } : {}),
+    ...(openclawMetadata ? { __openclaw: openclawMetadata } : {}),
     ...(userMessageHasImageContent(params.runtimeMessage)
       ? { content: params.runtimeMessage.content }
       : {}),
@@ -430,6 +465,8 @@ export function preparePersistedUserTurnMessageForTranscriptWrite(
   const originalMessage = message as unknown as { idempotencyKey?: unknown };
   const idempotencyKey =
     typeof originalMessage.idempotencyKey === "string" ? originalMessage.idempotencyKey : undefined;
+  const queueBatchIdentity = readMessageQueueBatchIdentity(message);
+  const humanInboundBatch = readOpenClawMessageMeta(message)?.humanInboundBatch;
   const provenance = normalizeInputProvenance(
     (message as unknown as { provenance?: unknown }).provenance,
   );
@@ -445,7 +482,12 @@ export function preparePersistedUserTurnMessageForTranscriptWrite(
   const nextUserMessage = provenance
     ? (applyInputProvenanceToUserMessage(nextMessage, provenance) as PersistedUserTurnMessage)
     : nextMessage;
-  if (!idempotencyKey && typeof senderIsOwner !== "boolean") {
+  if (
+    !idempotencyKey &&
+    typeof senderIsOwner !== "boolean" &&
+    !queueBatchIdentity &&
+    !humanInboundBatch
+  ) {
     return nextUserMessage;
   }
   return {
@@ -456,9 +498,19 @@ export function preparePersistedUserTurnMessageForTranscriptWrite(
           __openclaw: {
             ...readOpenClawMessageMeta(nextUserMessage),
             senderIsOwner,
+            ...(queueBatchIdentity ? { queueBatchIdentity } : {}),
+            ...(humanInboundBatch ? { humanInboundBatch } : {}),
           },
         }
-      : {}),
+      : queueBatchIdentity || humanInboundBatch
+        ? {
+            __openclaw: {
+              ...readOpenClawMessageMeta(nextUserMessage),
+              ...(queueBatchIdentity ? { queueBatchIdentity } : {}),
+              ...(humanInboundBatch ? { humanInboundBatch } : {}),
+            },
+          }
+        : {}),
   } as unknown as PersistedUserTurnMessage;
 }
 

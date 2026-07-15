@@ -83,6 +83,15 @@ describe("context engine host compatibility", () => {
     });
   });
 
+  it("advertises assembled prompt admission only from the embedded host", () => {
+    expect(OPENCLAW_EMBEDDED_CONTEXT_ENGINE_HOST.capabilities).toContain(
+      "assembled-prompt-admission",
+    );
+    expect(CODEX_APP_SERVER_CONTEXT_ENGINE_HOST.capabilities).not.toContain(
+      "assembled-prompt-admission",
+    );
+  });
+
   it("allows native Codex to satisfy thread bootstrap projection", () => {
     assertContextEngineHostSupport({
       contextEngine: createEngine(["assemble-before-prompt", "thread-bootstrap-projection"]),

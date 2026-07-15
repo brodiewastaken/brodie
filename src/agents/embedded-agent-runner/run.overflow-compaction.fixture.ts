@@ -20,14 +20,16 @@ export function makeCompactionSuccess(params: {
   sessionId?: string;
   sessionFile?: string;
 }) {
+  const tokensBefore = params.tokensBefore ?? 150_000;
+  const tokensAfter = params.tokensAfter ?? Math.max(0, tokensBefore - 1);
   return {
     ok: true as const,
     compacted: true as const,
     result: {
       summary: params.summary,
       ...(params.firstKeptEntryId ? { firstKeptEntryId: params.firstKeptEntryId } : {}),
-      ...(params.tokensBefore !== undefined ? { tokensBefore: params.tokensBefore } : {}),
-      ...(params.tokensAfter !== undefined ? { tokensAfter: params.tokensAfter } : {}),
+      tokensBefore,
+      tokensAfter,
       ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
       ...(params.sessionFile !== undefined ? { sessionFile: params.sessionFile } : {}),
     },

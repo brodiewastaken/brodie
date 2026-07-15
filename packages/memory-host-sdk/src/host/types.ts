@@ -151,7 +151,8 @@ export interface MemorySearchManager {
       qmdSearchModeOverride?: "query" | "search" | "vsearch";
       onDebug?: (debug: MemorySearchRuntimeDebug) => void;
       sources?: MemorySource[];
-      /** Optional caller cancellation; managers consume it where their runtime supports cancellation. */
+      collections?: string[];
+      /** Caller cancellation. */
       signal?: AbortSignal;
     },
   ): Promise<MemorySearchResult[]>;

@@ -19,6 +19,7 @@ export type QmdRuntimeManagedCollection = {
   kind: "memory" | "custom" | "sessions";
   path: string;
   pattern: string;
+  includeByDefault: boolean;
 };
 
 type QmdRuntimeCacheContextBase = {
@@ -79,6 +80,7 @@ function normalizeCollection(collection: QmdRuntimeManagedCollection) {
     kind: collection.kind,
     pathHash: normalizePathIdentity(collection.path),
     pattern: normalizeText(collection.pattern),
+    includeByDefault: collection.includeByDefault,
   };
 }
 
@@ -108,7 +110,10 @@ function buildCollectionConfigHash(collections: readonly QmdRuntimeManagedCollec
         left.pathHash.localeCompare(right.pathHash) ||
         left.pattern.localeCompare(right.pattern),
     )
-    .map((entry) => `${entry.name}|${entry.kind}|${entry.pathHash}|${entry.pattern}`)
+    .map(
+      (entry) =>
+        `${entry.name}|${entry.kind}|${entry.pathHash}|${entry.pattern}|${entry.includeByDefault ? 1 : 0}`,
+    )
     .join(";");
   return hashText(normalized);
 }

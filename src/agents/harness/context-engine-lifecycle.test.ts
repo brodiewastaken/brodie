@@ -85,6 +85,37 @@ describe("harness context engine lifecycle", () => {
     expect(assembleParams?.messages).toEqual([visibleUser, visibleAssistant]);
   });
 
+  it("passes runtimeContext external files through to assemble", async () => {
+    const visibleUser = textMessage("user", "visible ask", 1);
+    const assemble = vi.fn(async (params: Parameters<ContextEngine["assemble"]>[0]) => ({
+      messages: params.messages,
+      estimatedTokens: 0,
+    }));
+    const externalFiles = [
+      {
+        marker:
+          "[OpenClaw External File: external_file_0011223344556677 | clip.mp4 | video/mp4 | 12 bytes]",
+        idempotencyKey: "external_file_0011223344556677",
+        attachmentIndex: 0,
+        fileName: "clip.mp4",
+        mimeType: "video/mp4",
+        kind: "video",
+      },
+    ];
+
+    await assembleHarnessContextEngine({
+      contextEngine: createContextEngine({ assemble }),
+      sessionId: sessionParams.sessionId,
+      sessionKey: sessionParams.sessionKey,
+      messages: [visibleUser],
+      modelId: "gpt-test",
+      runtimeContext: { externalFiles },
+    });
+
+    const assembleParams = assemble.mock.calls.at(0)?.[0];
+    expect(assembleParams?.runtimeContext?.externalFiles).toEqual(externalFiles);
+  });
+
   it("passes declared runtime settings into assemble hooks", async () => {
     const visibleUser = textMessage("user", "visible ask", 1);
     const assemble = vi.fn(async (params: Parameters<ContextEngine["assemble"]>[0]) => ({

@@ -43,10 +43,11 @@ export type SessionSendPolicyConfig = {
   rules?: SessionSendPolicyRule[];
 };
 
-/** QMD collection path plus optional display name and glob pattern. */
 export type MemoryQmdIndexPath = {
   path: string;
   name?: string;
+  preserveName?: boolean;
+  includeByDefault?: boolean;
   pattern?: string;
 };
 
@@ -60,6 +61,8 @@ export type MemoryQmdMcporterConfig = {
 /** QMD session export config. */
 type MemoryQmdSessionConfig = {
   enabled?: boolean;
+  /** Session-transcript collection name override (default `sessions-<agentId>`). */
+  name?: string;
   exportDir?: string;
   retentionDays?: number;
 };

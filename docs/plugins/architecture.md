@@ -156,6 +156,8 @@ Plugin-aware config validation, startup auto-enable, and Gateway plugin bootstra
 
 After startup, Gateway keeps the current metadata snapshot as a replaceable runtime product. Repeated runtime provider discovery can borrow that snapshot instead of reconstructing the installed index and manifest registry for each provider-catalog pass. The snapshot is cleared or replaced on Gateway shutdown, config/plugin inventory changes, and installed index writes; callers fall back to the cold manifest/index path when no compatible current snapshot exists. Compatibility checks must include plugin discovery roots such as `plugins.load.paths` and the default agent workspace, because workspace plugins are part of the metadata scope.
 
+Provider endpoint and request-policy lookups reuse manifest metadata while a current plugin snapshot is active. This bounded memo separates discovery roots and is invalidated when the snapshot identity changes, captured state is restored, or the plugin lifecycle is cleared. Reinstalling the same immutable snapshot retains the memo. Standalone lookups and explicit manifest scans remain disk-fresh. Request-specific authentication, headers, API, and endpoint policy are still evaluated for each request; the memo contains only manifest metadata.
+
 The snapshot and lookup table keep repeated startup decisions on the fast path:
 
 - channel ownership

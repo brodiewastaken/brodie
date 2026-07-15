@@ -415,11 +415,12 @@ export async function executeSnapshotAction(params: {
     readPositiveIntegerParam(input, "timeoutMs", {
       message: "timeoutMs must be a positive integer.",
     }) ?? DEFAULT_BROWSER_SNAPSHOT_TIMEOUT_MS;
+  const queryMaxChars = hasMaxChars ? maxCharsRaw : resolvedMaxChars;
   const snapshotQuery = {
     ...(format ? { format } : {}),
     targetId,
     limit,
-    ...(typeof resolvedMaxChars === "number" ? { maxChars: resolvedMaxChars } : {}),
+    ...(typeof queryMaxChars === "number" ? { maxChars: queryMaxChars } : {}),
     refs,
     interactive,
     compact,

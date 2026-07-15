@@ -11,7 +11,10 @@ import {
   resolvePluginControlPlaneFingerprint,
   type ResolvePluginControlPlaneContextParams,
 } from "./plugin-control-plane-context.js";
-import { registerPluginMetadataProcessMemoLifecycleClear } from "./plugin-metadata-lifecycle.js";
+import {
+  clearPluginMetadataProcessMemos,
+  registerPluginMetadataProcessMemoLifecycleClear,
+} from "./plugin-metadata-lifecycle.js";
 import type {
   PluginMetadataSnapshot,
   PluginMetadataSnapshotPluginIdScope,
@@ -52,6 +55,11 @@ export function setCurrentPluginMetadataSnapshot(
     workspaceDir?: string;
   } = {},
 ): void {
+  // Runtime loaders can reinstall the same immutable snapshot. Only a new
+  // identity advances the generation and invalidates derived request metadata.
+  if (getCurrentPluginMetadataSnapshotState().snapshot !== snapshot) {
+    clearPluginMetadataProcessMemos();
+  }
   currentPluginMetadataConfigIdentityCache = new WeakSet();
   const compatiblePolicyHashes = snapshot
     ? options.compatibleConfigs?.map((config) => resolveInstalledPluginIndexPolicyHash(config))
@@ -118,6 +126,7 @@ export function setCurrentPluginMetadataSnapshot(
 }
 
 export function clearCurrentPluginMetadataSnapshot(): void {
+  clearPluginMetadataProcessMemos();
   currentPluginMetadataConfigIdentityCache = new WeakSet();
   setCurrentManifestModelIdNormalizationRecords(undefined);
   clearCurrentPluginMetadataSnapshotState();
@@ -130,6 +139,9 @@ export function captureCurrentPluginMetadataSnapshotState(): CurrentPluginMetada
 export function restoreCurrentPluginMetadataSnapshotState(
   state: CurrentPluginMetadataSnapshotState,
 ): void {
+  if (getCurrentPluginMetadataSnapshotState().snapshot !== state.snapshot) {
+    clearPluginMetadataProcessMemos();
+  }
   currentPluginMetadataConfigIdentityCache = new WeakSet();
   const snapshot = state.snapshot as PluginMetadataSnapshot | undefined;
   const defaultDiscoveryConfigFingerprint = snapshot

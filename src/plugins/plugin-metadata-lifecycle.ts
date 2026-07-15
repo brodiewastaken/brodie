@@ -10,10 +10,15 @@ export function registerPluginMetadataProcessMemoLifecycleClear(
   pluginMetadataProcessMemoClears.add(clearProcessMemo);
 }
 
-/** Clears plugin metadata snapshots and registered process memo caches. */
-export function clearPluginMetadataLifecycleCaches(): void {
-  clearCurrentPluginMetadataSnapshotState();
+/** Invalidates derived facts without discarding the current metadata snapshot. */
+export function clearPluginMetadataProcessMemos(): void {
   for (const clearProcessMemo of pluginMetadataProcessMemoClears) {
     clearProcessMemo();
   }
+}
+
+/** Clears plugin metadata snapshots and registered process memo caches. */
+export function clearPluginMetadataLifecycleCaches(): void {
+  clearCurrentPluginMetadataSnapshotState();
+  clearPluginMetadataProcessMemos();
 }

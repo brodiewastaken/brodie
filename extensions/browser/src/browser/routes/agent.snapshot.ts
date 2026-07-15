@@ -35,6 +35,7 @@ import {
   normalizeBrowserScreenshot,
 } from "../screenshot.js";
 import type { BrowserRouteContext } from "../server-context.js";
+import { limitAiSnapshot, limitAriaSnapshot } from "../snapshot-limit.js";
 import { appendSnapshotUrls, type SnapshotUrlEntry } from "../snapshot-urls.js";
 import { normalizeBrowserTimerDelayMs } from "../timer-delay.js";
 import {
@@ -59,7 +60,6 @@ import type { BrowserResponse, BrowserRouteRegistrar } from "./types.js";
 import { asyncBrowserRoute, jsonError, toBoolean, toStringOrEmpty } from "./utils.js";
 
 const CHROME_MCP_OVERLAY_ATTR = "data-openclaw-mcp-overlay";
-
 type ChromeMcpSnapshotOperation = ChromeMcpOperationOptions & {
   profileName: string;
   profile?: ChromeMcpProfileOptions;
@@ -622,12 +622,16 @@ export function registerBrowserAgentSnapshotRoutes(
           };
           const snapshot = await takeChromeMcpSnapshot(operation);
           if (plan.format === "aria") {
+            const bounded = limitAriaSnapshot(
+              flattenChromeMcpSnapshotToAriaNodes(snapshot, plan.limit),
+              plan.resolvedMaxChars,
+            );
             return res.json({
               ok: true,
               format: "aria",
               targetId: tab.targetId,
               url: tab.url,
-              nodes: flattenChromeMcpSnapshotToAriaNodes(snapshot, plan.limit),
+              ...bounded,
             });
           }
           const built = buildAiSnapshotFromChromeMcpSnapshot({
@@ -637,7 +641,6 @@ export function registerBrowserAgentSnapshotRoutes(
               compact: plan.compact ?? undefined,
               maxDepth: plan.depth ?? undefined,
             },
-            maxChars: plan.resolvedMaxChars,
           });
           const builtWithUrls = plan.urls
             ? {
@@ -648,8 +651,9 @@ export function registerBrowserAgentSnapshotRoutes(
                 ),
               }
             : built;
+          const bounded = limitAiSnapshot(builtWithUrls, plan.resolvedMaxChars);
           if (plan.labels) {
-            const refs = Object.keys(builtWithUrls.refs);
+            const refs = Object.keys(bounded.refs);
             const labelResult = await renderChromeMcpLabels({
               ...operation,
               refs,
@@ -680,7 +684,7 @@ export function registerBrowserAgentSnapshotRoutes(
                 labelsSkipped: labelResult.skipped,
                 imagePath: path.resolve(saved.path),
                 imageType: normalized.contentType?.includes("jpeg") ? "jpeg" : "png",
-                ...builtWithUrls,
+                ...bounded,
               });
             } finally {
               await clearChromeMcpOverlay(operation);
@@ -691,7 +695,7 @@ export function registerBrowserAgentSnapshotRoutes(
             format: "ai",
             targetId: tab.targetId,
             url: tab.url,
-            ...builtWithUrls,
+            ...bounded,
           });
         }
         if (hasPendingDialogs(observedBrowserState)) {
@@ -742,7 +746,7 @@ export function registerBrowserAgentSnapshotRoutes(
           };
 
           const pw = await getPwAiModule();
-          const snap = plan.wantsRoleSnapshot
+          const rawSnapshot = plan.wantsRoleSnapshot
             ? pw
               ? await pw.snapshotRoleViaPlaywright(roleSnapshotArgs).catch(async (err: unknown) => {
                   const fallback = await cdpRoleSnapshot();
@@ -759,15 +763,13 @@ export function registerBrowserAgentSnapshotRoutes(
                   ssrfPolicy: ctx.state().resolved.ssrfPolicy,
                   urls: plan.urls,
                   timeoutMs: plan.timeoutMs,
-                  ...(typeof plan.resolvedMaxChars === "number"
-                    ? { maxChars: plan.resolvedMaxChars }
-                    : {}),
                 })
               : await cdpRoleSnapshot();
-          if (!snap) {
+          if (!rawSnapshot) {
             await requirePwAi(res, "ai snapshot");
             return;
           }
+          const snap = limitAiSnapshot(rawSnapshot, plan.resolvedMaxChars);
           if (plan.labels) {
             if (!pw) {
               return jsonError(res, 501, "Snapshot labels require Playwright.");
@@ -861,6 +863,7 @@ export function registerBrowserAgentSnapshotRoutes(
             nodes: resolved.nodes,
           });
         }
+        const bounded = limitAriaSnapshot(resolved.nodes, plan.resolvedMaxChars);
         return res.json({
           ok: true,
           format: plan.format,
@@ -868,6 +871,7 @@ export function registerBrowserAgentSnapshotRoutes(
           url: tab.url,
           ...browserStateResponseFields(observedBrowserState),
           ...resolved,
+          ...bounded,
         });
       } catch (err) {
         handleRouteError(ctx, res, err);

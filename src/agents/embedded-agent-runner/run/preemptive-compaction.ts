@@ -40,6 +40,8 @@ export type PreemptiveCompactionDecision = {
   promptBudgetBeforeReserve: number;
   overflowTokens: number;
   toolResultReducibleChars: number;
+  /** Persisted recovery reuses the admission plan instead of recalculating against a wider view. */
+  toolResultAggregateMaxChars?: number;
   effectiveReserveTokens: number;
 };
 
@@ -49,6 +51,32 @@ export type LlmBoundaryTokenPressure = {
   source: string;
   renderedChars?: number;
 };
+
+/** Resolves the one usable prompt budget shared by prechecks and context-engine compaction. */
+export function resolveUsablePromptTokenBudget(params: {
+  contextTokenBudget: number;
+  reserveTokens: number;
+}): {
+  contextTokenBudget: number;
+  effectiveReserveTokens: number;
+  usablePromptTokenBudget: number;
+} {
+  const contextTokenBudget = Math.max(1, Math.floor(params.contextTokenBudget));
+  const requestedReserveTokens = Math.max(0, Math.floor(params.reserveTokens));
+  const minPromptBudget = Math.min(
+    MIN_PROMPT_BUDGET_TOKENS,
+    Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
+  );
+  const effectiveReserveTokens = Math.min(
+    requestedReserveTokens,
+    Math.max(0, contextTokenBudget - minPromptBudget),
+  );
+  return {
+    contextTokenBudget,
+    effectiveReserveTokens,
+    usablePromptTokenBudget: Math.max(1, contextTokenBudget - effectiveReserveTokens),
+  };
+}
 
 function estimateStringTokenPressure(text: string, charsPerToken = ESTIMATED_CHARS_PER_TOKEN) {
   return Math.ceil(estimateStringChars(text) / charsPerToken);
@@ -303,6 +331,39 @@ function normalizeLlmBoundaryTokenPressure(
   };
 }
 
+function resolveOverflowAggregateToolResultMaxChars(params: {
+  totalToolResultChars: number;
+  configuredAggregateMaxChars: number;
+  perResultMaxChars?: number;
+  overflowTokens: number;
+}): number | undefined {
+  if (params.overflowTokens <= 0 || params.totalToolResultChars <= 0) {
+    return undefined;
+  }
+  // Match the route's conservative estimate and preserve the configured
+  // four-result floor, so recovery trims only the proven excess.
+  const overflowChars = params.overflowTokens * ESTIMATED_CHARS_PER_TOKEN;
+  const requiredReductionChars = Math.max(
+    overflowChars + TRUNCATION_ROUTE_BUFFER_TOKENS * ESTIMATED_CHARS_PER_TOKEN,
+    Math.ceil(overflowChars * 1.5),
+  );
+  if (requiredReductionChars >= params.totalToolResultChars) {
+    return undefined;
+  }
+  const perResultFloor = Math.max(1, Math.floor(params.perResultMaxChars ?? 1)) * 4;
+  const targetAggregateMaxChars = Math.max(
+    perResultFloor,
+    params.totalToolResultChars - requiredReductionChars,
+  );
+  if (
+    targetAggregateMaxChars >= params.totalToolResultChars ||
+    targetAggregateMaxChars >= params.configuredAggregateMaxChars
+  ) {
+    return undefined;
+  }
+  return targetAggregateMaxChars;
+}
+
 /**
  * Decides whether a run should compact before submitting the prompt, and
  * whether reducible tool results can avoid or follow compaction. Rendered LLM
@@ -316,6 +377,7 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
   contextTokenBudget: number;
   reserveTokens: number;
   toolResultMaxChars?: number;
+  toolResultAggregateMaxChars?: number;
   llmBoundaryTokenPressure?: LlmBoundaryTokenPressure;
 }): PreemptiveCompactionDecision {
   let messagesForPressure = params.messages;
@@ -342,23 +404,17 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
       pressureSource = "unwindowed_transcript_estimate";
     }
   }
-  const contextTokenBudget = Math.max(1, Math.floor(params.contextTokenBudget));
-  const requestedReserveTokens = Math.max(0, Math.floor(params.reserveTokens));
-  const minPromptBudget = Math.min(
-    MIN_PROMPT_BUDGET_TOKENS,
-    Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
-  );
-  // Keep a minimum prompt budget even when reserveTokens asks for most of the context window.
-  const effectiveReserveTokens = Math.min(
-    requestedReserveTokens,
-    Math.max(0, contextTokenBudget - minPromptBudget),
-  );
-  const promptBudgetBeforeReserve = Math.max(1, contextTokenBudget - effectiveReserveTokens);
+  const { effectiveReserveTokens, usablePromptTokenBudget: promptBudgetBeforeReserve } =
+    resolveUsablePromptTokenBudget({
+      contextTokenBudget: params.contextTokenBudget,
+      reserveTokens: params.reserveTokens,
+    });
   const overflowTokens = Math.max(0, estimatedPromptTokens - promptBudgetBeforeReserve);
-  const toolResultPotential = estimateToolResultReductionPotential({
+  const initialToolResultPotential = estimateToolResultReductionPotential({
     messages: messagesForPressure,
     contextWindowTokens: params.contextTokenBudget,
     maxCharsOverride: params.toolResultMaxChars,
+    aggregateMaxCharsOverride: params.toolResultAggregateMaxChars,
   });
   const overflowChars = overflowTokens * ESTIMATED_CHARS_PER_TOKEN;
   const truncationBufferChars = TRUNCATION_ROUTE_BUFFER_TOKENS * ESTIMATED_CHARS_PER_TOKEN;
@@ -366,6 +422,20 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
     overflowChars + truncationBufferChars,
     Math.ceil(overflowChars * 1.5),
   );
+  const toolResultAggregateMaxChars = resolveOverflowAggregateToolResultMaxChars({
+    totalToolResultChars: initialToolResultPotential.totalToolResultChars,
+    configuredAggregateMaxChars: initialToolResultPotential.aggregateBudgetChars,
+    perResultMaxChars: initialToolResultPotential.maxChars,
+    overflowTokens,
+  });
+  const toolResultPotential = toolResultAggregateMaxChars
+    ? estimateToolResultReductionPotential({
+        messages: messagesForPressure,
+        contextWindowTokens: params.contextTokenBudget,
+        maxCharsOverride: params.toolResultMaxChars,
+        aggregateMaxCharsOverride: toolResultAggregateMaxChars,
+      })
+    : initialToolResultPotential;
   const toolResultReducibleChars = toolResultPotential.maxReducibleChars;
 
   let route: PreemptiveCompactionRoute = "fits";
@@ -387,6 +457,7 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
     promptBudgetBeforeReserve,
     overflowTokens,
     toolResultReducibleChars,
+    ...(toolResultAggregateMaxChars ? { toolResultAggregateMaxChars } : {}),
     effectiveReserveTokens,
   };
 }
@@ -415,6 +486,7 @@ export function formatPrePromptPrecheckLog(params: {
     `promptBudgetBeforeReserve=${result.promptBudgetBeforeReserve} ` +
     `overflowTokens=${result.overflowTokens} ` +
     `toolResultReducibleChars=${result.toolResultReducibleChars} ` +
+    `toolResultAggregateMaxChars=${result.toolResultAggregateMaxChars ?? "default"} ` +
     `reserveTokens=${params.reserveTokens} ` +
     `effectiveReserveTokens=${result.effectiveReserveTokens} ` +
     `contextTokenBudget=${params.contextTokenBudget} ` +

@@ -10,6 +10,7 @@ let estimateLlmBoundaryTokenPressure: typeof import("./preemptive-compaction.js"
 let buildPrePromptContextBudgetStatus: typeof import("./preemptive-compaction.js").buildPrePromptContextBudgetStatus;
 let estimateRenderedLlmBoundaryTokenPressure: typeof import("./preemptive-compaction.js").estimateRenderedLlmBoundaryTokenPressure;
 let formatPrePromptPrecheckLog: typeof import("./preemptive-compaction.js").formatPrePromptPrecheckLog;
+let resolveUsablePromptTokenBudget: typeof import("./preemptive-compaction.js").resolveUsablePromptTokenBudget;
 let shouldPreemptivelyCompactBeforePrompt: typeof import("./preemptive-compaction.js").shouldPreemptivelyCompactBeforePrompt;
 
 beforeAll(async () => {
@@ -22,6 +23,7 @@ beforeAll(async () => {
     buildPrePromptContextBudgetStatus,
     estimateRenderedLlmBoundaryTokenPressure,
     formatPrePromptPrecheckLog,
+    resolveUsablePromptTokenBudget,
     shouldPreemptivelyCompactBeforePrompt,
   } = await import("./preemptive-compaction.js"));
 });
@@ -129,6 +131,7 @@ describe("preemptive-compaction", () => {
     expect(result.shouldCompact).toBe(false);
     expect(result.route).toBe("fits");
     expect(result.estimatedPromptTokens).toBeLessThan(result.promptBudgetBeforeReserve);
+    expect(result.toolResultAggregateMaxChars).toBeUndefined();
   });
 
   it("formats all-route pre-prompt diagnostics for a fits decision", () => {
@@ -331,6 +334,19 @@ describe("preemptive-compaction", () => {
     expect(result.overflowTokens).toBeGreaterThan(0);
   });
 
+  it("resolves one 230k usable budget for a 272k window with a 42k reserve", () => {
+    expect(
+      resolveUsablePromptTokenBudget({
+        contextTokenBudget: 272_000,
+        reserveTokens: 42_000,
+      }),
+    ).toEqual({
+      contextTokenBudget: 272_000,
+      effectiveReserveTokens: 42_000,
+      usablePromptTokenBudget: 230_000,
+    });
+  });
+
   it("caps reserve tokens so small context models keep usable prompt budget", () => {
     const result = shouldPreemptivelyCompactBeforePrompt({
       messages: [makeAssistantHistory("short history")],
@@ -390,6 +406,52 @@ describe("preemptive-compaction", () => {
     expect(result.shouldCompact).toBe(false);
     expect(result.overflowTokens).toBeGreaterThan(0);
     expect(result.toolResultReducibleChars).toBeGreaterThan(0);
+  });
+
+  it("derives a bounded aggregate plan from authoritative excess with no individually oversized results", () => {
+    const messages = Array.from({ length: 6 }, () => makeToolResultMessage("x".repeat(68_000)));
+    const result = shouldPreemptivelyCompactBeforePrompt({
+      messages,
+      systemPrompt: "sys",
+      prompt: "continue",
+      contextTokenBudget: 272_000,
+      reserveTokens: 42_000,
+      toolResultMaxChars: 69_000,
+      toolResultAggregateMaxChars: 544_000,
+      llmBoundaryTokenPressure: {
+        estimatedPromptTokens: 231_719,
+        source: "context_engine_assembled_plus_rendered_prompt",
+      },
+    });
+
+    // Six 68K results fit the 69K single-result cap and the configured 544K
+    // aggregate cap. Only the measured 1,719-token boundary excess selects a
+    // tighter persisted-recovery cap.
+    expect(result.route).toBe("truncate_tool_results_only");
+    expect(result.shouldCompact).toBe(false);
+    expect(result.overflowTokens).toBe(1_719);
+    expect(result.toolResultAggregateMaxChars).toBe(397_686);
+    expect(result.toolResultReducibleChars).toBeGreaterThanOrEqual(10_314);
+  });
+
+  it("does not emit a phantom aggregate plan when no tool-result shrink can cover the overflow", () => {
+    const result = shouldPreemptivelyCompactBeforePrompt({
+      messages: [makeToolResultMessage("x".repeat(2_000))],
+      systemPrompt: "sys",
+      prompt: "continue",
+      contextTokenBudget: 272_000,
+      reserveTokens: 42_000,
+      toolResultMaxChars: 69_000,
+      toolResultAggregateMaxChars: 544_000,
+      llmBoundaryTokenPressure: {
+        estimatedPromptTokens: 300_000,
+        source: "context_engine_assembled_plus_rendered_prompt",
+      },
+    });
+
+    expect(result.route).toBe("compact_only");
+    expect(result.toolResultReducibleChars).toBe(0);
+    expect(result.toolResultAggregateMaxChars).toBeUndefined();
   });
 
   it("routes to compact then truncate when recent tool tails help but cannot fully cover the overflow", () => {

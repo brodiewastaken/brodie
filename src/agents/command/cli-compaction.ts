@@ -202,7 +202,11 @@ function isUnsupportedNativeHarnessCompaction(
 
 function isBenignCliCompactionNoopReason(reason: string | undefined): boolean {
   const classification = classifyCompactionReason(reason);
-  return classification === "below_threshold" || classification === "already_compacted_recently";
+  return (
+    classification === "not_eligible" ||
+    classification === "below_threshold" ||
+    classification === "already_compacted_recently"
+  );
 }
 
 function isIntentionalNativeAutoCompactionSkip(

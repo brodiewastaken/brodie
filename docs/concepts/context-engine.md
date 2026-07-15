@@ -199,12 +199,17 @@ Required members:
 <ParamField path="systemPromptAddition" type="string">
   Prepended to the system prompt.
 </ParamField>
-<ParamField path="promptAuthority" type='"assembled" | "preassembly_may_overflow"'>
+<ParamField path="promptAuthority" type='"assembled" | "assembled_may_overflow" | "preassembly_may_overflow"'>
   Controls which token estimate the runner uses for preemptive overflow
   prechecks. Defaults to `"assembled"`, which means only the assembled
   prompt's estimate is checked for engines that do not own compaction.
   Engines that set `ownsCompaction: true` manage their own prompt admission,
   so OpenClaw skips the generic pre-prompt precheck by default. Set
+  `"assembled_may_overflow"` when assembly bounds the model-visible prompt but
+  the host must still check that final prompt against its admission budget.
+  This mode never adds discarded pre-assembly history to the check. Engines
+  must feature-detect `"assembled-prompt-admission"` in
+  `runtimeSettings.executionHost.capabilities` before returning it. Set
   `"preassembly_may_overflow"` only when your assembled view can hide overflow
   risk in the underlying transcript; the runner then keeps the generic
   precheck active and takes the maximum of the assembled estimate and the
@@ -216,12 +221,21 @@ Required members:
   Optional projection lifecycle for hosts with persistent backend threads (for example Codex app-server). `mode: "thread_bootstrap"` with a stable `epoch` asks the host to inject the assembled context once per epoch and reuse the backend thread until the epoch changes, instead of re-projecting every turn. Omit this field for normal per-turn projection.
 </ParamField>
 
-`compact` returns a `CompactResult`. When compaction rotates the active
-transcript, `result.sessionTarget` (a typed `ContextEngineSessionTarget`
-carrying the storage mode, session identity, and transcript artifact path)
-identifies the successor session that the next retry or turn must use;
-`result.sessionId` mirrors the successor id. `result.sessionFile` is
-deprecated - report successors through `sessionTarget` instead.
+`compact` returns a `CompactResult`. Set `compacted: true` only when the engine
+actually changed context, such as by creating a summary, condensing a message,
+externalizing a payload, or removing rows. If nothing is eligible, return
+`ok: false`, `compacted: false`, and `exhausted: true` with a useful `reason`.
+Automatic recovery retries require `ok: true`, `compacted: true`, and a
+measured strict reduction from `result.tokensBefore` to `result.tokensAfter`;
+a mutation without both measurements is recorded but does not justify another
+model attempt.
+
+When compaction rotates the active transcript, `result.sessionTarget` (a typed
+`ContextEngineSessionTarget` carrying the storage mode, session identity, and
+transcript artifact path) identifies the successor session that the next retry
+or turn must use; `result.sessionId` mirrors the successor id.
+`result.sessionFile` is deprecated - report successors through
+`sessionTarget` instead.
 
 Optional members:
 
@@ -247,7 +261,8 @@ rendered directly to users and does not create a dedicated reporting surface.
 - `runtime`: OpenClaw host, runtime mode (`normal`, `fallback`, or
   `degraded`), and optional harness/runtime ids
 - `contextEngineSelection`: selected context engine id and selection source
-- `executionHost`: host id and label for the surface invoking the hook
+- `executionHost`: host id and label for the surface invoking the hook, plus an
+  optional read-only capability list for safe feature negotiation
 - `model`: requested model, resolved model, provider, and optional model family
 - `limits`: prompt token budget and max output tokens when known
 - `diagnostics`: closed fallback and degraded reason codes when known
@@ -256,7 +271,9 @@ Fields that can be unknown are represented as `null`; discriminator fields such
 as runtime mode and selection source remain non-nullable. Older engines remain
 compatible: if a strict legacy engine rejects `runtimeSettings` as an unknown
 property, OpenClaw retries the lifecycle call without it instead of quarantining
-the engine.
+the engine. Older runtime-settings producers may omit
+`executionHost.capabilities`, so engines must treat a missing list as no
+advertised optional capabilities.
 
 ### Host requirements
 
@@ -305,7 +322,7 @@ protects engines that would corrupt state if they ran in an unsupported host.
 
 <AccordionGroup>
   <Accordion title="ownsCompaction: true">
-    The engine owns compaction behavior. OpenClaw disables OpenClaw runtime's built-in auto-compaction and generic pre-prompt overflow precheck for that run, and the engine's `compact()` implementation is responsible for `/compact`, provider overflow recovery compaction, and any proactive compaction it wants to do in `afterTurn()`. OpenClaw still runs the pre-prompt overflow safeguard when the engine returns `promptAuthority: "preassembly_may_overflow"` from `assemble()`.
+    The engine owns compaction behavior. OpenClaw disables OpenClaw runtime's built-in auto-compaction and generic pre-prompt overflow precheck for that run, and the engine's `compact()` implementation is responsible for `/compact`, provider overflow recovery compaction, and any proactive compaction it wants to do in `afterTurn()`. OpenClaw still runs the pre-prompt overflow safeguard when the engine returns `promptAuthority: "assembled_may_overflow"` or `promptAuthority: "preassembly_may_overflow"` from `assemble()`.
   </Accordion>
   <Accordion title="ownsCompaction: false or unset">
     OpenClaw runtime's built-in auto-compaction may still run during prompt execution, but the active engine's `compact()` method is still called for `/compact` and overflow recovery.

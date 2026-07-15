@@ -320,6 +320,74 @@ async function prepareMainHistoryHarness(params: {
 }
 
 describe("gateway server chat", () => {
+  test("cron stable and exact run keys resolve one completed history", async () => {
+    await withGatewayChatHarness(async ({ ws, createSessionDir }) => {
+      await connectOk(ws);
+      const sessionDir = await createSessionDir();
+      const stableKey = "agent:main:cron:job-1";
+      const sessionId = "cron-run-1";
+      const runKey = `${stableKey}:run:${sessionId}`;
+      const sessionFile = testSessionFilePath(sessionDir, sessionId);
+      const entry = {
+        sessionId,
+        sessionFile,
+        lifecycleRevision: "cron-revision",
+        status: "done" as const,
+        totalTokens: 42,
+        updatedAt: futureFixtureUpdatedAt(),
+      };
+      await writeSessionStore({
+        entries: {
+          [stableKey]: entry,
+          [runKey]: structuredClone(entry),
+        },
+      });
+      await fs.writeFile(
+        sessionFile,
+        [
+          JSON.stringify({ type: "session", version: 1, id: sessionId }),
+          JSON.stringify({
+            type: "message",
+            id: "cron-message",
+            timestamp: new Date().toISOString(),
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "CRON_SESSION_PERSISTENCE_OK" }],
+            },
+          }),
+        ].join("\n"),
+        "utf-8",
+      );
+
+      for (const sessionKey of [stableKey, runKey]) {
+        const history = await rpcReq<{ sessionId?: string; messages?: unknown[] }>(
+          ws,
+          "chat.history",
+          { sessionKey, agentId: "main", limit: 20 },
+        );
+        expect(history.ok).toBe(true);
+        expect(history.payload?.sessionId).toBe(sessionId);
+        expect(JSON.stringify(history.payload?.messages)).toContain("CRON_SESSION_PERSISTENCE_OK");
+      }
+
+      const roster = await rpcReq<{
+        sessions?: Array<{ key?: string; sessionId?: string; totalTokens?: number }>;
+      }>(ws, "sessions.list", {
+        allUnarchived: true,
+        configuredAgentsOnly: true,
+      });
+      expect(roster.ok).toBe(true);
+      expect(roster.payload?.sessions).toContainEqual(
+        expect.objectContaining({
+          key: stableKey,
+          sessionId,
+          totalTokens: 42,
+        }),
+      );
+      expect(roster.payload?.sessions?.some((session) => session.key === runKey)).toBe(false);
+    });
+  });
+
   test("chat.history returns catalog-backed session metadata with history", async () => {
     const sessionDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
     try {

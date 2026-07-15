@@ -32,6 +32,12 @@ export function normalizeAttachments(ctx: MsgContext): MediaAttachment[] {
   const pathsFromArray = Array.isArray(ctx.MediaPaths) ? ctx.MediaPaths : undefined;
   const urlsFromArray = Array.isArray(ctx.MediaUrls) ? ctx.MediaUrls : undefined;
   const typesFromArray = Array.isArray(ctx.MediaTypes) ? ctx.MediaTypes : undefined;
+  const sourceMessageIdsFromArray = Array.isArray(ctx.MediaSourceMessageIds)
+    ? ctx.MediaSourceMessageIds
+    : undefined;
+  const sourceIndexesFromArray = Array.isArray(ctx.MediaSourceIndexes)
+    ? ctx.MediaSourceIndexes
+    : undefined;
   const transcribedIndexes = new Set(
     Array.isArray(ctx.MediaTranscribedIndexes)
       ? ctx.MediaTranscribedIndexes.filter((index) => Number.isInteger(index) && index >= 0)
@@ -43,6 +49,12 @@ export function normalizeAttachments(ctx: MsgContext): MediaAttachment[] {
       return typeHint;
     }
     return count === 1 ? ctx.MediaType : undefined;
+  };
+  const resolveSourceIndex = (index: number): number => {
+    const sourceIndex = sourceIndexesFromArray?.[index];
+    return typeof sourceIndex === "number" && Number.isSafeInteger(sourceIndex) && sourceIndex >= 0
+      ? sourceIndex
+      : index;
   };
 
   if (pathsFromArray && pathsFromArray.length > 0) {
@@ -56,6 +68,8 @@ export function normalizeAttachments(ctx: MsgContext): MediaAttachment[] {
         url: urls?.[index] ?? ctx.MediaUrl,
         mime: resolveMime(count, index),
         index,
+        sourceMessageId: normalizeOptionalString(sourceMessageIdsFromArray?.[index]),
+        sourceIndex: resolveSourceIndex(index),
         alreadyTranscribed: transcribedIndexes.has(index),
       }))
       .filter((entry) => Boolean(entry.path ?? normalizeOptionalString(entry.url)));
@@ -69,6 +83,8 @@ export function normalizeAttachments(ctx: MsgContext): MediaAttachment[] {
         url: normalizeOptionalString(value),
         mime: resolveMime(count, index),
         index,
+        sourceMessageId: normalizeOptionalString(sourceMessageIdsFromArray?.[index]),
+        sourceIndex: resolveSourceIndex(index),
         alreadyTranscribed: transcribedIndexes.has(index),
       }))
       .filter((entry) => Boolean(entry.url));
@@ -85,6 +101,8 @@ export function normalizeAttachments(ctx: MsgContext): MediaAttachment[] {
       url: url || undefined,
       mime: ctx.MediaType,
       index: 0,
+      sourceMessageId: normalizeOptionalString(sourceMessageIdsFromArray?.[0]),
+      sourceIndex: resolveSourceIndex(0),
       alreadyTranscribed: transcribedIndexes.has(0),
     },
   ];
@@ -94,22 +112,38 @@ export function normalizeAttachments(ctx: MsgContext): MediaAttachment[] {
 export function resolveAttachmentKind(
   attachment: MediaAttachment,
 ): "image" | "audio" | "video" | "document" | "unknown" {
+  // GIFs are animations: they take video understanding and externalize like
+  // video (spec memory-media.md B12); only still images stay native.
+  const mime = attachment.mime?.split(";")[0]?.trim().toLowerCase();
+  const sources = [attachment.path, attachment.url].filter(
+    (value): value is string => typeof value === "string" && value.trim().length > 0,
+  );
+  const extensions = sources
+    .map((source) => getFileExtension(source))
+    .filter((extension): extension is string => Boolean(extension));
+  if (mime === "image/gif" || extensions.includes(".gif")) {
+    return "video";
+  }
+
   const kind = kindFromMime(attachment.mime);
-  if (kind === "image" || kind === "audio" || kind === "video") {
+  if (kind === "image" || kind === "audio" || kind === "video" || kind === "document") {
     return kind;
   }
 
-  const ext = getFileExtension(attachment.path ?? attachment.url);
-  if (!ext) {
+  if (extensions.length === 0) {
     return "unknown";
   }
-  if ([".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"].includes(ext)) {
+  if (extensions.some((ext) => [".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"].includes(ext))) {
     return "video";
   }
-  if (isAudioFileName(attachment.path ?? attachment.url)) {
+  if (sources.some((source) => isAudioFileName(source))) {
     return "audio";
   }
-  if ([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"].includes(ext)) {
+  if (
+    extensions.some((ext) =>
+      [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"].includes(ext),
+    )
+  ) {
     return "image";
   }
   return "unknown";

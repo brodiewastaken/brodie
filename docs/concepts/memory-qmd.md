@@ -17,8 +17,8 @@ binary, and can index content beyond your workspace memory files.
 - **Index session transcripts** - recall earlier conversations.
 - **Fully local** - runs with the official llama.cpp provider plugin and
   auto-downloads GGUF models.
-- **Automatic fallback** - if QMD is unavailable, OpenClaw falls back to the
-  builtin engine seamlessly.
+- **Explicit backend ownership** - a QMD configuration reports QMD failures
+  directly instead of searching a separate builtin index.
 
 ## Getting started
 
@@ -80,11 +80,11 @@ present.
 - With QMD releases that advertise multi-collection filters, OpenClaw groups
   same-source collections into one QMD search invocation. Older QMD releases
   keep the compatible per-collection fallback.
-- If QMD fails entirely, OpenClaw falls back to the builtin SQLite engine.
+- If QMD fails entirely, `memory_search` preserves that QMD error. It does not
+  search the builtin SQLite index, which can be a separate and stale corpus.
   Repeated chat-turn attempts back off briefly after an open failure so a
   missing binary or broken sidecar dependency does not create a retry storm;
-  `openclaw memory status` and one-shot CLI probes still recheck QMD
-  directly.
+  inspect the backend with `openclaw memory status --json` before retrying.
 
 <Info>
 The first search may be slow - QMD auto-downloads GGUF models (~2 GB) for
@@ -155,6 +155,43 @@ Snippets from extra paths appear as `qmd/<collection>/<relative-path>` in
 search results. `memory_get` understands this prefix and reads from the
 correct collection root.
 
+### Search a collection explicitly
+
+Set `includeByDefault: false` on an extra path to keep it indexed without adding
+it to ordinary searches. This is useful for a curated project collection that
+overlaps a broader workspace collection:
+
+```json5
+{
+  memory: {
+    backend: "qmd",
+    qmd: {
+      paths: [
+        {
+          name: "team-live",
+          preserveName: true,
+          path: "~/team/notes",
+          pattern: "**/*.md,!archive/**,!runs/**",
+          includeByDefault: false,
+        },
+      ],
+    },
+  },
+}
+```
+
+The agent can then call
+`memory_search({ query: "current project owner", corpus: "memory", collections: ["team-live"] })`.
+Names must match configured managed collections. Unknown names and collection
+filters on a non-QMD backend fail explicitly instead of broadening the search.
+The selected collections still obey the requested corpus. Calls without
+`collections` retain the default collection set; omitted `includeByDefault`
+means `true`.
+
+Opt-in collections still participate in update and embedding maintenance.
+OpenClaw reconciles their inclusion flag through QMD's native collection
+settings, preserving existing collection contexts and update hooks.
+
 ## Indexing session transcripts
 
 Enable session indexing to recall earlier conversations. QMD needs both the
@@ -183,6 +220,17 @@ Transcripts export as sanitized User/Assistant turns into a dedicated QMD
 collection under `~/.openclaw/agents/<id>/qmd/sessions/`. Setting only
 `memorySearch.experimental.sessionMemory` does not export transcripts into
 QMD.
+
+After the first complete export, transcript writes enter a durable SQLite
+dirty set. OpenClaw coalesces repeated writes to the same session, renders only
+the changed artifacts, and asks QMD to update and embed only the session
+collection. A restart drains unfinished entries before acknowledging them, so
+the last good index remains searchable while incremental work resumes.
+
+OpenClaw still runs a complete reconciliation once per day and whenever the
+dirty set reaches its bounded capacity. A full repair is accepted only after
+export, index update, and any required embedding succeed; changes that arrive
+during repair remain queued for the next incremental pass.
 
 Session hits are still filtered by
 [`tools.sessions.visibility`](/gateway/config-tools#toolssessions). The
@@ -269,8 +317,10 @@ keeps the older per-collection fallback for correctness.
 lexical-only, skips QMD vector status probes and embedding maintenance, and
 leaves semantic readiness checks to `vsearch` or `query` setups.
 
-**Search times out?** Increase `memory.qmd.limits.timeoutMs` (default:
-4000ms). Set it higher, for example `120000`, for slower hardware.
+**Search times out?** Increase `memory.qmd.limits.timeoutMs` (default: 4000ms).
+Set it higher, for example `120000`, for slower hardware. This limit applies to
+QMD's own search commands during agent `memory_search` calls; setup, sync, and
+supplemental corpus work keep their own shorter deadlines.
 
 **Empty results in group or channel chats?** This is expected with the
 default `memory.qmd.scope`, which allows only direct sessions. Add an

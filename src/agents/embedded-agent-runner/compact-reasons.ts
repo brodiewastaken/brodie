@@ -34,6 +34,9 @@ export function classifyCompactionReason(reason?: string): string {
   if (text.includes("nothing to compact") || text.includes("no real conversation messages")) {
     return "no_compactable_entries";
   }
+  if (text.includes("no eligible context") || text.includes("not eligible")) {
+    return "not_eligible";
+  }
   // Backends use both phrases for the same harmless state: the transcript is
   // already small enough, so preflight compaction should skip instead of fail.
   if (text.includes("below threshold") || text.includes("already under target")) {

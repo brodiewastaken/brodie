@@ -39,6 +39,7 @@ import {
   storeRoleRefsForTarget,
 } from "./pw-session.js";
 import { markBackendDomRefsOnPage, withPageScopedCdpClient } from "./pw-session.page-cdp.js";
+import { limitAiSnapshot } from "./snapshot-limit.js";
 import { appendSnapshotUrls, type SnapshotUrlEntry } from "./snapshot-urls.js";
 
 function resolveBoundedTimeoutMs(
@@ -274,26 +275,16 @@ export async function snapshotAiViaPlaywright(opts: {
   if (opts.urls) {
     snapshot = appendSnapshotUrls(snapshot, await collectSnapshotUrls(page));
   }
-  const maxChars = opts.maxChars;
-  const limit =
-    typeof maxChars === "number" && Number.isFinite(maxChars) && maxChars > 0
-      ? Math.floor(maxChars)
-      : undefined;
-  let truncated = false;
-  if (limit && snapshot.length > limit) {
-    snapshot = `${truncateUtf16Safe(snapshot, limit)}\n\n[...TRUNCATED - page too large]`;
-    truncated = true;
-  }
-
   const built = buildRoleSnapshotFromAiSnapshot(snapshot);
+  const bounded = limitAiSnapshot({ snapshot, refs: built.refs }, opts.maxChars);
   storeRoleRefsForTarget({
     page,
     cdpUrl: opts.cdpUrl,
     targetId: opts.targetId,
-    refs: built.refs,
+    refs: bounded.refs,
     mode: "aria",
   });
-  return truncated ? { snapshot, truncated, refs: built.refs } : { snapshot, refs: built.refs };
+  return bounded;
 }
 
 async function finalizeRoleSnapshotViaPlaywright(params: {

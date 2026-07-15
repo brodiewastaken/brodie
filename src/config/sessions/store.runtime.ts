@@ -1,11 +1,15 @@
 // Runtime facade for session store mutation helpers.
 export {
+  applySessionEntryLifecycleMutation,
+  deleteSessionEntryLifecycle,
+  resetSessionEntryLifecycle,
+} from "./session-accessor.js";
+export {
   applySessionStoreEntryPatch,
   cleanupSessionLifecycleArtifacts,
   updateSessionStore,
   updateSessionStoreEntry,
 } from "./store.js";
-export { deleteSessionEntryLifecycle, resetSessionEntryLifecycle } from "./session-accessor.js";
 export type {
   SessionLifecycleArtifactCleanupParams,
   SessionLifecycleArtifactCleanupResult,

@@ -1,6 +1,7 @@
 // Context-engine public types define the pluggable context-management lifecycle.
 import type { AgentMessage } from "../agents/runtime/index.js";
 import type { MemoryCitationsMode } from "../config/types.memory.js";
+import type { ContextEngineExternalFile } from "./external-files.js";
 
 // Result types
 
@@ -16,6 +17,7 @@ export type AssembleResult = {
    *
    * - "assembled": the generic precheck uses only the assembled prompt's estimate
    *   unless the engine owns compaction; owning engines manage prompt admission.
+   * - "assembled_may_overflow": always precheck the final assembled prompt.
    * - "preassembly_may_overflow": the precheck takes the maximum of the
    *   assembled estimate and the pre-assembly (unwindowed) session-history
    *   estimate. Engines opt into this when their assembled view can hide an
@@ -24,7 +26,7 @@ export type AssembleResult = {
    *
    * Defaults to "assembled".
    */
-  promptAuthority?: "assembled" | "preassembly_may_overflow";
+  promptAuthority?: "assembled" | "assembled_may_overflow" | "preassembly_may_overflow";
   /** Optional context-engine-provided instructions prepended to the runtime system prompt */
   systemPromptAddition?: string;
   /**
@@ -64,6 +66,7 @@ export type ContextEngineRuntimeReasonCode =
 export type ContextEngineHostCapability =
   | "bootstrap"
   | "assemble-before-prompt"
+  | "assembled-prompt-admission"
   | "after-turn"
   | "maintain"
   | "compact"
@@ -98,6 +101,7 @@ export type ContextEngineRuntimeSettings = {
   executionHost: {
     id: string | null;
     label: string | null;
+    capabilities?: readonly ContextEngineHostCapability[];
   };
   limits: {
     promptTokenBudget: number | null;
@@ -147,11 +151,14 @@ export type ContextEngineSessionTarget = {
 export type CompactResult = {
   ok: boolean;
   compacted: boolean;
+  /** The engine has no eligible material left to compact for this request. */
+  exhausted?: boolean;
   reason?: string;
   result?: {
     summary?: string;
     firstKeptEntryId?: string;
     tokensBefore: number;
+    /** Measured prompt tokens after compaction. Automatic recovery retries require a strict reduction. */
     tokensAfter?: number;
     details?: unknown;
     /** Session id after compaction, when the runtime rotated transcripts. */
@@ -315,7 +322,7 @@ export type ContextEngineRuntimeContext = Record<string, unknown> & {
    * consuming deferred compaction debt.
    */
   allowDeferredCompactionExecution?: boolean;
-  /** Runtime-resolved context window budget for the active model call. */
+  /** Usable prompt-token budget after the active model call's output reserve. */
   tokenBudget?: number;
   /** Selected agent harness id when compaction delegates back to the runtime. */
   agentHarnessId?: string;
@@ -323,6 +330,8 @@ export type ContextEngineRuntimeContext = Record<string, unknown> & {
   currentTokenCount?: number;
   /** Optional prompt-cache telemetry for cache-aware engines. */
   promptCache?: ContextEnginePromptCacheInfo;
+  /** Current-turn non-native media/files that should be externalized by the context engine. */
+  externalFiles?: ContextEngineExternalFile[];
   /**
    * Safe transcript rewrite helper implemented by the runtime.
    *
@@ -412,7 +421,7 @@ export interface ContextEngine {
     autoCompactionSummary?: string;
     /** True when this turn belongs to a heartbeat run. */
     isHeartbeat?: boolean;
-    /** Optional model context token budget for proactive compaction. */
+    /** Optional usable prompt-token budget after the active model call's output reserve. */
     tokenBudget?: number;
     /** Optional runtime-owned context for engines that need caller state. */
     runtimeSettings?: ContextEngineRuntimeSettings;
@@ -438,6 +447,8 @@ export interface ContextEngine {
     /** The incoming user prompt for this turn (useful for retrieval-oriented engines). */
     prompt?: string;
     runtimeSettings?: ContextEngineRuntimeSettings;
+    /** Optional runtime-owned context for engines that need caller state. */
+    runtimeContext?: ContextEngineRuntimeContext;
   }): Promise<AssembleResult>;
 
   /**

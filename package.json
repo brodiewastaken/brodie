@@ -1000,6 +1000,10 @@
       "types": "./dist/plugin-sdk/session-store-runtime.d.ts",
       "default": "./dist/plugin-sdk/session-store-runtime.js"
     },
+    "./plugin-sdk/session-artifacts-runtime": {
+      "types": "./dist/plugin-sdk/session-artifacts-runtime.d.ts",
+      "default": "./dist/plugin-sdk/session-artifacts-runtime.js"
+    },
     "./plugin-sdk/session-transcript-runtime": {
       "types": "./dist/plugin-sdk/session-transcript-runtime.d.ts",
       "default": "./dist/plugin-sdk/session-transcript-runtime.js"

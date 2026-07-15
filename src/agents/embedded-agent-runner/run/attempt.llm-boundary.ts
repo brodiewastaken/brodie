@@ -165,6 +165,35 @@ export function buildUserTurnModelInputSnapshot(params: {
   };
 }
 
+/** Restore prompt-local context that a transcript-backed engine cannot assemble. */
+export function ensureRuntimeContextMessageForProvider(
+  messages: AgentMessage[],
+  message?: RuntimeContextCustomMessage,
+): AgentMessage[] {
+  if (
+    !message ||
+    messages.some(
+      (candidate) =>
+        candidate.role === "user" &&
+        candidate.runtimeContextCarrier === true &&
+        joinedUserTextContent(candidate) === message.content,
+    )
+  ) {
+    return messages;
+  }
+  // This wrapper owns only the active attempt. Keep its carrier at the wire
+  // tail without inserting ephemeral completion data into transcript history.
+  return [
+    ...messages,
+    {
+      role: "user",
+      content: message.content,
+      timestamp: message.timestamp,
+      runtimeContextCarrier: true,
+    },
+  ];
+}
+
 /**
  * Matches a leading `[... YYYY-MM-DD HH:MM ...]` timestamp envelope — either
  * from a channel plugin envelope or from a previous boundary stamp. Mirrors

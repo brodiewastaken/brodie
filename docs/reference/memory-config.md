@@ -569,18 +569,30 @@ Built-in memory indexes live in each agent's OpenClaw SQLite database at
 
 Set `memory.backend = "qmd"` to enable. All QMD settings live under `memory.qmd`:
 
+QMD is authoritative when selected. If it cannot open or search, `memory_search`
+returns the QMD error and does not consult the builtin SQLite index. Run
+`openclaw memory status --json --agent <id>` to inspect that backend without
+starting an index sync, then retry the search after resolving the cause.
+
 | Key                      | Type      | Default  | Description                                                                           |
 | ------------------------ | --------- | -------- | ------------------------------------------------------------------------------------- |
 | `command`                | `string`  | `qmd`    | QMD executable path; set an absolute path when service `PATH` differs from your shell |
 | `searchMode`             | `string`  | `search` | Search command: `search`, `vsearch`, `query`                                          |
 | `rerank`                 | `boolean` | --       | Set to `false` with `searchMode: "query"` and QMD 2.1+ to skip QMD reranking          |
 | `includeDefaultMemory`   | `boolean` | `true`   | Auto-index `MEMORY.md` + `memory/**/*.md`                                             |
-| `paths[]`                | `array`   | --       | Extra paths: `{ name, path, pattern? }`                                               |
+| `paths[]`                | `array`   | --       | Extra paths: `{ name, path, pattern?, preserveName?, includeByDefault? }`             |
 | `sessions.enabled`       | `boolean` | `false`  | Export session transcripts into QMD                                                   |
 | `sessions.retentionDays` | `number`  | --       | Transcript retention                                                                  |
 | `sessions.exportDir`     | `string`  | --       | Export directory                                                                      |
 
 `searchMode: "search"` is lexical/BM25-only. OpenClaw does not run semantic vector readiness probes or QMD embedding maintenance for that mode, including during `memory status --deep`; `vsearch` and `query` continue to require QMD vector readiness and embeddings.
+
+`paths[].includeByDefault` defaults to `true`. Set it to `false` for a collection
+that should be maintained but searched only when explicitly selected with
+`memory_search.collections`. `preserveName: true` keeps the configured name
+stable for those calls. Unknown collection names and non-QMD collection filters
+return an error; they do not fall back to an unscoped search. See
+[explicit collection search](/concepts/memory-qmd#search-a-collection-explicitly).
 
 `rerank: false` only changes QMD `query` mode and requires QMD 2.1 or newer. In direct CLI mode OpenClaw passes `--no-rerank`; in mcporter-backed MCP mode it passes `rerank: false` to QMD's unified query tool. Leave it unset to use QMD's default query reranking behavior.
 
@@ -623,7 +635,7 @@ Requires `mcporter` installed and on PATH, plus a configured mcporter server tha
     | `limits.maxResults`       | `number` | `4`     | Max search results         |
     | `limits.maxSnippetChars`  | `number` | `450`   | Clamp snippet length       |
     | `limits.maxInjectedChars` | `number` | `2200`  | Clamp total injected chars |
-    | `limits.timeoutMs`        | `number` | `4000`  | Search timeout             |
+    | `limits.timeoutMs`        | `number` | `4000`  | QMD command timeout during QMD-backed search, including `memory_search`; setup, sync, and supplemental work keep the default tool deadline |
   </Accordion>
   <Accordion title="Scope">
     Controls which sessions can receive QMD search results. Same schema as [`session.sendPolicy`](/gateway/config-agents#session):

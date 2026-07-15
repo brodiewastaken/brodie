@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentMessage } from "openclaw/plugin-sdk/agent-core";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { convertToLlm } from "../../../../packages/agent-core/src/harness/messages.js";
+import { convertResponsesMessages } from "../../../../packages/ai/src/providers/openai-responses-shared.js";
+import type { Context, Model } from "../../../../packages/ai/src/types.js";
 import { HEARTBEAT_TRANSCRIPT_PROMPT } from "../../../auto-reply/heartbeat.js";
 import type { OpenClawConfig } from "../../../config/types.js";
 import { buildMemorySystemPromptAddition } from "../../../context-engine/delegate.js";
@@ -65,6 +68,7 @@ type TrajectoryEvent = { type?: string; data?: Record<string, unknown> };
 type ToolResultGuardInstallParams = {
   midTurnPrecheck?: {
     onMidTurnPrecheck?: (request: MidTurnPrecheckRequest) => void;
+    reserveTokens?: () => number;
   };
 };
 type MockCallSource = {
@@ -869,6 +873,111 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       }),
     );
   });
+
+  it.each([true, false])(
+    "keeps a transient completion on the Responses wire when projection drops it: %s",
+    async (dropCarrier) => {
+      const { buildOpenAIResponsesParams } = await vi.importActual<
+        typeof import("../../openai-transport-stream.js")
+      >("../../openai-transport-stream.js");
+      const completion = "A background task completed: CHILD_RESULT_SURVIVES_ASSEMBLY";
+      const provenance = "[Inter-session message] sourceTool=subagent_announce";
+      const model = {
+        id: "gpt-5.5",
+        name: "GPT-5.5",
+        api: "openai-responses",
+        provider: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      } satisfies Model<"openai-responses">;
+      const wireInputs: string[] = [];
+      let carrierWasInstalled = false;
+      const contextEngine = {
+        assemble: async ({ messages }: { messages: AgentMessage[] }) => ({
+          // A transcript-backed engine cannot return a prompt-local custom row.
+          messages: dropCarrier
+            ? messages.filter((message) => message.role !== "custom")
+            : messages,
+          estimatedTokens: 1,
+        }),
+      };
+
+      const result = await createContextEngineAttemptRunner({
+        contextEngine,
+        sessionKey,
+        tempPaths,
+        attemptOverrides: {
+          prompt: `${provenance}\n\n<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n${completion}\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>`,
+          transcriptPrompt: "",
+          suppressNextUserMessagePersistence: true,
+          inputProvenance: {
+            kind: "inter_session",
+            sourceSessionKey: "agent:main:subagent:completed-child",
+            sourceTool: "subagent_announce",
+          },
+        },
+        createSession: () => {
+          const session = createDefaultEmbeddedSession();
+          session.agent.streamFn = async (_model, context) => {
+            wireInputs.push(
+              JSON.stringify(
+                convertResponsesMessages(model, context as Context, new Set(["openai"])),
+              ),
+              JSON.stringify(
+                buildOpenAIResponsesParams(
+                  {
+                    ...model,
+                    api: "openai-chatgpt-responses",
+                    baseUrl: "https://chatgpt.com/backend-api",
+                  },
+                  context as Context,
+                  undefined,
+                ).input,
+              ),
+            );
+            return {
+              async result() {
+                return doneMessage;
+              },
+              [Symbol.asyncIterator]() {
+                return (async function* () {})();
+              },
+            };
+          };
+          session.prompt = async (prompt, options) => {
+            options?.preflightResult?.(true);
+            carrierWasInstalled = JSON.stringify(session.messages).includes(completion);
+            const userMessage: AgentMessage = {
+              role: "user",
+              content: [{ type: "text", text: prompt }],
+              timestamp: 3,
+            };
+            const assembled = await contextEngine.assemble({
+              messages: [...session.messages, userMessage] as AgentMessage[],
+            });
+            const providerMessages = convertToLlm(assembled.messages);
+            await session.agent.streamFn?.(model, { messages: providerMessages }, {});
+            // The current carrier must remain available for subsequent tool-loop calls.
+            await session.agent.streamFn?.(model, { messages: providerMessages }, {});
+            session.messages = [...session.messages, doneMessage];
+          };
+          return session;
+        },
+      });
+
+      expect(carrierWasInstalled).toBe(true);
+      expect(wireInputs).toHaveLength(4);
+      for (const input of wireInputs) {
+        expect(input.split(completion)).toHaveLength(2);
+        expect(input.split("[Inter-session message]"), input).toHaveLength(2);
+      }
+      expect(JSON.stringify(result.messagesSnapshot)).not.toContain(completion);
+    },
+  );
 
   it("sends transcriptPrompt visibly and keeps runtime context out of transcript messages", async () => {
     const seen: { prompt?: string; messages?: unknown[]; systemPrompt?: string } = {};
@@ -2337,7 +2446,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       tempPaths,
       sessionMessages: [{ role: "user", content: hugeHistory, timestamp: 1 }] as AgentMessage[],
       attemptOverrides: {
-        contextTokenBudget: 500,
+        contextWindowInfo: { tokens: 500, source: "model" },
       },
       sessionPrompt: async (session) => {
         sawPrompt = true;
@@ -2377,7 +2486,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       tempPaths,
       sessionMessages: [{ role: "user", content: hugeHistory, timestamp: 1 }] as AgentMessage[],
       attemptOverrides: {
-        contextTokenBudget: 500,
+        contextWindowInfo: { tokens: 500, source: "model" },
       },
       sessionPrompt: async (session) => {
         sawPrompt = true;
@@ -2392,6 +2501,91 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     expect(result.promptError).toBeNull();
     expect(result.promptErrorSource).toBeNull();
     expect(hoisted.preemptiveCompactionCalls).toHaveLength(0);
+  });
+
+  it("checks only the assembled prompt when an owning engine requests assembled admission", async () => {
+    let sawPrompt = false;
+    const hugeHistory = "large raw history ".repeat(2_000);
+
+    const result = await createContextEngineAttemptRunner({
+      contextEngine: createTestContextEngine({
+        info: {
+          id: "test-context-engine",
+          name: "Test Context Engine",
+          version: "0.0.1",
+          ownsCompaction: true,
+        },
+        assemble: async () => ({
+          messages: [
+            { role: "user", content: "small assembled context", timestamp: 1 },
+          ] as AgentMessage[],
+          estimatedTokens: 8,
+          promptAuthority: "assembled_may_overflow",
+        }),
+      }),
+      sessionKey,
+      tempPaths,
+      sessionMessages: [{ role: "user", content: hugeHistory, timestamp: 1 }] as AgentMessage[],
+      attemptOverrides: {
+        contextWindowInfo: { tokens: 500, source: "model" },
+      },
+      sessionPrompt: async (session) => {
+        sawPrompt = true;
+        session.messages = [
+          ...session.messages,
+          { role: "assistant", content: "done", timestamp: 2 },
+        ];
+      },
+    });
+
+    expect(sawPrompt).toBe(true);
+    expect(result.promptError).toBeNull();
+    expect(result.promptErrorSource).toBeNull();
+    expect(hoisted.preemptiveCompactionCalls).toHaveLength(1);
+    expect(hoisted.preemptiveCompactionCalls.at(-1)).not.toHaveProperty("unwindowedMessages");
+  });
+
+  it("blocks an oversized assembled prompt when an owning engine requests assembled admission", async () => {
+    const lockEvents = trackSessionWriteLocks();
+    let sawPrompt = false;
+    const hugeAssembledContext = "large assembled context ".repeat(2_000);
+
+    const result = await createContextEngineAttemptRunner({
+      contextEngine: createTestContextEngine({
+        info: {
+          id: "test-context-engine",
+          name: "Test Context Engine",
+          version: "0.0.1",
+          ownsCompaction: true,
+        },
+        assemble: async () => ({
+          messages: [
+            { role: "user", content: hugeAssembledContext, timestamp: 1 },
+          ] as AgentMessage[],
+          estimatedTokens: 10_000,
+          promptAuthority: "assembled_may_overflow",
+        }),
+      }),
+      sessionKey,
+      tempPaths,
+      attemptOverrides: {
+        contextWindowInfo: { tokens: 500, source: "model" },
+      },
+      sessionPrompt: async (session) => {
+        sawPrompt = true;
+        session.messages = [
+          ...session.messages,
+          { role: "assistant", content: "done", timestamp: 2 },
+        ];
+      },
+    });
+
+    expect(sawPrompt).toBe(false);
+    expect(result.promptErrorSource).toBe("precheck");
+    expect(result.preflightRecovery?.route).toBe("compact_only");
+    expect(hoisted.preemptiveCompactionCalls).toHaveLength(1);
+    expect(hoisted.preemptiveCompactionCalls.at(-1)).not.toHaveProperty("unwindowedMessages");
+    expectInitialLockReleasedBeforePostTurnWrite(lockEvents);
   });
 
   it("keeps the generic precheck active when owning context engine assembly fails", async () => {
@@ -2415,7 +2609,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       tempPaths,
       sessionMessages: [{ role: "user", content: hugeHistory, timestamp: 1 }] as AgentMessage[],
       attemptOverrides: {
-        contextTokenBudget: 500,
+        contextWindowInfo: { tokens: 500, source: "model" },
       },
       sessionPrompt: async (session) => {
         sawPrompt = true;
@@ -2491,7 +2685,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       tempPaths,
       sessionMessages: [{ role: "user", content: hugeHistory, timestamp: 1 }] as AgentMessage[],
       attemptOverrides: {
-        contextTokenBudget: 500,
+        contextWindowInfo: { tokens: 500, source: "model" },
       },
       sessionPrompt: async (session) => {
         sawPrompt = true;
@@ -2534,7 +2728,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       tempPaths,
       sessionMessages: [{ role: "user", content: hugeHistory, timestamp: 1 }] as AgentMessage[],
       attemptOverrides: {
-        contextTokenBudget: 500,
+        contextWindowInfo: { tokens: 500, source: "model" },
       },
       sessionPrompt: async (session) => {
         sawPrompt = true;
@@ -2578,7 +2772,7 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
       tempPaths,
       sessionMessages: [preassemblyMarker],
       attemptOverrides: {
-        contextTokenBudget: 500,
+        contextWindowInfo: { tokens: 500, source: "model" },
       },
       sessionPrompt: async (session) => {
         session.messages = [
@@ -3293,13 +3487,13 @@ describe("runEmbeddedAttempt tool-result guard budget wiring", () => {
     vi.restoreAllMocks();
   });
 
-  it("uses the resolved contextTokenBudget before model contextWindow", async () => {
+  it("uses the resolved context window before model metadata", async () => {
     await createContextEngineAttemptRunner({
       contextEngine: createContextEngineBootstrapAndAssemble(),
       sessionKey,
       tempPaths,
       attemptOverrides: {
-        contextTokenBudget: 1_000_000,
+        contextWindowInfo: { tokens: 1_000_000, source: "agentContextTokens" },
         model: {
           api: "openai-completions",
           provider: "openai",
@@ -3316,18 +3510,33 @@ describe("runEmbeddedAttempt tool-result guard budget wiring", () => {
     ).toBe(1_000_000);
   });
 
-  it("passes context engines the message budget after reserve and rendered prompt pressure", async () => {
-    const contextEngine = createContextEngineBootstrapAndAssemble();
-    hoisted.compactionReserveTokens = 20_000;
+  it("uses one 230k prompt budget for a 272k window with a 42k reserve", async () => {
+    const afterTurn = vi.fn(async () => {});
+    const contextEngine = {
+      ...createContextEngineBootstrapAndAssemble(),
+      afterTurn,
+      maintain: true,
+    };
+    hoisted.compactionReserveTokens = 42_000;
 
     await createContextEngineAttemptRunner({
       contextEngine,
       sessionKey,
       tempPaths,
       attemptOverrides: {
-        contextTokenBudget: 100_000,
+        contextWindowInfo: { tokens: 272_000, source: "model" },
         prompt: "current prompt",
         transcriptPrompt: "current prompt",
+        config: {
+          agents: {
+            defaults: {
+              compaction: {
+                mode: "safeguard",
+                midTurnPrecheck: { enabled: true },
+              },
+            },
+          },
+        } as OpenClawConfig,
       },
     });
 
@@ -3336,12 +3545,119 @@ describe("runEmbeddedAttempt tool-result guard budget wiring", () => {
       0,
       "assemble params",
     );
-    expect(assembleParams.tokenBudget).toBeLessThan(80_000);
+    expect(assembleParams.tokenBudget).toBeLessThan(230_000);
     expect(assembleParams.runtimeSettings).toMatchObject({
+      executionHost: {
+        id: "openclaw-embedded",
+        capabilities: expect.arrayContaining(["assembled-prompt-admission"]),
+      },
       limits: {
-        maxOutputTokens: 20_000,
+        promptTokenBudget: 230_000,
+        maxOutputTokens: 42_000,
       },
     });
+    const guardParams = mockParams(
+      hoisted.installToolResultContextGuardMock,
+      0,
+      "tool-result guard params",
+    ) as ToolResultGuardInstallParams;
+    const afterTurnParams = mockParams(afterTurn, 0, "afterTurn params");
+    expect(afterTurnParams.tokenBudget).toBe(230_000);
+    expect(afterTurnParams.runtimeContext).toMatchObject({
+      tokenBudget: 230_000,
+    });
+    expect(afterTurnParams.runtimeSettings).toMatchObject({
+      limits: {
+        promptTokenBudget: 230_000,
+      },
+    });
+    const turnMaintenanceParams = hoisted.runContextEngineMaintenanceMock.mock.calls
+      .map(([params]) => requireRecord(params, "maintenance params"))
+      .find((params) => params.reason === "turn");
+    expect(turnMaintenanceParams).toMatchObject({
+      runtimeSettings: {
+        limits: {
+          promptTokenBudget: 230_000,
+        },
+      },
+    });
+    hoisted.compactionReserveTokens = 1_000;
+    expect(guardParams.midTurnPrecheck?.reserveTokens?.()).toBe(42_000);
+  });
+
+  it("uses one carried settings-level reserve budget across assembly and afterTurn", async () => {
+    const afterTurn = vi.fn(async () => {});
+    const contextEngine = {
+      ...createContextEngineBootstrapAndAssemble(),
+      afterTurn,
+      maintain: true,
+    };
+    hoisted.compactionReserveTokens = 20_000;
+
+    await createContextEngineAttemptRunner({
+      contextEngine,
+      sessionKey,
+      tempPaths,
+      attemptOverrides: {
+        contextWindowInfo: { tokens: 272_000, source: "model" },
+        contextBudget: {
+          contextWindowTokens: 272_000,
+          effectiveReserveTokens: 50_000,
+          usablePromptTokenBudget: 222_000,
+        },
+        prompt: "current prompt",
+        transcriptPrompt: "current prompt",
+        config: {
+          agents: {
+            defaults: {
+              compaction: {
+                mode: "safeguard",
+                midTurnPrecheck: { enabled: true },
+                reserveTokensFloor: 42_000,
+              },
+            },
+          },
+        } as OpenClawConfig,
+      },
+    });
+
+    const assembleParams = mockParams(
+      contextEngine.assemble as MockCallSource,
+      0,
+      "assemble params",
+    );
+    expect(assembleParams.runtimeSettings).toMatchObject({
+      limits: {
+        promptTokenBudget: 222_000,
+        maxOutputTokens: 50_000,
+      },
+    });
+    const afterTurnParams = mockParams(afterTurn, 0, "afterTurn params");
+    expect(afterTurnParams.tokenBudget).toBe(222_000);
+    expect(afterTurnParams.runtimeContext).toMatchObject({
+      tokenBudget: 222_000,
+    });
+    expect(afterTurnParams.runtimeSettings).toMatchObject({
+      limits: {
+        promptTokenBudget: 222_000,
+      },
+    });
+    const turnMaintenanceParams = hoisted.runContextEngineMaintenanceMock.mock.calls
+      .map(([params]) => requireRecord(params, "maintenance params"))
+      .find((params) => params.reason === "turn");
+    expect(turnMaintenanceParams).toMatchObject({
+      runtimeSettings: {
+        limits: {
+          promptTokenBudget: 222_000,
+        },
+      },
+    });
+    const guardParams = mockParams(
+      hoisted.installToolResultContextGuardMock,
+      0,
+      "tool-result guard params",
+    ) as ToolResultGuardInstallParams;
+    expect(guardParams.midTurnPrecheck?.reserveTokens?.()).toBe(50_000);
   });
 
   it("preserves the cacheable prefix while bounding current prompt results", async () => {
@@ -3379,7 +3695,7 @@ describe("runEmbeddedAttempt tool-result guard budget wiring", () => {
       tempPaths,
       sessionMessages,
       attemptOverrides: {
-        contextTokenBudget: 128_000,
+        contextWindowInfo: { tokens: 128_000, source: "model" },
         config: {
           agents: {
             defaults: {
@@ -3473,7 +3789,7 @@ describe("runEmbeddedAttempt tool-result guard budget wiring", () => {
       tempPaths,
       sessionMessages,
       attemptOverrides: {
-        contextTokenBudget: 1_000,
+        contextWindowInfo: { tokens: 1_000, source: "model" },
       },
       sessionPrompt: async (session) => {
         sawPrompt = true;
@@ -3518,7 +3834,7 @@ describe("runEmbeddedAttempt tool-result guard budget wiring", () => {
       tempPaths,
       sessionMessages,
       attemptOverrides: {
-        contextTokenBudget: 1_000,
+        contextWindowInfo: { tokens: 1_000, source: "model" },
       },
       sessionPrompt: async (session) => {
         sawPrompt = true;

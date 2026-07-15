@@ -110,6 +110,7 @@ export function buildContextEngineRuntimeSettings(params: {
     executionHost: {
       id: hostId,
       label: normalizeNullableString(params.contextEngineHost.label),
+      capabilities: [...params.contextEngineHost.capabilities],
     },
     limits: {
       promptTokenBudget: normalizeNullableNumber(params.promptTokenBudget),

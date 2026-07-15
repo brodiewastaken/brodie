@@ -1,4 +1,5 @@
 // Tracks image attachments that belong to the current reply turn.
+import { createHash } from "node:crypto";
 import { mimeTypeFromFilePath } from "@openclaw/media-core/mime";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -15,6 +16,9 @@ import { resolveAgentTurnAttachments } from "./agent-turn-attachments.js";
 
 type CurrentImageAttachment = {
   index: number;
+  externalizationIndex?: number;
+  sourceMessageId?: string;
+  sourceIndex?: number;
   path: string;
   mediaType: string;
 };
@@ -42,50 +46,98 @@ function resolveCurrentImageMediaType(pathValue: unknown, mediaType?: unknown): 
   }
   const normalizedMediaType = normalizeOptionalString(mediaType);
   if (normalizedMediaType?.startsWith("image/")) {
-    return normalizedMediaType;
+    return normalizedMediaType.split(";", 1)[0]?.trim().toLowerCase() === "image/gif"
+      ? undefined
+      : normalizedMediaType;
   }
   if (!isGenericMediaType(normalizedMediaType)) {
     return undefined;
   }
   const inferredType = mimeTypeFromFilePath(mediaPath);
-  return inferredType?.startsWith("image/") ? inferredType : undefined;
+  return inferredType?.startsWith("image/") && inferredType !== "image/gif"
+    ? inferredType
+    : undefined;
 }
 
-function collectCurrentImageAttachments(ctx: MsgContext): CurrentImageAttachment[] {
-  const pathsFromArray = Array.isArray(ctx.MediaPaths) ? ctx.MediaPaths : undefined;
+function collectImageAttachments(params: {
+  pathsValue?: string[];
+  pathValue?: string;
+  typesValue?: string[];
+  typeValue?: string;
+  startIndex: number;
+  sourceMessageIds?: string[];
+  sourceIndexes?: number[];
+  fallbackSourceMessageId?: string;
+  current: boolean;
+}): CurrentImageAttachment[] {
+  const pathsFromArray = Array.isArray(params.pathsValue) ? params.pathsValue : undefined;
   const paths =
     pathsFromArray && pathsFromArray.length > 0
       ? pathsFromArray
-      : normalizeOptionalString(ctx.MediaPath)
-        ? [ctx.MediaPath]
+      : normalizeOptionalString(params.pathValue)
+        ? [params.pathValue]
         : [];
   if (paths.length === 0) {
     return [];
   }
   const types =
-    Array.isArray(ctx.MediaTypes) && ctx.MediaTypes.length === paths.length
-      ? ctx.MediaTypes
+    Array.isArray(params.typesValue) && params.typesValue.length === paths.length
+      ? params.typesValue
       : undefined;
   const attachments: CurrentImageAttachment[] = [];
   for (const [index, pathValue] of paths.entries()) {
     const mediaPath = normalizeOptionalString(pathValue);
-    const mediaType = resolveCurrentImageMediaType(pathValue, types?.[index] ?? ctx.MediaType);
+    const mediaType = resolveCurrentImageMediaType(pathValue, types?.[index] ?? params.typeValue);
     if (mediaPath && mediaType) {
-      attachments.push({ index, path: mediaPath, mediaType });
+      const sourceMessageId = params.sourceMessageIds?.[index] ?? params.fallbackSourceMessageId;
+      attachments.push({
+        index: params.startIndex + attachments.length,
+        ...(params.current ? { externalizationIndex: index } : {}),
+        ...(sourceMessageId ? { sourceMessageId } : {}),
+        ...(sourceMessageId ? { sourceIndex: params.sourceIndexes?.[index] ?? index } : {}),
+        path: mediaPath,
+        mediaType,
+      });
     }
   }
   return attachments;
 }
 
-function collectDescribedImageAttachmentIndexes(ctx: MsgContext): Set<number> {
+function collectCurrentImageAttachments(ctx: MsgContext): CurrentImageAttachment[] {
+  const quoted = collectImageAttachments({
+    pathsValue: ctx.ReplyToMediaPaths,
+    pathValue: ctx.ReplyToMediaPath,
+    typesValue: ctx.ReplyToMediaTypes,
+    typeValue: ctx.ReplyToMediaType,
+    startIndex: 0,
+    fallbackSourceMessageId: ctx.ReplyToIdFull ?? ctx.ReplyToId,
+    current: false,
+  });
+  const current = collectImageAttachments({
+    pathsValue: ctx.MediaPaths,
+    pathValue: ctx.MediaPath,
+    typesValue: ctx.MediaTypes,
+    typeValue: ctx.MediaType,
+    startIndex: quoted.length,
+    sourceMessageIds: ctx.MediaSourceMessageIds,
+    sourceIndexes: ctx.MediaSourceIndexes,
+    fallbackSourceMessageId: ctx.MessageSid,
+    current: true,
+  });
+  return [...quoted, ...current];
+}
+
+function collectExternalizedAttachmentIndexes(ctx: MsgContext): Set<number> {
   return new Set(
-    ctx.MediaUnderstanding?.filter((output) => output.kind === "image.description").map(
-      (output) => output.attachmentIndex,
+    ctx.ExternalFiles?.flatMap((file) =>
+      Number.isSafeInteger(file.attachmentIndex) && file.attachmentIndex >= 0
+        ? [file.attachmentIndex]
+        : [],
     ) ?? [],
   );
 }
 
-function createUndescribedImageContext(
+function createNativeImageContext(
   ctx: MsgContext,
   undescribedAttachments: CurrentImageAttachment[],
 ): MsgContext {
@@ -160,16 +212,30 @@ function resolveMergedTurnImages(entries: OrderedTurnImage[]): {
   };
 }
 
-/** Resolves current-turn image attachments that were not already described by media understanding. */
+/** Resolves current-turn still images that were not externalized as non-native media. */
 export async function resolveCurrentTurnImages(params: {
   ctx: MsgContext;
   cfg: OpenClawConfig;
   images?: ImageContent[];
   imageOrder?: PromptImageOrderEntry[];
   extractedFileImages?: ExtractedFileImage[];
+  maxNativeImages?: number;
+  nativeImageOmissionReason?: "policy_ceiling" | "model_not_image_capable";
 }): Promise<{
   images?: ImageContent[];
   imageOrder?: PromptImageOrderEntry[];
+  nativeImageInputs?: Array<{
+    attachmentIndex: number;
+    sourceMessageId?: string;
+    sourceIndex?: number;
+    contentHash: string;
+  }>;
+  nativeImageOmissions?: Array<{
+    attachmentIndex: number;
+    sourceMessageId?: string;
+    sourceIndex?: number;
+    reason: "policy_ceiling" | "model_not_image_capable";
+  }>;
 }> {
   const entries: OrderedTurnImage[] = [];
   appendOrderedImages({
@@ -189,18 +255,54 @@ export async function resolveCurrentTurnImages(params: {
   if (currentImageAttachments.length === 0) {
     return resolveMergedTurnImages(entries);
   }
-  const describedImageIndexes = collectDescribedImageAttachmentIndexes(params.ctx);
-  const undescribedImageAttachments = currentImageAttachments.filter(
-    (attachment) => !describedImageIndexes.has(attachment.index),
+  const externalizedAttachmentIndexes = collectExternalizedAttachmentIndexes(params.ctx);
+  const nativeImageAttachments = currentImageAttachments.filter(
+    (attachment) =>
+      attachment.externalizationIndex === undefined ||
+      !externalizedAttachmentIndexes.has(attachment.externalizationIndex),
   );
-  if (undescribedImageAttachments.length === 0) {
+  if (nativeImageAttachments.length === 0) {
     return resolveMergedTurnImages(entries);
+  }
+  const maxNativeImages = Math.max(
+    0,
+    Math.min(
+      Math.floor(params.maxNativeImages ?? nativeImageAttachments.length),
+      nativeImageAttachments.length,
+    ),
+  );
+  const retainedNativeImageAttachments = nativeImageAttachments.slice(0, maxNativeImages);
+  const nativeImageOmissions = nativeImageAttachments.slice(maxNativeImages).map((attachment) => {
+    const omission: {
+      attachmentIndex: number;
+      sourceMessageId?: string;
+      sourceIndex?: number;
+      reason: "policy_ceiling" | "model_not_image_capable";
+    } = {
+      attachmentIndex: attachment.index,
+      reason: params.nativeImageOmissionReason ?? "policy_ceiling",
+    };
+    if (attachment.sourceMessageId) {
+      omission.sourceMessageId = attachment.sourceMessageId;
+    }
+    if (attachment.sourceIndex !== undefined) {
+      omission.sourceIndex = attachment.sourceIndex;
+    }
+    return omission;
+  });
+  if (retainedNativeImageAttachments.length === 0) {
+    return {
+      ...resolveMergedTurnImages(entries),
+      ...(nativeImageOmissions.length > 0 ? { nativeImageOmissions } : {}),
+    };
   }
 
   try {
-    // Only send undescribed current images natively; described images already exist as text context.
+    // Still images remain native even when media understanding also supplied a
+    // description. Externalized GIF/video/document indexes are the only ones
+    // removed from the native lane.
     const resolved = await resolveAgentTurnAttachments({
-      ctx: createUndescribedImageContext(params.ctx, undescribedImageAttachments),
+      ctx: createNativeImageContext(params.ctx, retainedNativeImageAttachments),
       cfg: params.cfg,
       includeRecentHistoryImages: false,
     });
@@ -211,9 +313,9 @@ export async function resolveCurrentTurnImages(params: {
         mimeType: attachment.mediaType,
       }),
     );
-    if (images.length < undescribedImageAttachments.length) {
+    if (images.length < retainedNativeImageAttachments.length) {
       logVerbose(
-        `agent-runner: native OpenClaw media resolution produced ${images.length}/${undescribedImageAttachments.length} current image attachment(s); falling back to prompt image refs`,
+        `agent-runner: native OpenClaw media resolution produced ${images.length}/${retainedNativeImageAttachments.length} current image attachment(s); falling back to prompt image refs`,
       );
       return resolveMergedTurnImages(entries);
     }
@@ -221,10 +323,32 @@ export async function resolveCurrentTurnImages(params: {
       appendOrderedImages({
         entries,
         images: [image],
-        sourceIndex: undescribedImageAttachments[index]?.index,
+        sourceIndex: retainedNativeImageAttachments[index]?.index,
       });
     }
-    return resolveMergedTurnImages(entries);
+    return {
+      ...resolveMergedTurnImages(entries),
+      nativeImageInputs: images.map((image, index) => {
+        const attachment = retainedNativeImageAttachments[index]!;
+        const input: {
+          attachmentIndex: number;
+          sourceMessageId?: string;
+          sourceIndex?: number;
+          contentHash: string;
+        } = {
+          attachmentIndex: attachment.index,
+          contentHash: `sha256:${createHash("sha256").update(Buffer.from(image.data, "base64")).digest("hex")}`,
+        };
+        if (attachment.sourceMessageId) {
+          input.sourceMessageId = attachment.sourceMessageId;
+        }
+        if (attachment.sourceIndex !== undefined) {
+          input.sourceIndex = attachment.sourceIndex;
+        }
+        return input;
+      }),
+      ...(nativeImageOmissions.length > 0 ? { nativeImageOmissions } : {}),
+    };
   } catch (error) {
     logVerbose(
       `agent-runner: media attachment image resolution failed, proceeding without native images: ${formatErrorMessage(error)}`,

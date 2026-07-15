@@ -1,7 +1,6 @@
 // Browser tests cover server.agent contract core plugin behavior.
 import fs from "node:fs";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_AI_SNAPSHOT_MAX_CHARS } from "./constants.js";
 import { BROWSER_NAVIGATION_BLOCKED_MESSAGE } from "./errors.js";
 import { ACT_ERROR_CODES } from "./routes/agent.act.errors.js";
 import { isActKind } from "./routes/agent.act.shared.js";
@@ -424,7 +423,6 @@ describe("browser control server", () => {
     expect(pwMocks.snapshotAiViaPlaywright).toHaveBeenCalledWith({
       cdpUrl: state.cdpBaseUrl,
       targetId: "abcd1234",
-      maxChars: DEFAULT_AI_SNAPSHOT_MAX_CHARS,
       ssrfPolicy: {
         dangerouslyAllowPrivateNetwork: true,
       },
@@ -461,6 +459,88 @@ describe("browser control server", () => {
       },
     });
   });
+
+  it.each([
+    { format: "ai", refs: "aria", compact: false },
+    { format: "ai", refs: "aria", compact: true },
+    { format: "ai", refs: "role", compact: false },
+    { format: "ai", refs: "role", compact: true },
+    { format: "aria", refs: "aria", compact: false },
+    { format: "aria", refs: "aria", compact: true },
+    { format: "aria", refs: "role", compact: true },
+    { format: "aria", refs: "role", compact: false },
+  ] as const)(
+    "bounds a large synthetic $format snapshot with refs=$refs compact=$compact",
+    async ({ format, refs, compact }) => {
+      const base = await startServerAndBase();
+      const realFetch = getBrowserTestFetch();
+      const maxChars = 4_000;
+      if (format === "ai") {
+        const lines = Array.from(
+          { length: 2_000 },
+          (_, index) =>
+            `- button "Synthetic result ${index}${index === 0 ? " [ref=e1999]" : ""}" [ref=e${index}]`,
+        );
+        const snapshot = lines.join("\n");
+        const refsById = Object.fromEntries(
+          lines.map((_, index) => [
+            `e${index}`,
+            { role: "button", name: `Synthetic result ${index}` },
+          ]),
+        );
+        pwMocks.snapshotRoleViaPlaywright.mockResolvedValueOnce({
+          snapshot,
+          refs: refsById,
+          stats: {
+            lines: lines.length,
+            chars: snapshot.length,
+            refs: lines.length,
+            interactive: lines.length,
+          },
+        });
+      } else {
+        cdpMocks.snapshotAria.mockResolvedValueOnce({
+          nodes: Array.from({ length: 2_000 }, (_, index) => ({
+            ref: `e${index}`,
+            role: "button",
+            name: `Synthetic result ${index} ${"x".repeat(80)}`,
+            depth: 0,
+          })),
+        });
+      }
+
+      const result = (await realFetch(
+        `${base}/snapshot?format=${format}&refs=${refs}&compact=${compact}&maxChars=${maxChars}`,
+      ).then((response) => response.json())) as {
+        snapshot?: string;
+        nodes?: unknown[];
+        refs?: Record<string, unknown>;
+        stats?: { lines: number; chars: number; refs: number; interactive: number };
+        truncated?: boolean;
+      };
+      const snapshotChars =
+        format === "ai" ? (result.snapshot?.length ?? 0) : JSON.stringify(result.nodes).length;
+
+      expect(result.truncated).toBe(true);
+      expect(snapshotChars).toBeGreaterThan(0);
+      expect(snapshotChars).toBeLessThan(maxChars + 100);
+      expect(JSON.stringify(result).length).toBeLessThan(maxChars * 3);
+      if (format === "ai") {
+        const visibleRefs = Array.from(
+          result.snapshot?.matchAll(/Synthetic result \d+(?: \[ref=e1999\])?" \[ref=(e\d+)\]/gu) ??
+            [],
+          (match) => match[1],
+        );
+        expect(Object.keys(result.refs ?? {})).toEqual(visibleRefs);
+        expect(result.refs).not.toHaveProperty("e1999");
+        expect(result.stats).toMatchObject({
+          lines: result.snapshot?.split("\n").length,
+          chars: result.snapshot?.length,
+          refs: visibleRefs.length,
+        });
+      }
+    },
+  );
 
   it("agent contract: snapshot surfaces pending dialog state without reading the blocked page", async () => {
     const base = await startServerAndBase();

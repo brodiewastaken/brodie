@@ -424,6 +424,7 @@ import {
   collapseDuplicateActiveHumanInboundUserMessage,
   installModelPromptTransform,
   installRuntimeContextMessageForPrompt,
+  ensureRuntimeContextMessageForProvider,
   normalizeCurrentPromptTextForLlmBoundary,
   normalizeMessagesForCurrentPromptBoundary,
   normalizeMessagesForLlmBoundary,
@@ -550,7 +551,10 @@ import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types
 
 type PreflightRecoveryBudgetSnapshot = Pick<
   MidTurnPrecheckRequest,
-  "estimatedPromptTokens" | "promptBudgetBeforeReserve" | "overflowTokens"
+  | "estimatedPromptTokens"
+  | "promptBudgetBeforeReserve"
+  | "overflowTokens"
+  | "toolResultAggregateMaxChars"
 >;
 
 // Carries the measured prompt budget into the outer recovery loop. The synthetic
@@ -561,6 +565,9 @@ function buildPreflightRecoveryBudgetSnapshot(snapshot: PreflightRecoveryBudgetS
     estimatedPromptTokens: snapshot.estimatedPromptTokens,
     promptBudgetBeforeReserve: snapshot.promptBudgetBeforeReserve,
     overflowTokens: snapshot.overflowTokens,
+    ...(snapshot.toolResultAggregateMaxChars !== undefined
+      ? { toolResultAggregateMaxChars: snapshot.toolResultAggregateMaxChars }
+      : {}),
   };
 }
 
@@ -2810,6 +2817,12 @@ export async function runEmbeddedAttempt(
         cfg: params.config,
         agentId: sessionAgentId,
       });
+      const toolResultAggregateMaxCharsForGuard = resolveLiveToolResultAggregateMaxChars({
+        contextWindowTokens: contextTokenBudgetForGuard,
+        perResultMaxChars: toolResultMaxCharsForGuard,
+        cfg: params.config,
+        agentId: sessionAgentId,
+      });
       const midTurnPrecheckEnabled =
         params.config?.agents?.defaults?.compaction?.midTurnPrecheck?.enabled === true;
       let pendingMidTurnPrecheckRequest: MidTurnPrecheckRequest | null = null;
@@ -2824,6 +2837,7 @@ export async function runEmbeddedAttempt(
               contextTokenBudget: contextTokenBudgetForGuard,
               reserveTokens: () => effectiveReserveTokens,
               toolResultMaxChars: toolResultMaxCharsForGuard,
+              toolResultAggregateMaxChars: toolResultAggregateMaxCharsForGuard,
               getSystemPrompt: () => systemPromptText,
               getPrePromptMessageCount: () => prePromptMessageCount,
               getAuthoritativePromptTokens: () => latestContextEngineAssembledTokens,
@@ -4125,6 +4139,7 @@ export async function runEmbeddedAttempt(
               `promptBudgetBeforeReserve=${request.promptBudgetBeforeReserve} ` +
               `overflowTokens=${request.overflowTokens} ` +
               `toolResultReducibleChars=${request.toolResultReducibleChars} ` +
+              `toolResultAggregateMaxChars=${request.toolResultAggregateMaxChars ?? "default"} ` +
               `effectiveReserveTokens=${request.effectiveReserveTokens} ` +
               `prePromptMessageCount=${prePromptMessageCount} ` +
               (extra ? `${extra} ` : "") +
@@ -4142,6 +4157,7 @@ export async function runEmbeddedAttempt(
             sessionManager: activeSessionManager,
             contextWindowTokens: contextTokenBudget,
             maxCharsOverride: toolResultMaxChars,
+            aggregateMaxCharsOverride: request.toolResultAggregateMaxChars,
             sessionFile: params.sessionFile,
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
@@ -4982,11 +4998,14 @@ export async function runEmbeddedAttempt(
             prompt: llmBoundaryPromptForPrecheck,
           });
           let preemptiveCompaction = null;
+          const contextEngineRequestsPromptAdmission =
+            contextEnginePromptAuthority === "assembled_may_overflow" ||
+            contextEnginePromptAuthority === "preassembly_may_overflow";
           const shouldSkipPrecheck =
             skipPromptSubmission ||
             (contextEngineAssemblySucceeded &&
               activeContextEngine?.info.ownsCompaction &&
-              contextEnginePromptAuthority !== "preassembly_may_overflow");
+              !contextEngineRequestsPromptAdmission);
 
           if (shouldSkipPrecheck && !skipPromptSubmission) {
             log.info(
@@ -5055,6 +5074,7 @@ export async function runEmbeddedAttempt(
                 sessionManager: activeSessionManager,
                 contextWindowTokens: contextTokenBudget,
                 maxCharsOverride: toolResultMaxChars,
+                aggregateMaxCharsOverride: preemptiveCompaction.toolResultAggregateMaxChars,
                 sessionFile: params.sessionFile,
                 sessionId: params.sessionId,
                 sessionKey: params.sessionKey,
@@ -5197,7 +5217,10 @@ export async function runEmbeddedAttempt(
                       }
                     }
                   }
-                  providerMessages = interleavedMessages ?? providerMessages;
+                  providerMessages = ensureRuntimeContextMessageForProvider(
+                    interleavedMessages ?? providerMessages,
+                    runtimeContextMessageForCurrentTurn,
+                  );
                   // This provider-dispatch transform marks the current turn sent so late
                   // media appends instead of rewriting its prompt-cache slot (#99495).
                   markSessionUserTurnsSent(sessionPromptState, providerMessages);

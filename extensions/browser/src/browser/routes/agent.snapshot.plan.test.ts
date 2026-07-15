@@ -50,6 +50,17 @@ describe("resolveSnapshotPlan", () => {
     expect(plan.wantsRoleSnapshot).toBe(true);
   });
 
+  it.each(["aria", "role"] as const)("treats refs=%s as a role snapshot feature", (refs) => {
+    const plan = resolveSnapshotPlan({
+      profile: profile("openclaw"),
+      query: { refs },
+      hasPlaywright: true,
+    });
+
+    expect(plan.refsMode).toBe(refs);
+    expect(plan.wantsRoleSnapshot).toBe(true);
+  });
+
   it("parses timeoutMs from the snapshot query string", () => {
     const plan = resolveSnapshotPlan({
       profile: profile("openclaw"),
@@ -104,6 +115,20 @@ describe("resolveSnapshotPlan", () => {
     expect(plan.resolvedMaxChars).toBe(5000);
     expect(plan.depth).toBe(2);
     expect(plan.timeoutMs).toBe(12345);
+  });
+
+  it("preserves an explicit maxChars cap for aria snapshots", () => {
+    const plan = resolveSnapshotPlan({
+      profile: profile("openclaw"),
+      query: {
+        format: "aria",
+        maxChars: "4000",
+      },
+      hasPlaywright: true,
+    });
+
+    expect(plan.format).toBe("aria");
+    expect(plan.resolvedMaxChars).toBe(4000);
   });
 
   it("rejects loose snapshot numeric query tokens", () => {

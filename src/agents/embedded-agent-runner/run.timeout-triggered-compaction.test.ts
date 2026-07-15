@@ -5,10 +5,12 @@ import {
   loadRunOverflowCompactionHarness,
   mockedCompactDirect,
   mockedContextEngine,
+  mockedCreatePreparedEmbeddedAgentSettingsManager,
   mockedGetApiKeyForModel,
   mockedGlobalHookRunner,
   mockedPickFallbackThinkingLevel,
   mockedResolveAuthProfileOrder,
+  mockedResolveContextWindowInfo,
   mockedRunEmbeddedAttempt,
   mockedRunPostCompactionSideEffects,
   overflowBaseRunParams,
@@ -69,6 +71,11 @@ type AttemptParams = {
   sessionId?: string;
   sessionFile?: string;
   authProfileId?: string;
+  contextBudget?: {
+    contextWindowTokens: number;
+    effectiveReserveTokens: number;
+    usablePromptTokenBudget: number;
+  };
 };
 
 type HookEvent = {
@@ -165,7 +172,7 @@ describe("timeout-triggered compaction", () => {
     const compactParams = compactCallAt(0);
     expect(compactParams.sessionId).toBe("test-session");
     expect(compactParams.sessionFile).toBe("/tmp/session.json");
-    expect(compactParams.tokenBudget).toBe(200000);
+    expect(compactParams.tokenBudget).toBe(180000);
     expect(compactParams.force).toBe(true);
     expect(compactParams.compactionTarget).toBe("budget");
     expect(compactParams.runtimeContext?.promptCache?.retention).toBe("short");
@@ -180,6 +187,65 @@ describe("timeout-triggered compaction", () => {
     expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
     expect(result.meta.error).toBeUndefined();
     expect(result.meta.agentMeta?.compactionTokensAfter).toBe(80_000);
+  });
+
+  it("uses the settings-level reserve budget for timeout recovery", async () => {
+    mockedResolveContextWindowInfo.mockReturnValue({
+      tokens: 272_000,
+      source: "model",
+    });
+    mockedCreatePreparedEmbeddedAgentSettingsManager.mockReturnValue({
+      getCompactionReserveTokens: () => 50_000,
+    });
+    mockedRunEmbeddedAttempt
+      .mockResolvedValueOnce(
+        makeAttemptResult({
+          timedOut: true,
+          lastAssistant: {
+            usage: { input: 190_000 },
+          } as never,
+        }),
+      )
+      .mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+    mockedCompactDirect.mockResolvedValueOnce(
+      makeCompactionSuccess({
+        summary: "settings reserve timeout compaction",
+        tokensBefore: 190_000,
+        tokensAfter: 100_000,
+      }),
+    );
+
+    await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      config: {
+        agents: {
+          defaults: {
+            compaction: {
+              reserveTokensFloor: 42_000,
+            },
+          },
+        },
+      },
+      runId: "settings-reserve-shared-timeout-budget",
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(attemptCallAt(0)).toMatchObject({
+      contextBudget: {
+        contextWindowTokens: 272_000,
+        effectiveReserveTokens: 50_000,
+        usablePromptTokenBudget: 222_000,
+      },
+    });
+    expect(compactCallAt(0)).toMatchObject({
+      tokenBudget: 222_000,
+      runtimeSettings: {
+        limits: {
+          promptTokenBudget: 222_000,
+          maxOutputTokens: 50_000,
+        },
+      },
+    });
   });
 
   it("retries the prompt after successful timeout compaction", async () => {
@@ -512,6 +578,7 @@ describe("timeout-triggered compaction", () => {
       compacted: true,
       result: {
         summary: "engine-owned timeout compaction",
+        tokensBefore: 160000,
         tokensAfter: 70,
         sessionId: "rotated-timeout-session",
         sessionFile: "/tmp/rotated-timeout-session.json",
