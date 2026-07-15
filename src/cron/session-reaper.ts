@@ -8,6 +8,10 @@ import {
 import type { CronConfig } from "../config/types.cron.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { isCronRunSessionKey } from "../sessions/session-key-utils.js";
+import {
+  isSessionWorkAdmissionActive,
+  runExclusiveSessionLifecycleMutation,
+} from "../sessions/session-lifecycle-admission.js";
 import type { Logger } from "./service/state.js";
 
 const DEFAULT_RETENTION_MS = 24 * 3_600_000; // 24 hours
@@ -52,6 +56,8 @@ export async function sweepCronRunSessions(params: {
   log: Logger;
   /** Override for testing — skips the min-interval throttle. */
   force?: boolean;
+  /** Test hook for admitting work after selection but before lifecycle locking. */
+  beforeLifecycleMutation?: () => Promise<void>;
 }): Promise<ReaperResult> {
   const now = params.nowMs ?? Date.now();
   const storePath = params.sessionStorePath;
@@ -73,35 +79,79 @@ export async function sweepCronRunSessions(params: {
   let transcriptCleanupError: unknown;
   try {
     const cutoff = now - retentionMs;
-    const removals: SessionEntryLifecycleRemoval[] = [];
+    const candidates: Array<{
+      sessionKey: string;
+      entry: SessionEntryLifecycleRemoval["expectedEntry"];
+    }> = [];
     for (const { sessionKey, entry } of listSessionEntries({ storePath, clone: false })) {
       if (!isCronRunSessionKey(sessionKey)) {
         continue;
       }
       const updatedAt = entry.updatedAt ?? 0;
       if (updatedAt < cutoff) {
-        removals.push({
-          sessionKey,
-          expectedEntry: entry,
-          ...(entry.sessionId ? { expectedSessionId: entry.sessionId } : {}),
-          expectedUpdatedAt: entry.updatedAt,
-          archiveRemovedTranscript: true,
-        });
+        candidates.push({ sessionKey, entry });
       }
     }
-    if (removals.length > 0) {
-      const result = await applySessionEntryLifecycleMutation({
-        storePath,
-        removals,
-        restrictArchivedTranscriptsToStoreDir: true,
-        cleanupArchivedTranscripts: {
-          rules: [{ reason: "deleted", olderThanMs: retentionMs }],
-          nowMs: now,
+    if (candidates.length > 0) {
+      await params.beforeLifecycleMutation?.();
+      await runExclusiveSessionLifecycleMutation({
+        scope: storePath,
+        identities: candidates.flatMap(({ sessionKey, entry }) => [
+          sessionKey,
+          entry?.sessionId,
+          entry?.lifecycleRevision
+            ? `cron-lifecycle-revision:${entry.lifecycleRevision}`
+            : undefined,
+        ]),
+        run: async () => {
+          const freshEntries = new Map(
+            listSessionEntries({ storePath, clone: false }).map(({ sessionKey, entry }) => [
+              sessionKey,
+              entry,
+            ]),
+          );
+          const removals: SessionEntryLifecycleRemoval[] = [];
+          for (const { sessionKey } of candidates) {
+            const entry = freshEntries.get(sessionKey);
+            if (!entry || (entry.updatedAt ?? 0) >= cutoff) {
+              continue;
+            }
+            if (
+              isSessionWorkAdmissionActive(storePath, [
+                sessionKey,
+                entry.sessionId,
+                entry.lifecycleRevision
+                  ? `cron-lifecycle-revision:${entry.lifecycleRevision}`
+                  : undefined,
+              ])
+            ) {
+              continue;
+            }
+            removals.push({
+              sessionKey,
+              expectedEntry: entry,
+              ...(entry.sessionId ? { expectedSessionId: entry.sessionId } : {}),
+              expectedUpdatedAt: entry.updatedAt,
+              archiveRemovedTranscript: true,
+            });
+          }
+          if (removals.length === 0) {
+            return;
+          }
+          const result = await applySessionEntryLifecycleMutation({
+            storePath,
+            removals,
+            restrictArchivedTranscriptsToStoreDir: true,
+            cleanupArchivedTranscripts: {
+              rules: [{ reason: "deleted", olderThanMs: retentionMs }],
+              nowMs: now,
+            },
+            captureArtifactCleanupError: true,
+          });
+          pruned = result.removedEntries;
+          transcriptCleanupError = result.artifactCleanupError;
         },
-        captureArtifactCleanupError: true,
       });
-      pruned = result.removedEntries;
-      transcriptCleanupError = result.artifactCleanupError;
     }
   } catch (err) {
     params.log.warn({ err: String(err) }, "cron-reaper: failed to sweep session store");

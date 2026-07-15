@@ -45,6 +45,11 @@ import {
   normalizeMainKey,
 } from "../../routing/session-key.js";
 import {
+  attachHumanInboundNativeImageInputs,
+  renderHumanInboundBatch,
+} from "../../scheduler/human-inbound.js";
+import { buildQueueBatchIdentity } from "../../scheduler/queue-batch-identity.js";
+import {
   buildPersistedUserTurnMediaInputsFromFields,
   createUserTurnTranscriptRecorder,
   resolvePersistedUserTurnText,
@@ -816,7 +821,7 @@ export async function runPreparedReply(
         shouldApplyStartupContext({ cfg, action: startupAction })
       ? await buildSessionStartupContextPrelude({ workspaceDir, cfg })
       : null;
-  const baseBodyFinal = isBareSessionReset
+  let baseBodyFinal = isBareSessionReset
     ? resetSystemMessage
       ? ""
       : (bareResetPromptState?.prompt ?? "")
@@ -928,7 +933,7 @@ export async function runPreparedReply(
     inboundEventKind,
     sourceReplyDeliveryMode,
   });
-  const effectiveBaseBody = promptEnvelopeBase.effectiveBaseBody;
+  let effectiveBaseBody = promptEnvelopeBase.effectiveBaseBody;
   // A commitment-only wake must not consume the one-shot aborted-run hint;
   // that recovery context belongs to the next normal conversation turn.
   let prefixedBodyBase =
@@ -972,7 +977,7 @@ export async function runPreparedReply(
       prefixedBodyBase = parts.slice(1).join(" ").trim();
     }
   }
-  const prefixedBodyCore = prefixedBodyBase;
+  let prefixedBodyCore = prefixedBodyBase;
   const threadStarterBody = normalizeOptionalString(ctx.ThreadStarterBody);
   const threadHistoryBody = normalizeOptionalString(ctx.ThreadHistoryBody);
   const threadContextNote = threadHistoryBody
@@ -1400,6 +1405,13 @@ export async function runPreparedReply(
     ctx,
     sessionKey,
   });
+  const selectedModelCatalogEntry = thinkingCatalog?.find(
+    (entry) =>
+      normalizeProviderId(entry.provider) === normalizeProviderId(provider) && entry.id === model,
+  );
+  const selectedModelSupportsNativeImages = selectedModelCatalogEntry?.input
+    ? selectedModelCatalogEntry.input.includes("image")
+    : undefined;
   const currentTurnImages = await traceRunPhase("reply.resolve_current_turn_images", () =>
     resolveCurrentTurnImages({
       ctx,
@@ -1407,8 +1419,54 @@ export async function runPreparedReply(
       images: opts?.images,
       imageOrder: opts?.imageOrder,
       extractedFileImages: opts?.extractedFileImages,
+      maxNativeImages:
+        selectedModelSupportsNativeImages === false ? 0 : resetRunPolicy?.maxNativeImages,
+      nativeImageOmissionReason:
+        selectedModelSupportsNativeImages === false ? "model_not_image_capable" : "policy_ceiling",
     }),
   );
+  if (
+    ctx.HumanInboundBatch &&
+    (currentTurnImages.nativeImageInputs?.length || currentTurnImages.nativeImageOmissions?.length)
+  ) {
+    ctx.HumanInboundBatch = attachHumanInboundNativeImageInputs({
+      batch: ctx.HumanInboundBatch,
+      inputs: currentTurnImages.nativeImageInputs ?? [],
+      omissions: currentTurnImages.nativeImageOmissions,
+    });
+    const renderedHumanInbound = renderHumanInboundBatch(ctx.HumanInboundBatch);
+    ctx.Body = renderedHumanInbound;
+    ctx.BodyForAgent = renderedHumanInbound;
+    const previousEffectiveBaseBody = effectiveBaseBody;
+    baseBodyFinal = renderedHumanInbound;
+    effectiveBaseBody = buildReplyPromptEnvelopeBase({
+      ctx,
+      sessionCtx,
+      baseBody: baseBodyFinal,
+      hasUserBody,
+      inboundUserContext,
+      activeGoalContext,
+      inboundUserContextPromptJoiner,
+      isBareSessionReset,
+      startupAction,
+      startupContextPrelude,
+      softResetTail,
+      isHeartbeat,
+      inboundEventKind,
+      sourceReplyDeliveryMode,
+    }).effectiveBaseBody;
+    if (!prefixedBodyCore.includes(previousEffectiveBaseBody)) {
+      throw new Error("native image prompt could not replace the prepared human inbound body");
+    }
+    prefixedBodyCore = prefixedBodyCore.replace(previousEffectiveBaseBody, effectiveBaseBody);
+    ({
+      prefixedCommandBody,
+      queuedBody,
+      transcriptBody,
+      transcriptCommandBody,
+      currentInboundContext,
+    } = await traceRunPhase("reply.rebuild_native_image_prompt", () => rebuildPromptBodies()));
+  }
   // Abort-signal attachment for queued followups:
   // - room_event: always inherit (source admission fence / ambient cancel).
   // - Gateway-owned lifecycle (chat.send): always inherit so Esc can cancel a
@@ -1432,6 +1490,34 @@ export async function runPreparedReply(
     },
     entry: preparedSessionState.sessionEntry,
   });
+  const sourceMessageIds = ctx.MessageSids?.filter((value) => Boolean(value.trim())) ?? [];
+  if (sourceMessageIds.length === 0) {
+    const sourceMessageId = ctx.MessageSidFull ?? ctx.MessageSid;
+    if (sourceMessageId) {
+      sourceMessageIds.push(sourceMessageId);
+    }
+  }
+  const queueBatchIdentity = buildQueueBatchIdentity({
+    routeKey: JSON.stringify([
+      sessionKey ?? preparedSessionState.sessionId,
+      replyRoute.channel ?? "",
+      replyRoute.to ?? "",
+      replyRoute.accountId ?? "",
+      replyRoute.threadId ?? originatingThreadId ?? "",
+    ]),
+    sourceMessageIds,
+    nativeImageCount: currentTurnImages.images?.length ?? 0,
+  });
+  const externalFiles = ctx.ExternalFiles?.map((file) => ({ ...file }));
+  const promptImageRefExclusions = [
+    ...new Set(
+      externalFiles?.flatMap((file) =>
+        [file.mediaRef, file.originalPath, file.url].filter(
+          (value): value is string => typeof value === "string" && value.trim().length > 0,
+        ),
+      ) ?? [],
+    ),
+  ];
   const persistGroupSender = replyRoute.chatType === "group" || replyRoute.chatType === "channel";
   const userTurnMediaForPersistence = buildPersistedUserTurnMediaInputsFromFields(ctx);
   const inputProvenance = ctx.InputProvenance ?? sessionCtx.InputProvenance;
@@ -1467,6 +1553,8 @@ export async function runPreparedReply(
           text: persistedUserTurnText,
           ...(sourceMessage ? { sourceMessage } : {}),
           senderIsOwner: command.senderIsOwner,
+          ...(queueBatchIdentity ? { queueBatchIdentity } : {}),
+          ...(ctx.HumanInboundBatch ? { humanInboundBatch: ctx.HumanInboundBatch } : {}),
           ...(inputProvenance ? { provenance: inputProvenance } : {}),
           ...(userTurnMediaForPersistence.length > 0
             ? {
@@ -1544,6 +1632,9 @@ export async function runPreparedReply(
     enqueuedAt: Date.now(),
     images: currentTurnImages.images,
     imageOrder: currentTurnImages.imageOrder,
+    ...(externalFiles?.length ? { externalFiles } : {}),
+    ...(queueBatchIdentity ? { queueBatchIdentity } : {}),
+    ...(promptImageRefExclusions.length ? { promptImageRefExclusions } : {}),
     // Originating channel for reply routing.
     originatingChannel: replyRoute.channel,
     originatingTo: replyRoute.to,

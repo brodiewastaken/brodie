@@ -311,6 +311,8 @@ describe("runCronIsolatedAgentTurn session identity", () => {
       expect(first.sessionKey).toMatch(/^agent:main:cron:job-1:run:/);
       expect(second.sessionKey).toMatch(/^agent:main:cron:job-1:run:/);
       expect(second.sessionKey).not.toBe(first.sessionKey);
+      expect(first.sessionKey).toBe(`agent:main:cron:job-1:run:${first.sessionId}`);
+      expect(second.sessionKey).toBe(`agent:main:cron:job-1:run:${second.sessionId}`);
     });
   });
 

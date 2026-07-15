@@ -67,6 +67,23 @@ describe("chrome MCP snapshot conversion", () => {
     expect(result.stats.refs).toBe(2);
   });
 
+  it("keeps Chrome MCP refs and stats aligned with bounded text", () => {
+    const full = buildAiSnapshotFromChromeMcpSnapshot({ root: snapshot });
+    const maxChars = full.snapshot.indexOf("\n  - textbox");
+    const result = buildAiSnapshotFromChromeMcpSnapshot({ root: snapshot, maxChars });
+
+    expect(result.truncated).toBe(true);
+    expect(result.snapshot).toContain("[ref=btn-1]");
+    expect(result.snapshot).not.toContain("[ref=txt-1]");
+    expect(result.refs).toEqual({
+      "btn-1": { role: "button", name: "Continue" },
+    });
+    expect(result.stats).toMatchObject({
+      chars: result.snapshot.length,
+      refs: 1,
+    });
+  });
+
   it("does not split a surrogate pair when truncating AI snapshots", () => {
     const prefix = `- button "${"A".repeat(18)}`;
     const result = buildAiSnapshotFromChromeMcpSnapshot({

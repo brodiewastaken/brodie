@@ -5,7 +5,6 @@
  * and compact AI snapshots with stable refs and duplicate tracking.
  */
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { normalizeString } from "../record-shared.js";
 import type { SnapshotAriaNode } from "./client.types.js";
 import {
@@ -13,6 +12,7 @@ import {
   type RoleRefMap,
   type RoleSnapshotOptions,
 } from "./pw-role-snapshot.js";
+import { limitAiSnapshot } from "./snapshot-limit.js";
 import { CONTENT_ROLES, INTERACTIVE_ROLES, STRUCTURAL_ROLES } from "./snapshot-roles.js";
 
 /** Structured snapshot node shape returned by chrome-devtools-mcp. */
@@ -178,17 +178,9 @@ export function buildAiSnapshotFromChromeMcpSnapshot(params: {
     }
   }
 
-  let snapshot = lines.join("\n");
-  let truncated = false;
-  const maxChars =
-    typeof params.maxChars === "number" && Number.isFinite(params.maxChars) && params.maxChars > 0
-      ? Math.floor(params.maxChars)
-      : undefined;
-  if (maxChars && snapshot.length > maxChars) {
-    snapshot = `${truncateUtf16Safe(snapshot, maxChars)}\n\n[...TRUNCATED - page too large]`;
-    truncated = true;
-  }
-
-  const stats = getRoleSnapshotStats(snapshot, refs);
-  return truncated ? { snapshot, truncated, refs, stats } : { snapshot, refs, stats };
+  const snapshot = lines.join("\n");
+  return limitAiSnapshot(
+    { snapshot, refs, stats: getRoleSnapshotStats(snapshot, refs) },
+    params.maxChars,
+  );
 }

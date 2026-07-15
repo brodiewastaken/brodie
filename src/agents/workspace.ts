@@ -12,8 +12,8 @@ import { extractFrontmatterBlock } from "../../packages/markdown-core/src/frontm
 import { resolveLegacyStateDirs, resolveStateDir } from "../config/paths.js";
 import { openRootFile } from "../infra/boundary-file-read.js";
 import { pathExists } from "../infra/fs-safe.js";
-import { replaceFileAtomic } from "../infra/replace-file.js";
 import { retryAsync } from "../infra/retry.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   CANONICAL_ROOT_MEMORY_FILENAME,
   exactWorkspaceEntryExists,
@@ -22,6 +22,12 @@ import { runCommandWithTimeout } from "../process/exec.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
 import { DEFAULT_AGENT_WORKSPACE_DIR } from "./workspace-default.js";
+import {
+  deleteWorkspaceSetupStateRecord,
+  readWorkspaceSetupStateRecord,
+  writeWorkspaceSetupStateRecord,
+  type WorkspaceSetupStateRecord,
+} from "./workspace-state-store.js";
 import {
   resolveWorkspaceTemplateDir,
   resolveWorkspaceTemplateSearchDirs,
@@ -57,6 +63,7 @@ const TRANSIENT_WORKSPACE_READ_ERRNOS = new Set([-11, -4]);
 const TRANSIENT_WORKSPACE_READ_MESSAGE = /Unknown system error -(?:11|4)\b/i;
 
 const workspaceTemplateCache = new Map<string, Promise<string>>();
+const workspaceLog = createSubsystemLogger("workspace");
 let gitAvailabilityPromise: Promise<boolean> | null = null;
 const MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES = 2 * 1024 * 1024;
 
@@ -175,6 +182,8 @@ async function loadTemplate(name: string): Promise<string> {
   }
 }
 
+// Widened with (string & {}) because the identity-bootstrap hook injects
+// arbitrary root markdown files; core names keep autocomplete.
 export type WorkspaceBootstrapFileName =
   | typeof DEFAULT_AGENTS_FILENAME
   | typeof DEFAULT_SOUL_FILENAME
@@ -183,7 +192,8 @@ export type WorkspaceBootstrapFileName =
   | typeof DEFAULT_USER_FILENAME
   | typeof DEFAULT_HEARTBEAT_FILENAME
   | typeof DEFAULT_BOOTSTRAP_FILENAME
-  | typeof DEFAULT_MEMORY_FILENAME;
+  | typeof DEFAULT_MEMORY_FILENAME
+  | (string & {});
 
 export type WorkspaceBootstrapFile = {
   name: string;
@@ -204,11 +214,7 @@ export type ExtraBootstrapLoadDiagnostic = {
   detail: string;
 };
 
-type WorkspaceSetupState = {
-  version: typeof WORKSPACE_STATE_VERSION;
-  bootstrapSeededAt?: string;
-  setupCompletedAt?: string;
-};
+type WorkspaceSetupState = WorkspaceSetupStateRecord;
 type WorkspaceAttestationMarkerStatus = "marker" | "not-marker" | "missing" | "unknown";
 
 /** Set of recognized bootstrap filenames for runtime validation */
@@ -711,22 +717,13 @@ function hasWorkspaceSetupStateMarker(state: WorkspaceSetupState): boolean {
   return Boolean(state.bootstrapSeededAt || state.setupCompletedAt);
 }
 
-function needsWorkspaceSetupStateRewrite(raw: string, state: WorkspaceSetupState): boolean {
-  return (
-    raw.includes('"onboardingCompletedAt"') &&
-    !raw.includes('"setupCompletedAt"') &&
-    Boolean(state.setupCompletedAt)
-  );
-}
-
 async function readWorkspaceSetupStateFile(statePath: string): Promise<{
-  raw: string;
   state: WorkspaceSetupState;
 } | null> {
   try {
     const raw = await fs.readFile(statePath, "utf-8");
     const parsed = parseWorkspaceSetupState(raw);
-    return parsed ? { raw, state: parsed } : null;
+    return parsed ? { state: parsed } : null;
   } catch (err) {
     const anyErr = err as { code?: string };
     if (anyErr.code !== "ENOENT") {
@@ -736,39 +733,52 @@ async function readWorkspaceSetupStateFile(statePath: string): Promise<{
   }
 }
 
+async function readWorkspaceSetupStateMigrationSource(
+  statePath: string,
+): Promise<{ state: WorkspaceSetupState } | null> {
+  try {
+    const source = await readWorkspaceSetupStateFile(statePath);
+    if (source) {
+      return source;
+    }
+    if (await pathExists(statePath)) {
+      workspaceLog.warn(`malformed workspace setup state retained for doctor: ${statePath}`);
+    }
+  } catch (err) {
+    workspaceLog.warn(
+      `unreadable workspace setup state retained for doctor: ${statePath}: ${String(err)}`,
+    );
+  }
+  return null;
+}
+
 async function readWorkspaceSetupStateForDir(
   dir: string,
-  opts?: { persistLegacyMigration?: boolean },
+  _opts?: { persistLegacyMigration?: boolean },
 ): Promise<WorkspaceSetupState> {
   const resolvedDir = resolveUserPath(dir);
   const statePath = resolveWorkspaceStatePath(resolvedDir);
-  const canonical = await readWorkspaceSetupStateFile(statePath);
-  if (canonical) {
-    if (
-      opts?.persistLegacyMigration &&
-      needsWorkspaceSetupStateRewrite(canonical.raw, canonical.state)
-    ) {
-      await writeWorkspaceSetupState(statePath, canonical.state);
-    }
-    return canonical.state;
+  const legacyStatePath = resolveLegacyWorkspaceStatePath(resolvedDir);
+  const [canonical, legacy] = await Promise.all([
+    readWorkspaceSetupStateMigrationSource(statePath),
+    readWorkspaceSetupStateMigrationSource(legacyStatePath),
+  ]);
+  const selectedSource = canonical ?? legacy;
+  if (!selectedSource) {
+    return readWorkspaceSetupStateRecord(resolvedDir) ?? { version: WORKSPACE_STATE_VERSION };
   }
 
-  const legacyStatePath = resolveLegacyWorkspaceStatePath(resolvedDir);
-  let legacy: Awaited<ReturnType<typeof readWorkspaceSetupStateFile>>;
-  try {
-    legacy = await readWorkspaceSetupStateFile(legacyStatePath);
-  } catch {
-    // Legacy state lived under a dot directory that some workspaces reject.
-    // Treat inaccessible legacy metadata as absent so current setup can proceed.
-    legacy = null;
+  // Root canonical state wins over the legacy nested file. The SQLite writer
+  // merges timestamps without downgrading a newer row and verifies the exact
+  // committed result before either valid source is removed.
+  const migrated = await writeWorkspaceSetupState(statePath, selectedSource.state);
+  if (canonical) {
+    await fs.rm(statePath, { force: true });
   }
-  if (!legacy) {
-    return { version: WORKSPACE_STATE_VERSION };
+  if (legacy) {
+    await fs.rm(legacyStatePath, { force: true });
   }
-  if (opts?.persistLegacyMigration && hasWorkspaceSetupStateMarker(legacy.state)) {
-    await writeWorkspaceSetupState(statePath, legacy.state);
-  }
-  return legacy.state;
+  return migrated;
 }
 
 export async function isWorkspaceSetupCompleted(dir: string): Promise<boolean> {
@@ -799,12 +809,8 @@ export async function isWorkspaceBootstrapPending(dir: string): Promise<boolean>
 async function writeWorkspaceSetupState(
   statePath: string,
   state: WorkspaceSetupState,
-): Promise<void> {
-  await replaceFileAtomic({
-    filePath: statePath,
-    content: `${JSON.stringify(state, null, 2)}\n`,
-    tempPrefix: WORKSPACE_STATE_FILENAME,
-  });
+): Promise<WorkspaceSetupState> {
+  return writeWorkspaceSetupStateRecord(path.dirname(statePath), state);
 }
 
 async function hasGitRepo(dir: string): Promise<boolean> {
@@ -875,12 +881,16 @@ export async function ensureAgentWorkspace(params?: {
   const [attestationPath, ...legacyAttestationPaths] = resolveWorkspaceAttestationPaths(dir);
   const attestationPaths = [attestationPath, ...legacyAttestationPaths];
   const recentAttestationPath = await findRecentWorkspaceAttestationPath(attestationPaths);
+  const workspaceExists = await pathExists(dir);
 
-  if (!(await pathExists(dir)) && recentAttestationPath) {
+  if (!workspaceExists && recentAttestationPath) {
     throw new WorkspaceVanishedError({
       workspaceDir: dir,
       attestationPath: recentAttestationPath,
     });
+  }
+  if (!workspaceExists) {
+    deleteWorkspaceSetupStateRecord(dir);
   }
 
   await fs.mkdir(dir, { recursive: true });

@@ -8,21 +8,22 @@ import {
   mergeInboundPathRoots,
 } from "@openclaw/media-core/inbound-path-policy";
 import { detectMime } from "@openclaw/media-core/mime";
+import { MediaUnderstandingSkipError } from "../../packages/media-understanding-common/src/errors.js";
 import { resolveStateDir } from "../config/paths.js";
 import { logVerbose, shouldLogVerbose } from "../globals.js";
+import { isAbortError } from "../infra/abort-signal.js";
 import { FsSafeError, openLocalFileSafely } from "../infra/fs-safe.js";
 import type { SsrFPolicy } from "../infra/net/ssrf.js";
-import { isAbortError } from "../infra/abort-signal.js";
 import {
   readRemoteMediaBuffer,
   type MediaFetchRetryOptions,
   MediaFetchError,
 } from "../media/fetch.js";
 import { getDefaultMediaLocalRoots } from "../media/local-roots.js";
-import { resolveInboundMediaReference } from "../media/media-reference.js";
+import { resolveMediaReferenceLocalPath } from "../media/media-reference.js";
+import { saveMediaBuffer, saveMediaStream } from "../media/store.js";
 import { buildRandomTempFilePath } from "../plugin-sdk/temp-path.js";
 import { normalizeAttachmentPath } from "./attachments.normalize.js";
-import { MediaUnderstandingSkipError } from "../../packages/media-understanding-common/src/errors.js";
 import type { MediaAttachment } from "./types.js";
 
 type MediaBufferResult = {
@@ -35,6 +36,17 @@ type MediaBufferResult = {
 type MediaPathResult = {
   path: string;
   cleanup?: () => Promise<void> | void;
+};
+
+export type PersistedMediaAttachment = {
+  id: string;
+  path: string;
+  size: number;
+  contentType?: string;
+  fileName: string;
+  /** Canonical original source path; never the generated managed-store path. */
+  sourcePath?: string;
+  sourceUrl?: string;
 };
 
 type LocalReadResult = {
@@ -177,13 +189,11 @@ export class MediaAttachmentCache {
           });
           entry.resolvedPath = filePath;
           entry.buffer = buffer;
-          entry.bufferMime =
-            entry.bufferMime ??
-            concreteMime(entry.attachment.mime) ??
-            (await detectMime({
-              buffer,
-              filePath,
-            }));
+          entry.bufferMime ??= await detectMime({
+            buffer,
+            headerMime: concreteMime(entry.attachment.mime),
+            filePath,
+          });
           entry.bufferFileName = path.basename(filePath) || `media-${params.attachmentIndex + 1}`;
           return {
             buffer,
@@ -219,11 +229,14 @@ export class MediaAttachmentCache {
         retry: REMOTE_MEDIA_FETCH_RETRY,
       });
       entry.buffer = fetched.buffer;
+      // readRemoteMediaBuffer returns a byte-sniffed type. It is authoritative
+      // over a channel declaration so a mislabeled GIF cannot enter the native
+      // still-image lane.
       entry.bufferMime =
-        concreteMime(entry.attachment.mime) ??
         fetched.contentType ??
         (await detectMime({
           buffer: fetched.buffer,
+          headerMime: concreteMime(entry.attachment.mime),
           filePath: fetched.fileName ?? url,
         }));
       entry.bufferFileName = fetched.fileName ?? `media-${params.attachmentIndex + 1}`;
@@ -312,6 +325,62 @@ export class MediaAttachmentCache {
     return { path: tmpPath, cleanup: entry.tempCleanup };
   }
 
+  /**
+   * Copies one attachment into the managed inbound store.
+   *
+   * Local sources are opened once, canonicalized and checked against the
+   * configured roots, then streamed from that already-open handle. The media
+   * store enforces maxBytes while writing, closing the stat/copy TOCTOU gap and
+   * avoiding a 512 MiB in-memory buffer for external-file handoff.
+   */
+  async persistToInboundStore(params: {
+    attachmentIndex: number;
+    maxBytes: number;
+    timeoutMs: number;
+  }): Promise<PersistedMediaAttachment> {
+    const entry = await this.ensureEntry(params.attachmentIndex);
+    const url = entry.attachment.url?.trim();
+
+    if (entry.resolvedPath) {
+      try {
+        return await this.persistAllowedLocalAttachment({ entry, maxBytes: params.maxBytes, url });
+      } catch (err) {
+        if (
+          !(err instanceof MediaUnderstandingSkipError) ||
+          !url ||
+          (err.reason !== "blocked" && err.reason !== "empty")
+        ) {
+          throw err;
+        }
+      }
+    }
+
+    if (!url) {
+      throw new MediaUnderstandingSkipError(
+        "empty",
+        `Attachment ${params.attachmentIndex + 1} has no path or URL.`,
+      );
+    }
+    const bufferResult = await this.getBuffer({
+      attachmentIndex: params.attachmentIndex,
+      maxBytes: params.maxBytes,
+      timeoutMs: params.timeoutMs,
+    });
+    const saved = await saveMediaBuffer(
+      bufferResult.buffer,
+      bufferResult.mime,
+      "inbound",
+      params.maxBytes,
+      bufferResult.fileName,
+      url,
+    );
+    return {
+      ...saved,
+      fileName: bufferResult.fileName,
+      sourceUrl: url,
+    };
+  }
+
   /** Removes temporary files created by `getPath`; callers should run this after provider use. */
   async cleanup(): Promise<void> {
     const cleanups: Promise<void>[] = [];
@@ -343,14 +412,103 @@ export class MediaAttachmentCache {
     return entry;
   }
 
+  private async persistAllowedLocalAttachment(params: {
+    entry: AttachmentCacheEntry;
+    maxBytes: number;
+    url?: string;
+  }): Promise<PersistedMediaAttachment> {
+    const { entry } = params;
+    const currentPath = entry.resolvedPath;
+    if (!currentPath) {
+      throw new MediaUnderstandingSkipError(
+        "empty",
+        `Attachment ${entry.attachment.index + 1} has no local path.`,
+      );
+    }
+    // `entry.resolvedPath` may already be canonical (for example `/private/tmp`
+    // after a provider read) while the configured root uses an equivalent
+    // symlinked spelling (`/tmp`). Check against the merged lexical + canonical
+    // root set so a second, safe use of the same entry is not rejected.
+    const canonicalRoots = await this.getCanonicalLocalPathRoots();
+    if (!isInboundPathAllowed({ filePath: currentPath, roots: canonicalRoots })) {
+      entry.resolvedPath = undefined;
+      throw new MediaUnderstandingSkipError(
+        "blocked",
+        `Attachment ${entry.attachment.index + 1} path is outside allowed roots.`,
+      );
+    }
+
+    let opened: Awaited<ReturnType<typeof openLocalFileSafely>> | undefined;
+    try {
+      opened = await openLocalFileSafely({ filePath: currentPath });
+      if (!isInboundPathAllowed({ filePath: opened.realPath, roots: canonicalRoots })) {
+        entry.resolvedPath = undefined;
+        throw new MediaUnderstandingSkipError(
+          "blocked",
+          `Attachment ${entry.attachment.index + 1} path is outside allowed roots.`,
+        );
+      }
+      if (opened.stat.size > params.maxBytes) {
+        throw new MediaUnderstandingSkipError(
+          "maxBytes",
+          `Attachment ${entry.attachment.index + 1} exceeds maxBytes ${params.maxBytes}`,
+        );
+      }
+
+      entry.resolvedPath = opened.realPath;
+      entry.statSize = opened.stat.size;
+      const fileName = entry.bufferFileName ?? path.basename(opened.realPath);
+      const saved = await saveMediaStream(
+        opened.handle.createReadStream({ autoClose: false }),
+        entry.bufferMime ?? concreteMime(entry.attachment.mime),
+        "inbound",
+        params.maxBytes,
+        fileName,
+        opened.realPath,
+      );
+      return {
+        ...saved,
+        fileName,
+        sourcePath: opened.realPath,
+        ...(params.url ? { sourceUrl: params.url } : {}),
+      };
+    } catch (err) {
+      if (err instanceof MediaUnderstandingSkipError) {
+        throw err;
+      }
+      if (err instanceof FsSafeError) {
+        entry.resolvedPath = undefined;
+        if (err.code === "not-file" || err.code === "not-found") {
+          throw new MediaUnderstandingSkipError(
+            "empty",
+            `Attachment ${entry.attachment.index + 1} path is not a regular file.`,
+          );
+        }
+        throw new MediaUnderstandingSkipError(
+          "blocked",
+          `Attachment ${entry.attachment.index + 1} path is outside allowed roots.`,
+        );
+      }
+      throw err;
+    } finally {
+      await opened?.handle.close().catch(() => {});
+    }
+  }
+
   private async resolveLocalPath(attachment: MediaAttachment): Promise<string | undefined> {
     const rawPath = normalizeAttachmentPath(attachment.path);
     if (!rawPath) {
       return undefined;
     }
-    const inboundReference = await resolveInboundMediaReference(rawPath).catch(() => null);
-    if (inboundReference) {
-      return inboundReference.physicalPath;
+    if (/^media:\/\//i.test(rawPath)) {
+      try {
+        return await resolveMediaReferenceLocalPath(rawPath);
+      } catch (err) {
+        throw new MediaUnderstandingSkipError(
+          "blocked",
+          `Attachment ${attachment.index + 1} has an invalid managed-media reference: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     if (this.workspaceDir) {
       return path.resolve(this.workspaceDir, rawPath);
@@ -362,10 +520,7 @@ export class MediaAttachmentCache {
         return usableCwdCandidate;
       }
       const stateCandidate = path.resolve(resolveStateDir(), rawPath);
-      const usableStateCandidate = resolveUsableLocalCandidate(
-        stateCandidate,
-        this.localPathRoots,
-      );
+      const usableStateCandidate = resolveUsableLocalCandidate(stateCandidate, this.localPathRoots);
       if (usableStateCandidate) {
         return usableStateCandidate;
       }
@@ -377,20 +532,18 @@ export class MediaAttachmentCache {
     if (!entry.resolvedPath) {
       return undefined;
     }
-    if (!isInboundPathAllowed({ filePath: entry.resolvedPath, roots: this.localPathRoots })) {
-      const canonicalRoots = await this.getCanonicalLocalPathRoots();
-      if (!isInboundPathAllowed({ filePath: entry.resolvedPath, roots: canonicalRoots })) {
-        entry.resolvedPath = undefined;
-        if (shouldLogVerbose()) {
-          logVerbose(
-            `Blocked attachment path outside allowed roots: ${entry.attachment.path ?? entry.attachment.url ?? "(unknown)"}`,
-          );
-        }
-        throw new MediaUnderstandingSkipError(
-          "blocked",
-          `Attachment ${entry.attachment.index + 1} path is outside allowed roots.`,
+    const canonicalRoots = await this.getCanonicalLocalPathRoots();
+    if (!isInboundPathAllowed({ filePath: entry.resolvedPath, roots: canonicalRoots })) {
+      entry.resolvedPath = undefined;
+      if (shouldLogVerbose()) {
+        logVerbose(
+          `Blocked attachment path outside allowed roots: ${entry.attachment.path ?? entry.attachment.url ?? "(unknown)"}`,
         );
       }
+      throw new MediaUnderstandingSkipError(
+        "blocked",
+        `Attachment ${entry.attachment.index + 1} path is outside allowed roots.`,
+      );
     }
     if (entry.statSize !== undefined) {
       return entry.statSize;
@@ -398,12 +551,9 @@ export class MediaAttachmentCache {
     try {
       const currentPath = entry.resolvedPath;
       const opened = await openLocalFileSafely({ filePath: currentPath });
-      let canonicalRoots: readonly string[];
-      try {
-        canonicalRoots = await this.getCanonicalLocalPathRoots();
-      } finally {
-        await opened.handle.close().catch(() => {});
-      }
+      await opened.handle.close().catch(() => {});
+      // Retain the post-open containment check to defend path replacement
+      // between the initial spelling check and the safe open.
       if (!isInboundPathAllowed({ filePath: opened.realPath, roots: canonicalRoots })) {
         entry.resolvedPath = undefined;
         if (shouldLogVerbose()) {

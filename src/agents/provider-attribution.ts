@@ -11,7 +11,10 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { normalizeTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
-import { listOpenClawPluginManifestMetadata } from "../plugins/manifest-metadata-scan.js";
+import {
+  resolveOpenClawPluginManifestMetadataSnapshot,
+  type PluginManifestMetadataRecord,
+} from "../plugins/manifest-metadata-scan.js";
 import { listOfficialExternalProviderEndpointManifests } from "../plugins/official-external-provider-endpoints.js";
 import { asBoolean } from "../utils/boolean.js";
 import type { RuntimeVersionEnv } from "../version.js";
@@ -190,8 +193,12 @@ type ManifestProviderRequestCacheEntry = {
   compatibilityFamily?: ProviderRequestCompatibilityFamily;
   supportsOpenAICompletionsStreamingUsageCompat?: boolean;
 };
-let manifestProviderEndpointCache: ManifestProviderEndpointCacheEntry[] | null = null;
-let manifestProviderRequestCache: Map<string, ManifestProviderRequestCacheEntry> | null = null;
+let manifestProviderEndpointCache:
+  | { key: string; entries: ManifestProviderEndpointCacheEntry[] }
+  | undefined;
+let manifestProviderRequestCache:
+  | { key: string; entries: Map<string, ManifestProviderRequestCacheEntry> }
+  | undefined;
 
 function formatOpenClawUserAgent(version: string): string {
   return `${OPENCLAW_ATTRIBUTION_ORIGINATOR}/${version}`;
@@ -329,9 +336,11 @@ function readManifestProviderRequests(
   return entries;
 }
 
-function collectManifestProviderEndpoints(): ManifestProviderEndpointCacheEntry[] {
+function collectManifestProviderEndpoints(
+  records: readonly PluginManifestMetadataRecord[],
+): ManifestProviderEndpointCacheEntry[] {
   const entries: ManifestProviderEndpointCacheEntry[] = [];
-  for (const { manifest } of listOpenClawPluginManifestMetadata()) {
+  for (const { manifest } of records) {
     entries.push(...readManifestProviderEndpoints(manifest));
   }
   // Externalized official provider plugins are excluded from dist builds, so
@@ -345,9 +354,11 @@ function collectManifestProviderEndpoints(): ManifestProviderEndpointCacheEntry[
   return entries;
 }
 
-function collectManifestProviderRequests(): Map<string, ManifestProviderRequestCacheEntry> {
+function collectManifestProviderRequests(
+  records: readonly PluginManifestMetadataRecord[],
+): Map<string, ManifestProviderRequestCacheEntry> {
   const entries = new Map<string, ManifestProviderRequestCacheEntry>();
-  for (const { manifest } of listOpenClawPluginManifestMetadata()) {
+  for (const { manifest } of records) {
     for (const [provider, request] of readManifestProviderRequests(manifest)) {
       entries.set(provider, request);
     }
@@ -356,17 +367,25 @@ function collectManifestProviderRequests(): Map<string, ManifestProviderRequestC
 }
 
 function loadManifestProviderEndpointCache(): ManifestProviderEndpointCacheEntry[] {
-  if (!manifestProviderEndpointCache) {
-    manifestProviderEndpointCache = collectManifestProviderEndpoints();
+  const snapshot = resolveOpenClawPluginManifestMetadataSnapshot();
+  if (manifestProviderEndpointCache?.key !== snapshot.key) {
+    manifestProviderEndpointCache = {
+      key: snapshot.key,
+      entries: collectManifestProviderEndpoints(snapshot.records),
+    };
   }
-  return manifestProviderEndpointCache;
+  return manifestProviderEndpointCache.entries;
 }
 
 function loadManifestProviderRequestCache(): Map<string, ManifestProviderRequestCacheEntry> {
-  if (!manifestProviderRequestCache) {
-    manifestProviderRequestCache = collectManifestProviderRequests();
+  const snapshot = resolveOpenClawPluginManifestMetadataSnapshot();
+  if (manifestProviderRequestCache?.key !== snapshot.key) {
+    manifestProviderRequestCache = {
+      key: snapshot.key,
+      entries: collectManifestProviderRequests(snapshot.records),
+    };
   }
-  return manifestProviderRequestCache;
+  return manifestProviderRequestCache.entries;
 }
 
 function resolveManifestProviderRequest(

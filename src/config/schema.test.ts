@@ -144,6 +144,19 @@ describe("config schema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts stable QMD path and session collection names", () => {
+    const result = OpenClawSchema.safeParse({
+      memory: {
+        backend: "qmd",
+        qmd: {
+          paths: [{ path: "/workspace", name: "brodie-workspace", preserveName: true }],
+          sessions: { enabled: true, name: "brodie-sessions" },
+        },
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("accepts queued status reaction emoji overrides", () => {
     const result = OpenClawSchema.safeParse({
       messages: {

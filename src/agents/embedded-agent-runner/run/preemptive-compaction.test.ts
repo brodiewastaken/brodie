@@ -10,6 +10,7 @@ let estimateLlmBoundaryTokenPressure: typeof import("./preemptive-compaction.js"
 let buildPrePromptContextBudgetStatus: typeof import("./preemptive-compaction.js").buildPrePromptContextBudgetStatus;
 let estimateRenderedLlmBoundaryTokenPressure: typeof import("./preemptive-compaction.js").estimateRenderedLlmBoundaryTokenPressure;
 let formatPrePromptPrecheckLog: typeof import("./preemptive-compaction.js").formatPrePromptPrecheckLog;
+let resolveUsablePromptTokenBudget: typeof import("./preemptive-compaction.js").resolveUsablePromptTokenBudget;
 let shouldPreemptivelyCompactBeforePrompt: typeof import("./preemptive-compaction.js").shouldPreemptivelyCompactBeforePrompt;
 
 beforeAll(async () => {
@@ -22,6 +23,7 @@ beforeAll(async () => {
     buildPrePromptContextBudgetStatus,
     estimateRenderedLlmBoundaryTokenPressure,
     formatPrePromptPrecheckLog,
+    resolveUsablePromptTokenBudget,
     shouldPreemptivelyCompactBeforePrompt,
   } = await import("./preemptive-compaction.js"));
 });
@@ -329,6 +331,19 @@ describe("preemptive-compaction", () => {
     expect(result.promptBudgetBeforeReserve).toBe(168_000);
     expect(result.route).not.toBe("fits");
     expect(result.overflowTokens).toBeGreaterThan(0);
+  });
+
+  it("resolves one 230k usable budget for a 272k window with a 42k reserve", () => {
+    expect(
+      resolveUsablePromptTokenBudget({
+        contextTokenBudget: 272_000,
+        reserveTokens: 42_000,
+      }),
+    ).toEqual({
+      contextTokenBudget: 272_000,
+      effectiveReserveTokens: 42_000,
+      usablePromptTokenBudget: 230_000,
+    });
   });
 
   it("caps reserve tokens so small context models keep usable prompt budget", () => {

@@ -3,12 +3,13 @@
 import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fsSafe from "../infra/fs-safe.js";
+import { saveMediaBuffer } from "../media/store.js";
 import { withTempDir } from "../test-helpers/temp-dir.js";
 import { captureEnv, setTestEnvValue } from "../test-utils/env.js";
 import { withFetchPreconnect } from "../test-utils/fetch-mock.js";
-import { saveMediaBuffer } from "../media/store.js";
 import { MediaAttachmentCache } from "./attachments.js";
 import { normalizeMediaUnderstandingChatType, resolveMediaUnderstandingScope } from "./scope.js";
 
@@ -146,6 +147,96 @@ describe("media understanding attachments SSRF", () => {
     });
   });
 
+  it("copies an allowed local attachment into the managed inbound store", async () => {
+    await withTempDir({ prefix: "openclaw-media-cache-persist-" }, async (base) => {
+      const stateDir = path.join(base, "state");
+      const allowedRoot = path.join(base, "allowed");
+      const attachmentPath = path.join(allowedRoot, "report.txt");
+      await fs.mkdir(allowedRoot, { recursive: true });
+      await fs.writeFile(attachmentPath, "safe-copy");
+      setTestEnvValue("OPENCLAW_STATE_DIR", stateDir);
+      const cache = new MediaAttachmentCache(
+        [{ index: 0, path: attachmentPath, mime: "text/plain" }],
+        { localPathRoots: [allowedRoot] },
+      );
+
+      const persisted = await cache.persistToInboundStore({
+        attachmentIndex: 0,
+        maxBytes: 9,
+        timeoutMs: 1000,
+      });
+
+      expect(persisted.path).not.toBe(attachmentPath);
+      expect(persisted.path).toContain(path.join(stateDir, "media", "inbound"));
+      expect(persisted.sourcePath).toBe(await fs.realpath(attachmentPath));
+      await expect(fs.readFile(persisted.path, "utf8")).resolves.toBe("safe-copy");
+    });
+  });
+
+  it("resolves media:// inbound references before performing the safe managed copy", async () => {
+    await withTempDir({ prefix: "openclaw-media-cache-managed-ref-" }, async (base) => {
+      const stateDir = path.join(base, "state");
+      const sourcePath = path.join(stateDir, "media", "inbound", "managed.pdf");
+      await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+      await fs.writeFile(sourcePath, "managed-media");
+      setTestEnvValue("OPENCLAW_STATE_DIR", stateDir);
+      const cache = new MediaAttachmentCache(
+        [{ index: 0, path: "media://inbound/managed.pdf", mime: "application/pdf" }],
+        { localPathRoots: [path.dirname(sourcePath)] },
+      );
+
+      const persisted = await cache.persistToInboundStore({
+        attachmentIndex: 0,
+        maxBytes: 13,
+        timeoutMs: 1000,
+      });
+
+      expect(persisted.sourcePath).toBe(await fs.realpath(sourcePath));
+      expect(persisted.path).not.toBe(sourcePath);
+      await expect(fs.readFile(persisted.path, "utf8")).resolves.toBe("managed-media");
+    });
+  });
+
+  it("rejects cross-bucket managed-media references", async () => {
+    const cache = new MediaAttachmentCache([
+      { index: 0, path: "media://outbound/secret.pdf", mime: "application/pdf" },
+    ]);
+
+    await expect(
+      cache.persistToInboundStore({ attachmentIndex: 0, maxBytes: 1024, timeoutMs: 1000 }),
+    ).rejects.toThrow(/invalid managed-media reference|unsupported media URI location/i);
+  });
+
+  it("enforces the persistence cap while streaming an opened local file", async () => {
+    await withTempDir({ prefix: "openclaw-media-cache-stream-cap-" }, async (base) => {
+      const stateDir = path.join(base, "state");
+      const allowedRoot = path.join(base, "allowed");
+      const attachmentPath = path.join(allowedRoot, "growing.bin");
+      await fs.mkdir(allowedRoot, { recursive: true });
+      await fs.writeFile(attachmentPath, "tiny");
+      setTestEnvValue("OPENCLAW_STATE_DIR", stateDir);
+      const canonicalAttachmentPath = await fs.realpath(attachmentPath);
+      const originalOpen = fs.open.bind(fs);
+      vi.spyOn(fs, "open").mockImplementation(async (filePath, flags) => {
+        const handle = await originalOpen(filePath, flags);
+        const candidatePath = await fs.realpath(String(filePath)).catch(() => String(filePath));
+        if (candidatePath === canonicalAttachmentPath) {
+          handle.createReadStream = (() =>
+            Readable.from([Buffer.alloc(4), Buffer.alloc(1)])) as typeof handle.createReadStream;
+        }
+        return handle;
+      });
+      const cache = new MediaAttachmentCache([{ index: 0, path: attachmentPath }], {
+        localPathRoots: [allowedRoot],
+      });
+
+      await expect(
+        cache.persistToInboundStore({ attachmentIndex: 0, maxBytes: 4, timeoutMs: 1000 }),
+      ).rejects.toThrow(/exceeds 0MB limit/i);
+      expect(await fs.readdir(path.join(stateDir, "media", "inbound")).catch(() => [])).toEqual([]);
+    });
+  });
+
   it("resolves relative attachment paths against the provided workspaceDir", async () => {
     await withTempDir({ prefix: "openclaw-media-cache-workspace-" }, async (base) => {
       const workspaceDir = path.join(base, "workspace");
@@ -188,11 +279,7 @@ describe("media understanding attachments SSRF", () => {
   it("resolves managed inbound media URI attachments", async () => {
     await withTempDir({ prefix: "openclaw-media-cache-managed-inbound-" }, async (stateDir) => {
       setTestEnvValue("OPENCLAW_STATE_DIR", stateDir);
-      const saved = await saveMediaBuffer(
-        Buffer.from("managed-media"),
-        "text/plain",
-        "inbound",
-      );
+      const saved = await saveMediaBuffer(Buffer.from("managed-media"), "text/plain", "inbound");
 
       const cache = new MediaAttachmentCache(
         [{ index: 0, path: `media://inbound/${encodeURIComponent(saved.id)}` }],
@@ -209,11 +296,13 @@ describe("media understanding attachments SSRF", () => {
   });
 
   it("blocks nested managed inbound media URI attachments", async () => {
-    const cache = new MediaAttachmentCache([{ index: 0, path: "media://inbound/nested%2Ffile.pdf" }]);
+    const cache = new MediaAttachmentCache([
+      { index: 0, path: "media://inbound/nested%2Ffile.pdf" },
+    ]);
 
     await expect(
       cache.getBuffer({ attachmentIndex: 0, maxBytes: 1024, timeoutMs: 1000 }),
-    ).rejects.toThrow(/outside allowed roots/i);
+    ).rejects.toThrow(/invalid managed-media reference/i);
   });
 
   it("keeps cwd-relative fallback when a state-relative candidate does not exist", async () => {
@@ -327,9 +416,19 @@ describe("media understanding attachments SSRF", () => {
       const cache = new MediaAttachmentCache([{ index: 0, path: symlinkPath }], {
         localPathRoots: [allowedRoot],
       });
+      const persistCache = new MediaAttachmentCache([{ index: 0, path: symlinkPath }], {
+        localPathRoots: [allowedRoot],
+      });
 
       await expect(
         cache.getBuffer({ attachmentIndex: 0, maxBytes: 1024, timeoutMs: 1000 }),
+      ).rejects.toThrow(/outside allowed roots/i);
+      await expect(
+        persistCache.persistToInboundStore({
+          attachmentIndex: 0,
+          maxBytes: 1024,
+          timeoutMs: 1000,
+        }),
       ).rejects.toThrow(/outside allowed roots/i);
     });
   });

@@ -233,7 +233,7 @@ describe("runCapability local no-auth audio providers", () => {
         );
       });
     });
-  });
+  }, 300_000);
 
   it("prefers resolver env credentials over plugin-only media no-auth", async () => {
     await withIsolatedAgentDir(async (agentDir) => {

@@ -61,17 +61,18 @@ export function resolveSnapshotPlan(params: {
   const hasMaxChars = Object.hasOwn(params.query, "maxChars");
   const maxCharsRaw = parseStrictNonNegativeInteger(params.query.maxChars);
   const maxChars = maxCharsRaw !== undefined && maxCharsRaw > 0 ? maxCharsRaw : undefined;
-  const resolvedMaxChars =
-    format === "ai"
-      ? hasMaxChars
-        ? maxCharsRaw === undefined
-          ? mode === "efficient"
-            ? DEFAULT_AI_SNAPSHOT_EFFICIENT_MAX_CHARS
-            : DEFAULT_AI_SNAPSHOT_MAX_CHARS
-          : maxChars
-        : mode === "efficient"
+  const resolvedMaxChars = hasMaxChars
+    ? maxCharsRaw === undefined
+      ? format === "ai"
+        ? mode === "efficient"
           ? DEFAULT_AI_SNAPSHOT_EFFICIENT_MAX_CHARS
           : DEFAULT_AI_SNAPSHOT_MAX_CHARS
+        : undefined
+      : maxChars
+    : format === "ai"
+      ? mode === "efficient"
+        ? DEFAULT_AI_SNAPSHOT_EFFICIENT_MAX_CHARS
+        : DEFAULT_AI_SNAPSHOT_MAX_CHARS
       : undefined;
   const interactiveRaw = toBoolean(params.query.interactive);
   const compactRaw = toBoolean(params.query.compact);
@@ -107,6 +108,7 @@ export function resolveSnapshotPlan(params: {
       labels === true ||
       urls === true ||
       mode === "efficient" ||
+      refsMode !== undefined ||
       interactive === true ||
       compact === true ||
       depth !== undefined ||

@@ -1148,9 +1148,9 @@ export function buildContextEngineBinding(
       ownsCompaction: contextEngine.info.ownsCompaction === true,
       turnMaintenanceMode: contextEngine.info.turnMaintenanceMode,
       citationsMode: resolveContextEngineCitationsMode(params.config),
-      contextTokenBudget: params.contextTokenBudget,
+      contextTokenBudget: params.contextBudget?.contextWindowTokens,
       projectionMaxChars: resolveCodexContextEngineProjectionMaxChars({
-        contextTokenBudget: params.contextTokenBudget,
+        contextTokenBudget: params.contextBudget?.contextWindowTokens,
         reserveTokens: resolveCodexContextEngineProjectionReserveTokens({
           config: params.config,
         }),

@@ -13,6 +13,7 @@ let embeddedAgentBaseStreamFnCache = new WeakMap<object, StreamFn | undefined>()
 let openClawNativeCodexResponsesStreamFnForTest: StreamFn | undefined;
 
 type EmbeddedStreamOptions = Parameters<StreamFn>[2] & {
+  authMode?: string;
   authProfileId?: string;
   promptCacheKey?: string;
 };
@@ -123,6 +124,7 @@ export function resolveEmbeddedAgentStreamFn(params: {
   signal?: AbortSignal;
   model: EmbeddedRunAttemptParams["model"];
   resolvedApiKey?: string;
+  resolvedAuthMode?: string;
   authProfileId?: string;
   authStorage?: { getApiKey(provider: string): Promise<string | undefined> };
 }): StreamFn {
@@ -130,6 +132,7 @@ export function resolveEmbeddedAgentStreamFn(params: {
     return wrapEmbeddedAgentStreamFn(params.providerStreamFn, {
       runSignal: params.signal,
       resolvedApiKey: params.resolvedApiKey,
+      resolvedAuthMode: params.resolvedAuthMode,
       authProfileId: params.authProfileId,
       authStorage: params.authStorage,
       providerId: params.model.provider,
@@ -157,6 +160,7 @@ export function resolveEmbeddedAgentStreamFn(params: {
     return wrapEmbeddedAgentStreamFn(openClawNativeCodexResponsesStreamFn, {
       runSignal: params.signal,
       resolvedApiKey: params.resolvedApiKey,
+      resolvedAuthMode: params.resolvedAuthMode,
       authProfileId: params.authProfileId,
       authStorage: params.authStorage,
       providerId: params.model.provider,
@@ -199,6 +203,7 @@ export function resolveEmbeddedAgentStreamFn(params: {
       return wrapEmbeddedAgentStreamFn(boundaryAwareStreamFn, {
         runSignal: params.signal,
         resolvedApiKey: params.resolvedApiKey,
+        resolvedAuthMode: params.resolvedAuthMode,
         authProfileId: params.authProfileId,
         authStorage: params.authStorage,
         providerId: params.model.provider,
@@ -214,6 +219,7 @@ export function resolveEmbeddedAgentStreamFn(params: {
   return wrapEmbeddedAgentStreamFn(currentStreamFn, {
     runSignal: params.signal,
     resolvedApiKey: undefined,
+    resolvedAuthMode: undefined,
     authProfileId: undefined,
     authStorage: undefined,
     providerId: params.model.provider,
@@ -235,6 +241,7 @@ function wrapEmbeddedAgentStreamFn(
   params: {
     runSignal: AbortSignal | undefined;
     resolvedApiKey: string | undefined;
+    resolvedAuthMode: string | undefined;
     authProfileId: string | undefined;
     authStorage: { getApiKey(provider: string): Promise<string | undefined> } | undefined;
     providerId: string;
@@ -258,6 +265,12 @@ function wrapEmbeddedAgentStreamFn(
     }
     if (params.authProfileId && !merged?.authProfileId) {
       merged = { ...merged, authProfileId: params.authProfileId };
+    }
+    // Auth-profile-resolved credentials do not always reveal their tier in the
+    // token shape; provider transports need the mode for OAuth-only behavior
+    // (beta headers, service_tier suppression).
+    if (params.resolvedAuthMode && !merged?.authMode) {
+      merged = { ...merged, authMode: params.resolvedAuthMode };
     }
     return signal ? { ...merged, signal } : merged;
   };

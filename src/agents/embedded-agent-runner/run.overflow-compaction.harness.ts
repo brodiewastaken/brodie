@@ -4,6 +4,7 @@
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { type Mock, vi } from "vitest";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
+import type { CompactResult } from "../../context-engine/types.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import type {
   PluginHookBeforeAgentFinalizeEvent,
@@ -25,32 +26,7 @@ import type { EmbeddedRunAttemptResult } from "./run/types.js";
 
 // Shared Vitest harness for overflow, compaction, failover, and hook tests.
 // Tests import these mocks directly so each scenario can override one seam.
-type MockCompactionResult =
-  | {
-      ok: true;
-      compacted: true;
-      result: {
-        summary: string;
-        firstKeptEntryId?: string;
-        tokensBefore?: number;
-        tokensAfter?: number;
-        sessionId?: string;
-        sessionFile?: string;
-      };
-      reason?: string;
-    }
-  | {
-      ok: false;
-      compacted: false;
-      reason: string;
-      result?: undefined;
-    }
-  | {
-      ok: true;
-      compacted: false;
-      reason: string;
-      result?: undefined;
-    };
+type MockCompactionResult = CompactResult;
 
 type MockResolvedModel = {
   id: string;
@@ -118,6 +94,31 @@ export const mockedCompactDirect = mockedContextEngine.compact;
 export const mockedResolveContextEngine = vi.fn(async () => mockedContextEngine);
 export const mockedResolveContextEngineOwnerPluginId = vi.fn(() => undefined);
 export const mockedBuildAgentRuntimePlan = vi.fn(() => ({}));
+type PreparedSettingsManagerParams = {
+  cfg?: {
+    agents?: {
+      defaults?: {
+        compaction?: {
+          reserveTokens?: number;
+          reserveTokensFloor?: number;
+        };
+      };
+    };
+  };
+};
+
+function createMockPreparedSettingsManager(params?: PreparedSettingsManagerParams) {
+  return {
+    getCompactionReserveTokens: () =>
+      params?.cfg?.agents?.defaults?.compaction?.reserveTokens ??
+      params?.cfg?.agents?.defaults?.compaction?.reserveTokensFloor ??
+      20_000,
+  };
+}
+
+export const mockedCreatePreparedEmbeddedAgentSettingsManager = vi.fn(
+  createMockPreparedSettingsManager,
+);
 export const mockedRunPostCompactionSideEffects = vi.fn(async () => {});
 export const mockedSleepWithAbort = vi.fn(
   async (_ms: number, _abortSignal?: AbortSignal) => undefined,
@@ -333,6 +334,10 @@ export function resetRunOverflowCompactionHarnessMocks(): void {
   mockedResolveContextEngine.mockResolvedValue(mockedContextEngine);
   mockedBuildAgentRuntimePlan.mockReset();
   mockedBuildAgentRuntimePlan.mockReturnValue({});
+  mockedCreatePreparedEmbeddedAgentSettingsManager.mockReset();
+  mockedCreatePreparedEmbeddedAgentSettingsManager.mockImplementation(
+    createMockPreparedSettingsManager,
+  );
   mockedCompactDirect.mockReset();
   mockedCompactDirect.mockResolvedValue({
     ok: false,
@@ -530,6 +535,10 @@ export async function loadRunOverflowCompactionHarness(): Promise<{
 
   vi.doMock("../runtime-plan/build.js", () => ({
     buildAgentRuntimePlan: mockedBuildAgentRuntimePlan,
+  }));
+
+  vi.doMock("../agent-project-settings.js", () => ({
+    createPreparedEmbeddedAgentSettingsManager: mockedCreatePreparedEmbeddedAgentSettingsManager,
   }));
 
   vi.doMock("../model-runtime-aliases.js", () => ({

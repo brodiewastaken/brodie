@@ -20,6 +20,10 @@ export type MediaAttachment = {
   url?: string;
   mime?: string;
   index: number;
+  /** Stable source-message identity retained across queue batch materialization. */
+  sourceMessageId?: string;
+  /** Attachment index within the original source message, not the flattened batch. */
+  sourceIndex?: number;
   alreadyTranscribed?: boolean;
 };
 

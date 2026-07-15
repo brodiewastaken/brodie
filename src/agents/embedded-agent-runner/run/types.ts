@@ -25,7 +25,7 @@ import type {
 import type { AgentRunTimeoutPhase } from "../../run-timeout-attribution.js";
 import type { AgentRuntimePlan } from "../../runtime-plan/types.js";
 import type { AgentMessage } from "../../runtime/index.js";
-import type { AuthStorage, ModelRegistry } from "../../sessions/index.js";
+import type { AuthStorage, ModelRegistry, SettingsManager } from "../../sessions/index.js";
 import type { ToolErrorSummary } from "../../tool-error-summary.js";
 import type { NormalizedUsage } from "../../usage.js";
 import type { EmbeddedRunReplayMetadata, EmbeddedRunReplayState } from "../replay-state.js";
@@ -52,6 +52,12 @@ type EmbeddedRunContextWindowInfo = {
   source: "model" | "modelsConfig" | "agentContextTokens" | "default";
 };
 
+export type EmbeddedRunContextBudget = {
+  contextWindowTokens: number;
+  effectiveReserveTokens: number;
+  usablePromptTokenBudget: number;
+};
+
 export type EmbeddedRunFastModeParam = boolean | (() => boolean | undefined);
 
 export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
@@ -60,12 +66,16 @@ export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
   initialReplayState?: EmbeddedRunReplayState;
   /** Pluggable context engine for ingest/assemble/compact lifecycle. */
   contextEngine?: ContextEngine;
-  /** Resolved model context window in tokens for assemble/compact budgeting. */
-  contextTokenBudget?: number;
+  /** One closed budget fact shared by assembly, finalization, and recovery. */
+  contextBudget?: EmbeddedRunContextBudget;
+  /** Prepared effective settings reused by the native attempt hot path. */
+  preparedSettingsManager?: SettingsManager;
   /** Source metadata for the resolved model context budget. */
   contextWindowInfo?: EmbeddedRunContextWindowInfo;
   /** Resolved API key for this run when runtime auth did not replace it. */
   resolvedApiKey?: string;
+  /** Auth mode (api-key/oauth/token) of the credential backing this attempt. */
+  resolvedAuthMode?: string;
   /** Auth profile resolved for this attempt's provider/model call. */
   authProfileId?: string;
   /** Source for the resolved auth profile (user-locked or automatic). */

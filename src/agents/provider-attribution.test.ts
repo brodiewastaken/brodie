@@ -111,6 +111,7 @@ const providerEndpointPlugins = vi.hoisted(() => [
     },
   },
 ]);
+const manifestSnapshotState = vi.hoisted(() => ({ key: "provider-endpoint-fixture-v1" }));
 
 vi.mock("../plugins/plugin-registry.js", () => ({
   loadPluginManifestRegistryForPluginRegistry: () => ({
@@ -126,6 +127,14 @@ vi.mock("../plugins/manifest-metadata-scan.js", () => ({
       manifest,
       origin: "bundled",
     })),
+  resolveOpenClawPluginManifestMetadataSnapshot: () => ({
+    key: manifestSnapshotState.key,
+    records: providerEndpointPlugins.map((manifest, index) => ({
+      pluginDir: `provider-endpoint-fixture-${index}`,
+      manifest,
+      origin: "bundled",
+    })),
+  }),
 }));
 
 import {
@@ -139,6 +148,18 @@ import {
 } from "./provider-attribution.js";
 
 describe("provider attribution", () => {
+  it("invalidates provider endpoint caches when the manifest snapshot changes", () => {
+    providerEndpointPlugins[0].providerEndpoints.push({
+      endpointClass: "openrouter",
+      hosts: ["dynamic.example"],
+    });
+    manifestSnapshotState.key = "provider-endpoint-fixture-v2";
+    expect(resolveProviderEndpoint("https://dynamic.example/v1").endpointClass).toBe("openrouter");
+
+    providerEndpointPlugins[0].providerEndpoints.pop();
+    manifestSnapshotState.key = "provider-endpoint-fixture-v3";
+    expect(resolveProviderEndpoint("https://dynamic.example/v1").endpointClass).toBe("custom");
+  });
   it("resolves the canonical OpenClaw product and runtime version", () => {
     const identity = resolveProviderAttributionIdentity({
       OPENCLAW_VERSION: "2026.3.99",

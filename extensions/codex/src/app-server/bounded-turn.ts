@@ -290,7 +290,7 @@ async function resolveCodexBoundedTurnModel(params: {
   const result = await params.client.request<unknown>(
     "model/list",
     { limit: null, cursor: null, includeHidden: false },
-    { timeoutMs: Math.min(params.timeoutMs, 5_000), signal: params.signal },
+    { timeoutMs: params.timeoutMs, signal: params.signal },
   );
   const listed = readModelListResult(result).models;
   if (params.selection.mode === "live-default") {

@@ -85,13 +85,33 @@ function turnStartResult(status = "inProgress") {
 
 function createFakeClient(options?: {
   emitWebSearch?: boolean;
+  modelListDelayMs?: number;
   models?: ReturnType<typeof codexModel>[];
 }) {
   const notifications = new Set<(notification: CodexServerNotification) => void>();
   const requests: Array<{ method: string; params?: JsonValue }> = [];
-  const request = vi.fn(async (method: string, params?: JsonValue) => {
+  const request = vi.fn(async (method: string, params?: JsonValue, ...args: unknown[]) => {
     requests.push({ method, params });
     if (method === "model/list") {
+      const delayMs = options?.modelListDelayMs ?? 0;
+      if (delayMs > 0) {
+        const timeoutMs = (args[0] as { timeoutMs?: number } | undefined)?.timeoutMs;
+        await new Promise<void>((resolve, reject) => {
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const delay = setTimeout(() => {
+            if (timeout) {
+              clearTimeout(timeout);
+            }
+            resolve();
+          }, delayMs);
+          if (timeoutMs !== undefined) {
+            timeout = setTimeout(() => {
+              clearTimeout(delay);
+              reject(new Error("model/list timed out"));
+            }, timeoutMs);
+          }
+        });
+      }
       return { data: options?.models ?? [codexModel()], nextCursor: null };
     }
     if (method === "thread/start") {
@@ -152,7 +172,7 @@ function createFakeClient(options?: {
     },
   } as unknown as CodexAppServerClient;
 
-  return { client, requests };
+  return { client, request, requests };
 }
 
 function createConfig(): OpenClawConfig {
@@ -321,6 +341,24 @@ describe("codex web search provider", () => {
       throw new Error("expected isolated Codex home and workspace");
     }
     expect(path.dirname(threadStartCwd)).toBe(path.dirname(isolatedCodexHome));
+  });
+
+  it("lets a cold model catalog load cross the former five-second startup cap", async () => {
+    const { client } = createFakeClient({ modelListDelayMs: 5_100 });
+    const provider = createCodexWebSearchProvider({
+      clientFactory: async () => client,
+    });
+    const config = createConfig();
+    const tool = provider.createTool({
+      config,
+      searchConfig: config.tools?.web?.search,
+      agentDir: "/tmp/openclaw-agent",
+    });
+
+    await expect(tool?.execute({ query: "plumbers in Edmonton Alberta" })).resolves.toMatchObject({
+      provider: "codex",
+      searches: [{ query: "plumbers in Edmonton Alberta" }],
+    });
   });
 
   it("selects the live default text-capable model", async () => {

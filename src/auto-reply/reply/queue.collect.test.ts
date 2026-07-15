@@ -1925,6 +1925,18 @@ describe("followup queue collect routing", () => {
     };
     const firstImage = { type: "image" as const, data: "first", mimeType: "image/png" };
     const secondImage = { type: "image" as const, data: "second", mimeType: "image/png" };
+    const firstFile = {
+      marker: "[External file: first]",
+      idempotencyKey: "file:first",
+      attachmentIndex: 0,
+      mediaRef: "media:first",
+    };
+    const secondFile = {
+      marker: "[External file: second]",
+      idempotencyKey: "file:second",
+      attachmentIndex: 1,
+      mediaRef: "media:second",
+    };
 
     enqueueFollowupRun(
       key,
@@ -1936,6 +1948,14 @@ describe("followup queue collect routing", () => {
         }),
         images: [firstImage],
         imageOrder: ["inline"],
+        externalFiles: [firstFile],
+        promptImageRefExclusions: ["media:first"],
+        queueBatchIdentity: {
+          version: 1,
+          routeKey: "route-a",
+          sourceMessageIds: ["message-1"],
+          nativeImageCount: 1,
+        },
       },
       settings,
     );
@@ -1949,6 +1969,14 @@ describe("followup queue collect routing", () => {
         }),
         images: [secondImage],
         imageOrder: ["inline"],
+        externalFiles: [firstFile, secondFile],
+        promptImageRefExclusions: ["media:first", "media:second"],
+        queueBatchIdentity: {
+          version: 1,
+          routeKey: "route-a",
+          sourceMessageIds: ["message-2"],
+          nativeImageCount: 1,
+        },
       },
       settings,
     );
@@ -1958,6 +1986,14 @@ describe("followup queue collect routing", () => {
 
     expect(calls[0]?.images).toEqual([firstImage, secondImage]);
     expect(calls[0]?.imageOrder).toEqual(["inline", "inline"]);
+    expect(calls[0]?.externalFiles).toEqual([firstFile, secondFile]);
+    expect(calls[0]?.promptImageRefExclusions).toEqual(["media:first", "media:second"]);
+    expect(calls[0]?.queueBatchIdentity).toEqual({
+      version: 1,
+      routeKey: "route-a",
+      sourceMessageIds: ["message-1", "message-2"],
+      nativeImageCount: 2,
+    });
   });
 
   it("splits collect batches when sender authorization changes", async () => {
@@ -3483,10 +3519,12 @@ describe("followup queue collect routing", () => {
     const secondRecorder = createRecorder("second transcript", "/tmp/second.png");
     const settings: QueueSettings = { mode: "collect", debounceMs: 0 };
 
-    for (const [prompt, recorder, onComplete, deliveryCorrelation] of [
-      ["first", firstRecorder, firstComplete, firstCorrelation],
-      ["second", secondRecorder, secondComplete, secondCorrelation],
-    ] as const) {
+    for (const [index, [prompt, recorder, onComplete, deliveryCorrelation]] of (
+      [
+        ["first", firstRecorder, firstComplete, firstCorrelation],
+        ["second", secondRecorder, secondComplete, secondCorrelation],
+      ] as const
+    ).entries()) {
       enqueueFollowupRun(
         key,
         {
@@ -3495,6 +3533,12 @@ describe("followup queue collect routing", () => {
           userTurnTranscriptRecorder: recorder,
           currentInboundContext: { text: "shared gateway context", promptJoiner: " " },
           deliveryCorrelations: [deliveryCorrelation],
+          queueBatchIdentity: {
+            version: 1,
+            routeKey: "route-a",
+            sourceMessageIds: [`message-${index + 1}`],
+            nativeImageCount: 1,
+          },
           abortSignal: new AbortController().signal,
           queuedLifecycle: { onComplete },
         },
@@ -3530,6 +3574,18 @@ describe("followup queue collect routing", () => {
       "/tmp/first.png",
       "/tmp/second.png",
     ]);
+    expect(
+      (
+        message as unknown as {
+          __openclaw?: { queueBatchIdentity?: unknown };
+        }
+      )?.["__openclaw"]?.queueBatchIdentity,
+    ).toEqual({
+      version: 1,
+      routeKey: "route-a",
+      sourceMessageIds: ["message-1", "message-2"],
+      nativeImageCount: 2,
+    });
     await vi.waitFor(() => expect(firstComplete).toHaveBeenCalledTimes(1));
     expect(secondComplete).toHaveBeenCalledTimes(1);
   });

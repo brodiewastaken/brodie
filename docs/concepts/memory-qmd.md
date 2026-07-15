@@ -184,6 +184,17 @@ collection under `~/.openclaw/agents/<id>/qmd/sessions/`. Setting only
 `memorySearch.experimental.sessionMemory` does not export transcripts into
 QMD.
 
+After the first complete export, transcript writes enter a durable SQLite
+dirty set. OpenClaw coalesces repeated writes to the same session, renders only
+the changed artifacts, and asks QMD to update and embed only the session
+collection. A restart drains unfinished entries before acknowledging them, so
+the last good index remains searchable while incremental work resumes.
+
+OpenClaw still runs a complete reconciliation once per day and whenever the
+dirty set reaches its bounded capacity. A full repair is accepted only after
+export, index update, and any required embedding succeed; changes that arrive
+during repair remain queued for the next incremental pass.
+
 Session hits are still filtered by
 [`tools.sessions.visibility`](/gateway/config-tools#toolssessions). The
 default `tree` visibility does not expose unrelated same-agent sessions. If a
@@ -269,8 +280,10 @@ keeps the older per-collection fallback for correctness.
 lexical-only, skips QMD vector status probes and embedding maintenance, and
 leaves semantic readiness checks to `vsearch` or `query` setups.
 
-**Search times out?** Increase `memory.qmd.limits.timeoutMs` (default:
-4000ms). Set it higher, for example `120000`, for slower hardware.
+**Search times out?** Increase `memory.qmd.limits.timeoutMs` (default: 4000ms).
+Set it higher, for example `120000`, for slower hardware. This limit applies to
+QMD's own search commands during agent `memory_search` calls; setup, sync,
+builtin fallback, and supplemental corpus work keep their own shorter deadlines.
 
 **Empty results in group or channel chats?** This is expected with the
 default `memory.qmd.scope`, which allows only direct sessions. Add an

@@ -86,6 +86,18 @@ function createParams(sessionFile: string, workspaceDir: string): EmbeddedRunAtt
   } as EmbeddedRunAttemptParams;
 }
 
+function setContextBudget(
+  params: EmbeddedRunAttemptParams,
+  contextWindowTokens: number,
+  usablePromptTokenBudget = contextWindowTokens,
+): void {
+  params.contextBudget = {
+    contextWindowTokens,
+    effectiveReserveTokens: contextWindowTokens - usablePromptTokenBudget,
+    usablePromptTokenBudget,
+  };
+}
+
 const DISABLED_CODEX_WEB_SEARCH_THREAD_CONFIG_FINGERPRINT = JSON.stringify({
   "features.standalone_web_search": false,
   web_search: "disabled",
@@ -394,7 +406,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     const harness = createStartedThreadHarness();
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 321;
+    setContextBudget(params, 321, 222);
     params.requestedModelId = "gpt-5.4-codex-primary";
     params.fallbackReason = "provider_unavailable";
     params.degradedReason = "context_overflow";
@@ -432,7 +444,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     >[0];
     expect(assembleParams.sessionId).toBe("session-1");
     expect(assembleParams.sessionKey).toBe("agent:main:session-1");
-    expect(assembleParams.tokenBudget).toBe(321);
+    expect(assembleParams.tokenBudget).toBe(222);
     expect(assembleParams.citationsMode).toBe("on");
     expect(assembleParams.model).toBe("gpt-5.4-codex");
     expect(assembleParams.runtimeSettings).toMatchObject({
@@ -509,7 +521,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     const harness = createStartedThreadHarness();
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 80_000;
+    setContextBudget(params, 80_000);
 
     const run = runCodexAppServerAttempt(params);
     await harness.waitForMethod("turn/start");
@@ -551,7 +563,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     const harness = createStartedThreadHarness();
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 300_000;
+    setContextBudget(params, 300_000);
     params.prompt = "current prompt survives";
     params.currentInboundContext = { text: "current inbound context survives" };
 
@@ -665,7 +677,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     const harness = createStartedThreadHarness();
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 80_000;
+    setContextBudget(params, 80_000);
     params.config = {
       agents: { defaults: { compaction: { reserveTokens: 60_000, reserveTokensFloor: 0 } } },
     } as EmbeddedRunAttemptParams["config"];
@@ -1195,7 +1207,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     });
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 80_000;
+    setContextBudget(params, 80_000);
 
     const run = runCodexAppServerAttempt(params);
     await harness.waitForMethod("turn/start");
@@ -1469,7 +1481,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     });
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 400_000;
+    setContextBudget(params, 400_000);
 
     const run = runCodexAppServerAttempt(params);
     await vi.waitFor(() =>
@@ -1562,7 +1574,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     });
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 400_000;
+    setContextBudget(params, 400_000);
 
     await expect(runCodexAppServerAttempt(params)).rejects.toThrow(
       "Codex ran out of room in the model's context window",
@@ -1625,7 +1637,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     });
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 400_000;
+    setContextBudget(params, 400_000);
 
     const run = runCodexAppServerAttempt(params);
     await harness.waitForMethod("turn/start");
@@ -1680,7 +1692,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     const harness = createStartedThreadHarness();
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 16_000;
+    setContextBudget(params, 16_000);
 
     const run = runCodexAppServerAttempt(params);
     await harness.waitForMethod("turn/start");
@@ -1721,7 +1733,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     });
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 16_000;
+    setContextBudget(params, 16_000);
 
     await expect(runCodexAppServerAttempt(params)).rejects.toThrow(
       "Codex ran out of room in the model's context window",
@@ -1786,7 +1798,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     });
     const params = createParams(sessionFile, workspaceDir);
     params.contextEngine = contextEngine;
-    params.contextTokenBudget = 400_000;
+    setContextBudget(params, 400_000);
 
     const run = runCodexAppServerAttempt(params);
     await vi.waitFor(
@@ -1874,7 +1886,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
       params.contextEngine = contextEngine;
       params.trigger = testCase.trigger;
       params.bootstrapContextRunKind = testCase.bootstrapContextRunKind;
-      params.contextTokenBudget = 111;
+      setContextBudget(params, 111, 89);
       params.requestedModelId = "gpt-5.4-codex-primary";
       params.fallbackReason = "provider_unavailable";
       params.degradedReason = "context_overflow";
@@ -1891,7 +1903,7 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
       expect(afterTurnCall.sessionId).toBe("session-1");
       expect(afterTurnCall.sessionKey).toBe("agent:main:session-1");
       expect(afterTurnCall.prePromptMessageCount).toBe(0);
-      expect(afterTurnCall.tokenBudget).toBe(111);
+      expect(afterTurnCall.tokenBudget).toBe(89);
       expect(afterTurnCall.isHeartbeat).toBe(true);
       expect(afterTurnCall.runtimeSettings).toMatchObject({
         runtime: { mode: "degraded" },

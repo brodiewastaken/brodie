@@ -1,0 +1,51 @@
+{
+  "id": "session-archive",
+  "name": "Session Archive",
+  "description": "Background TTL sweep that archives generated sessions (cron, subagent, isolated) and renames their transcripts into upstream-recognized archive artifacts.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "ttl": { "type": "string" },
+      "targets": {
+        "type": "array",
+        "items": { "type": "string", "enum": ["cron", "subagent", "isolated"] }
+      },
+      "isolatedKeyPrefixes": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "archiveTranscripts": { "type": "boolean" },
+      "intervalMs": { "type": "number", "minimum": 1000 },
+      "cronStore": { "type": "string" }
+    }
+  },
+  "uiHints": {
+    "enabled": { "label": "Enabled", "help": "Master switch for the archive sweep." },
+    "ttl": {
+      "label": "Session TTL",
+      "help": "Idle age before a generated session is archived (duration string, default unit minutes; default 60m)."
+    },
+    "targets": {
+      "label": "Targets",
+      "help": "Generated-session classes to archive (default: cron, subagent, isolated)."
+    },
+    "isolatedKeyPrefixes": {
+      "label": "Isolated key prefixes",
+      "help": "Additional session-key prefixes classified as isolated (\"isolated:\" and exact \"isolated\" are built in)."
+    },
+    "archiveTranscripts": {
+      "label": "Archive transcripts",
+      "help": "Rename pruned transcripts to <file>.deleted.<timestamp> inside the store directory (default: true)."
+    },
+    "intervalMs": {
+      "label": "Sweep timer (ms)",
+      "help": "Service timer cadence (default 60000; a 5-minute per-store gap throttles effective sweeps)."
+    },
+    "cronStore": { "label": "Cron store path", "help": "Optional cron-store path override." }
+  }
+}

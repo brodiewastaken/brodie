@@ -120,6 +120,9 @@ export const pluginSdkDocMetadata = {
   "runtime-store": {
     category: "runtime",
   },
+  "session-artifacts-runtime": {
+    category: "runtime",
+  },
   "session-store-runtime": {
     category: "runtime",
   },

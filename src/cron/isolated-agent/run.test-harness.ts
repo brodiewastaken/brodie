@@ -64,6 +64,7 @@ export const getCliSessionIdMock = createMock();
 export const clearCliSessionMock = createMock();
 export const setCliSessionBindingMock = createMock();
 export const updateSessionStoreMock = createMock();
+export const applySessionEntryLifecycleMutationMock = createMock();
 export const loadSessionEntryMock = createMock();
 export const resolveCronSessionMock = createMock();
 export const logWarnMock = createMock();
@@ -347,6 +348,7 @@ vi.mock("../../gateway/call.runtime.js", () => ({
 }));
 
 vi.mock("../../config/sessions/store.runtime.js", () => ({
+  applySessionEntryLifecycleMutation: applySessionEntryLifecycleMutationMock,
   updateSessionStore: updateSessionStoreMock,
 }));
 
@@ -716,6 +718,36 @@ function resetRunSessionMocks(): void {
   loadSessionEntryMock.mockReturnValue(undefined);
   updateSessionStoreMock.mockReset();
   updateSessionStoreMock.mockResolvedValue(undefined);
+  applySessionEntryLifecycleMutationMock.mockReset();
+  applySessionEntryLifecycleMutationMock.mockImplementation(
+    async (params: {
+      storePath: string;
+      upserts: Array<{
+        sessionKey: string;
+        buildEntry: (context: {
+          currentEntry?: CronSessionEntry;
+          sessionKey: string;
+        }) => CronSessionEntry | null | undefined;
+      }>;
+    }) => {
+      await updateSessionStoreMock(params.storePath, (store: Record<string, CronSessionEntry>) => {
+        const nextStore = { ...store };
+        for (const upsert of params.upserts) {
+          const nextEntry = upsert.buildEntry({
+            currentEntry: nextStore[upsert.sessionKey],
+            sessionKey: upsert.sessionKey,
+          });
+          if (nextEntry) {
+            nextStore[upsert.sessionKey] = nextEntry;
+          }
+        }
+        for (const key of Object.keys(store)) {
+          delete store[key];
+        }
+        Object.assign(store, nextStore);
+      });
+    },
+  );
   resolveCronSessionMock.mockReset();
   resolveCronSessionMock.mockReturnValue(makeCronSession());
   callGatewayMock.mockReset();

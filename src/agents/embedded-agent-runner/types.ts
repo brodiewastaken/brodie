@@ -257,6 +257,8 @@ export type EmbeddedAgentRunResult = {
 export type EmbeddedAgentCompactResult = {
   ok: boolean;
   compacted: boolean;
+  /** The compactor has no eligible material left to compact for this request. */
+  exhausted?: boolean;
   reason?: string;
   /** Structured failure metadata used by model fallback classification. */
   failure?: {

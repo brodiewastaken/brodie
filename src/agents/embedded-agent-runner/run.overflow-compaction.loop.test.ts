@@ -16,6 +16,7 @@ import {
   mockedIsLikelyContextOverflowError,
   mockedLog,
   mockedMarkAuthProfileSuccess,
+  mockedResolveContextWindowInfo,
   mockedResolveModelAsync,
   mockedRunEmbeddedAttempt,
   mockedSessionLikelyHasOversizedToolResults,
@@ -116,6 +117,108 @@ describe("overflow compaction in run loop", () => {
     expect(result.meta.error).toBeUndefined();
   });
 
+  it("does not retry when compaction reports compacted=true with ok=false", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        promptError: makeOverflowError(),
+      }),
+    );
+    mockedCompactDirect.mockResolvedValueOnce({
+      ok: false,
+      compacted: true,
+      reason: "provider failed after an attempted sweep",
+      result: {
+        tokensBefore: 237_431,
+        tokensAfter: 157_000,
+      },
+    });
+
+    const result = await runEmbeddedAgent(baseParams);
+
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
+    expectLogExcludes(mockedLog.info, "auto-compaction succeeded");
+    expect(result.meta.error?.kind).toBe("context_overflow");
+  });
+
+  it("does not retry an explicitly exhausted compaction result", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        promptError: makeOverflowError(),
+      }),
+    );
+    mockedCompactDirect.mockResolvedValueOnce({
+      ok: false,
+      compacted: false,
+      exhausted: true,
+      reason: "no eligible context to compact",
+    });
+
+    const result = await runEmbeddedAgent(baseParams);
+
+    expect(mockedCompactDirect).toHaveBeenCalledTimes(1);
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
+    expect(result.payloads[0]?.text).toContain("no eligible context to compact");
+    expect(result.meta.error?.kind).toBe("context_overflow");
+  });
+
+  it("passes the reserve-adjusted 230k prompt budget into overflow compaction", async () => {
+    mockedResolveContextWindowInfo.mockReturnValueOnce({
+      tokens: 272_000,
+      source: "model",
+    });
+    mockedResolveModelAsync.mockResolvedValueOnce({
+      model: {
+        id: "test-model",
+        provider: "anthropic",
+        contextWindow: 272_000,
+        api: "messages",
+      },
+      error: null,
+      authStorage: {
+        setRuntimeApiKey: vi.fn(),
+      },
+      modelRegistry: {},
+    });
+    mockedRunEmbeddedAttempt
+      .mockResolvedValueOnce(
+        makeAttemptResult({
+          promptError: makeOverflowError(),
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeAttemptResult({
+          promptError: null,
+        }),
+      );
+    mockedCompactDirect.mockResolvedValueOnce(
+      makeCompactionSuccess({
+        summary: "Compacted to the usable prompt budget",
+        tokensBefore: 237_431,
+        tokensAfter: 157_000,
+      }),
+    );
+
+    await runEmbeddedAgent({
+      ...baseParams,
+      config: {
+        agents: {
+          defaults: {
+            compaction: {
+              reserveTokens: 42_000,
+            },
+          },
+        },
+      },
+    });
+
+    const compactArg = requireMockCallArg(mockedCompactDirect, 0);
+    expect(compactArg.tokenBudget).toBe(230_000);
+    expect(requireRecord(compactArg.runtimeSettings, "runtime settings")).toMatchObject({
+      limits: { promptTokenBudget: 230_000 },
+    });
+  });
+
   it("keeps fallback unsafe when an overflow retry follows a mutating attempt", async () => {
     const overflowError = makeOverflowError();
     mockedRunEmbeddedAttempt
@@ -205,6 +308,35 @@ describe("overflow compaction in run loop", () => {
     expect(mockedMarkAuthProfileSuccess).toHaveBeenCalledTimes(1);
     resolveSuccess();
     await successPromise;
+  });
+
+  it("forwards external files, queue identity, and image-ref exclusions to attempts", async () => {
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+    const queueBatchIdentity = {
+      version: 1 as const,
+      routeKey: "whatsapp|default|conv1|",
+      sourceMessageIds: ["m1"],
+      nativeImageCount: 1,
+    };
+    const externalFiles = [
+      {
+        marker: "[OpenClaw External File: external_file_1]",
+        idempotencyKey: "external_file_1",
+        attachmentIndex: 0,
+      },
+    ];
+
+    await runEmbeddedAgent({
+      ...baseParams,
+      queueBatchIdentity,
+      externalFiles,
+      promptImageRefExclusions: ["/tmp/descriptor.png"],
+    });
+
+    const attempt = requireMockCallArg(mockedRunEmbeddedAttempt, 0);
+    expect(attempt.queueBatchIdentity).toEqual(queueBatchIdentity);
+    expect(attempt.externalFiles).toEqual(externalFiles);
+    expect(attempt.promptImageRefExclusions).toEqual(["/tmp/descriptor.png"]);
   });
 
   it("continues from transcript after compaction when the current inbound message was persisted", async () => {

@@ -11,10 +11,13 @@ import {
 } from "./context-truncation-notice.js";
 import { MidTurnPrecheckSignal } from "./run/midturn-precheck.js";
 import {
+  dedupeContextEngineQueueMediaMessages,
   installContextEngineLoopHook,
   installToolResultContextGuard,
   markTranscriptPromptText,
+  postprocessContextEngineMessages,
   PREEMPTIVE_CONTEXT_OVERFLOW_MESSAGE,
+  restoreContextEngineImageBlocks,
 } from "./tool-result-context-guard.js";
 
 function makeUser(text: string): AgentMessage {
@@ -22,6 +25,49 @@ function makeUser(text: string): AgentMessage {
     role: "user",
     content: text,
     timestamp: Date.now(),
+  });
+}
+
+function makeUserWithImage(
+  text: string,
+  image: { data?: string; mimeType?: string } = {},
+): AgentMessage {
+  return castAgentMessage({
+    role: "user",
+    content: [
+      { type: "text", text },
+      {
+        type: "image",
+        data: image.data ?? "base64-image",
+        mimeType: image.mimeType ?? "image/jpeg",
+      },
+    ],
+    timestamp: Date.now(),
+  });
+}
+
+function makeUserBlocks(blocks: Array<{ type: "text"; text: string }>): AgentMessage {
+  return castAgentMessage({
+    role: "user",
+    content: blocks,
+    timestamp: Date.now(),
+  });
+}
+
+function withQueueBatchIdentity(
+  message: AgentMessage,
+  params: { routeKey?: string; sourceMessageIds: string[]; nativeImageCount: number },
+): AgentMessage {
+  return castAgentMessage({
+    ...(message as unknown as Record<string, unknown>),
+    __openclaw: {
+      queueBatchIdentity: {
+        version: 1,
+        routeKey: params.routeKey ?? "whatsapp:work:15550001111",
+        sourceMessageIds: params.sourceMessageIds,
+        nativeImageCount: params.nativeImageCount,
+      },
+    },
   });
 }
 
@@ -123,6 +169,7 @@ async function applyMidTurnPrecheckGuardToContext(
     toolResultMaxChars?: number;
     prePromptMessageCount?: number;
     systemPrompt?: string;
+    authoritativePromptTokens?: number;
   } = {},
 ) {
   // Mid-turn precheck simulates a new tool result being appended after the
@@ -131,12 +178,18 @@ async function applyMidTurnPrecheckGuardToContext(
   installToolResultContextGuard({
     agent,
     contextWindowTokens,
+    contextEngineOwnsAssembly: options.authoritativePromptTokens !== undefined,
     midTurnPrecheck: {
       enabled: true,
       contextTokenBudget: options.contextTokenBudget ?? contextWindowTokens,
       reserveTokens: () => options.reserveTokens ?? 10_000,
       toolResultMaxChars: options.toolResultMaxChars,
       getSystemPrompt: () => options.systemPrompt,
+      ...(options.authoritativePromptTokens !== undefined
+        ? {
+            getAuthoritativePromptTokens: () => options.authoritativePromptTokens as number,
+          }
+        : {}),
       ...(options.prePromptMessageCount !== undefined
         ? { getPrePromptMessageCount: () => options.prePromptMessageCount as number }
         : {}),
@@ -184,6 +237,605 @@ describe("formatContextLimitTruncationNotice", () => {
     expect(formatContextLimitTruncationNotice(123)).toBe(
       "[... 123 more characters truncated; rerun with narrower args if needed]",
     );
+  });
+});
+
+describe("restoreContextEngineImageBlocks", () => {
+  it("reattaches native user images externalized by a context engine", () => {
+    const source = makeUserWithImage(
+      "[media attached: /home/nova/.openclaw/media/inbound/ba81107d.jpg (image/jpeg)]\nnova: [media attached: media://inbound/ba81107d.jpg (image/jpeg)]",
+      { data: "native-image-bytes" },
+    );
+    const assembled = makeUser(
+      "nova: [User image: ba81107d.jpg (image/jpeg, 101,293 bytes) | LCM file: file_da899f6826fc4650]",
+    );
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [source],
+      assembledMessages: [assembled],
+    });
+
+    expect(restored.restoredCount).toBe(1);
+    expect(restored.messages[0]).not.toBe(assembled);
+    expect((restored.messages[0] as { content?: unknown }).content).toEqual([
+      {
+        type: "text",
+        text: "nova: [User image: ba81107d.jpg (image/jpeg, 101,293 bytes) | LCM file: file_da899f6826fc4650]",
+      },
+      { type: "image", data: "native-image-bytes", mimeType: "image/jpeg" },
+    ]);
+  });
+
+  it("restores numbered media-attached references without LCM markers", () => {
+    const source = makeUserWithImage(
+      "[media attached 1/2: media://inbound/pair-a.jpg (image/jpeg)]",
+      { data: "pair-a-bytes" },
+    );
+    const assembled = makeUser("[media attached 1/2: pair-a.jpg (image/jpeg)]");
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [source],
+      assembledMessages: [assembled],
+    });
+
+    expect(restored.restoredCount).toBe(1);
+  });
+
+  it("keeps already-native assembled image messages unchanged", () => {
+    const source = makeUserWithImage("[media attached: media://inbound/photo.jpg]");
+    const assembled = makeUserWithImage(
+      "[User image: photo.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4650]",
+      { data: "already-native" },
+    );
+
+    const assembledMessages = [assembled];
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [source],
+      assembledMessages,
+    });
+
+    expect(restored.restoredCount).toBe(0);
+    expect(restored.messages).toBe(assembledMessages);
+    expect(restored.messages[0]).toBe(assembled);
+  });
+
+  it("reattaches a single native image when Lossless uses a generic upload label", () => {
+    const source = makeUserWithImage("nova: please inspect the uploaded image", {
+      data: "uploaded-image-bytes",
+    });
+    const assembled = makeUser(
+      "nova: [User image: user-image.png (image/png, 68 bytes) | LCM file: file_da899f6826fc4650]",
+    );
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [source],
+      assembledMessages: [assembled],
+    });
+
+    expect(restored.restoredCount).toBe(1);
+    expect((restored.messages[0] as { content?: unknown }).content).toEqual([
+      {
+        type: "text",
+        text: "nova: [User image: user-image.png (image/png, 68 bytes) | LCM file: file_da899f6826fc4650]",
+      },
+      { type: "image", data: "uploaded-image-bytes", mimeType: "image/jpeg" },
+    ]);
+  });
+
+  it("does not guess between two unmatched source image messages", () => {
+    const sourceA = makeUserWithImage("nova: first upload", { data: "first-bytes" });
+    const sourceB = makeUserWithImage("nova: second upload", { data: "second-bytes" });
+    const assembled = makeUser(
+      "nova: [User image: user-image.png (image/png, 68 bytes) | LCM file: file_da899f6826fc4650]",
+    );
+
+    const assembledMessages = [assembled];
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [sourceA, sourceB],
+      assembledMessages,
+    });
+
+    expect(restored.restoredCount).toBe(0);
+    expect(restored.messages).toBe(assembledMessages);
+  });
+
+  it("uses exact typed queue identity before same-filename tokens when batches reorder", () => {
+    const firstIdentity = { sourceMessageIds: ["QUEUE_FIRST"], nativeImageCount: 1 };
+    const secondIdentity = { sourceMessageIds: ["QUEUE_SECOND"], nativeImageCount: 1 };
+    const firstSource = withQueueBatchIdentity(
+      makeUserWithImage("[media attached: media://inbound/shared-name.jpg]", {
+        data: "first-native-bytes",
+      }),
+      firstIdentity,
+    );
+    const secondSource = withQueueBatchIdentity(
+      makeUserWithImage("[media attached: media://inbound/shared-name.jpg]", {
+        data: "second-native-bytes",
+      }),
+      secondIdentity,
+    );
+    const secondAssembled = withQueueBatchIdentity(
+      makeUser(
+        "[User image: shared-name.jpg (image/jpeg, 123 bytes) | LCM file: file_2222222222222222]",
+      ),
+      secondIdentity,
+    );
+    const firstAssembled = withQueueBatchIdentity(
+      makeUser(
+        "[User image: shared-name.jpg (image/jpeg, 123 bytes) | LCM file: file_1111111111111111]",
+      ),
+      firstIdentity,
+    );
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [firstSource, secondSource],
+      assembledMessages: [secondAssembled, firstAssembled],
+    });
+
+    expect(restored.restoredCount).toBe(2);
+    expect((restored.messages[0] as { content?: unknown }).content).toEqual([
+      {
+        type: "text",
+        text: "[User image: shared-name.jpg (image/jpeg, 123 bytes) | LCM file: file_2222222222222222]",
+      },
+      { type: "image", data: "second-native-bytes", mimeType: "image/jpeg" },
+    ]);
+    expect((restored.messages[1] as { content?: unknown }).content).toEqual([
+      {
+        type: "text",
+        text: "[User image: shared-name.jpg (image/jpeg, 123 bytes) | LCM file: file_1111111111111111]",
+      },
+      { type: "image", data: "first-native-bytes", mimeType: "image/jpeg" },
+    ]);
+  });
+
+  it("does not use filename-token fallback across conflicting typed queue identities", () => {
+    const source = withQueueBatchIdentity(
+      makeUserWithImage("[media attached: media://inbound/shared-name.jpg]", {
+        data: "wrong-native-bytes",
+      }),
+      { sourceMessageIds: ["QUEUE_SOURCE"], nativeImageCount: 1 },
+    );
+    const assembled = withQueueBatchIdentity(
+      makeUser(
+        "[User image: shared-name.jpg (image/jpeg, 123 bytes) | LCM file: file_3333333333333333]",
+      ),
+      { sourceMessageIds: ["QUEUE_OTHER"], nativeImageCount: 1 },
+    );
+    const assembledMessages = [assembled];
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [source],
+      assembledMessages,
+    });
+
+    expect(restored.restoredCount).toBe(0);
+    expect(restored.messages).toBe(assembledMessages);
+  });
+
+  it("does not attach source images to unrelated assembled image references", () => {
+    const source = makeUserWithImage("[media attached: media://inbound/source.jpg]");
+    const assembled = makeUser(
+      "[User image: other.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4650]",
+    );
+
+    const assembledMessages = [assembled];
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [source],
+      assembledMessages,
+    });
+
+    expect(restored.restoredCount).toBe(0);
+    expect(restored.messages).toBe(assembledMessages);
+    expect(restored.messages[0]).toBe(assembled);
+  });
+
+  it("caps context-engine native image restoration to the configured input budget", () => {
+    const sourceMessages = Array.from({ length: 12 }, (_, index) =>
+      makeUserWithImage(`[media attached: media://inbound/photo-${index}.jpg]`, {
+        data: `native-image-${index}`,
+      }),
+    );
+    const assembledMessages = Array.from({ length: 12 }, (_, index) =>
+      makeUser(
+        `[User image: photo-${index}.jpg (image/jpeg, 123 bytes) | LCM file: file_${String(index).padStart(16, "0")}]`,
+      ),
+    );
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages,
+      assembledMessages,
+      maxInputCount: 9,
+    });
+
+    expect(restored.restoredCount).toBe(9);
+    expect(restored.messages[9]).toBe(assembledMessages[9]);
+    expect(restored.messages[10]).toBe(assembledMessages[10]);
+    expect(restored.messages[11]).toBe(assembledMessages[11]);
+  });
+
+  it("defaults to a 42-image native restore ceiling", () => {
+    const sourceMessages = Array.from({ length: 43 }, (_, index) =>
+      makeUserWithImage(`[media attached: media://inbound/cap-${index}.jpg]`, {
+        data: `cap-image-${index}`,
+      }),
+    );
+    const assembledMessages = Array.from({ length: 43 }, (_, index) =>
+      makeUser(
+        `[User image: cap-${index}.jpg (image/jpeg, 123 bytes) | LCM file: file_${String(index).padStart(16, "0")}]`,
+      ),
+    );
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages,
+      assembledMessages,
+    });
+
+    expect(restored.restoredCount).toBe(42);
+    expect(restored.messages[42]).toBe(assembledMessages[42]);
+  });
+
+  it("only restores from source messages inside the pre-prompt window", () => {
+    const historicalSource = makeUserWithImage("[media attached: media://inbound/history.jpg]", {
+      data: "history-native-image",
+    });
+    const currentPromptSource = makeUserWithImage("[media attached: media://inbound/current.jpg]", {
+      data: "current-native-image",
+    });
+    const historicalAssembled = makeUser(
+      "[User image: history.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4650]",
+    );
+    const currentPromptAssembled = makeUser(
+      "[User image: current.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4651]",
+    );
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [historicalSource, currentPromptSource],
+      assembledMessages: [historicalAssembled, currentPromptAssembled],
+      sourceMessageLimit: 1,
+    });
+
+    expect(restored.restoredCount).toBe(1);
+    expect((restored.messages[0] as { content?: unknown }).content).toEqual([
+      {
+        type: "text",
+        text: "[User image: history.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4650]",
+      },
+      { type: "image", data: "history-native-image", mimeType: "image/jpeg" },
+    ]);
+    expect(restored.messages[1]).toBe(currentPromptAssembled);
+  });
+
+  it("leaves LCM image refs as text when native restoration is disabled", () => {
+    const source = makeUserWithImage("[media attached: media://inbound/photo.jpg]");
+    const assembled = makeUser(
+      "[User image: photo.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4650]",
+    );
+
+    const restored = restoreContextEngineImageBlocks({
+      sourceMessages: [source],
+      assembledMessages: [assembled],
+      maxInputCount: 0,
+    });
+
+    expect(restored.restoredCount).toBe(0);
+    expect(restored.messages[0]).toBe(assembled);
+  });
+});
+
+describe("dedupeContextEngineQueueMediaMessages", () => {
+  // Queue-engine v2 batch prompt shape: materializeQueueBatch's
+  // "[Conversation Metadata]:" header plus per-inbound "Message Metadata:"
+  // fenced JSON blocks carrying the typed envelope messageId.
+  const queueImageEnvelope = `[NEW MESSAGES ARRIVED WHILE YOU WERE IDLE]
+
+[Conversation Metadata]:
+\`\`\`json
+{
+ "channel": "whatsapp",
+ "session_key": "agent:main:whatsapp:dm:15550001111"
+}
+\`\`\`
+
+[Inbound #1]: [nova (+15550001111)]
+Message Metadata:
+\`\`\`json
+{
+ "sender": "nova (+15550001111)",
+ "message_id": "3AB46D9053D465055217",
+ "has_media": true
+}
+\`\`\`
+Message Media:
+\`\`\`json
+{
+ "kind": "image",
+ "type": "image/jpeg",
+ "source_message_id": "3AB46D9053D465055217",
+ "media_reference": "media://inbound/user-image.jpg",
+ "media_local_path": "/home/nova/.openclaw/media/inbound/user-image.jpg"
+}
+\`\`\`
+Message Body: [EMPTY]`;
+  const queueIdentity = {
+    sourceMessageIds: ["3AB46D9053D465055217"],
+    nativeImageCount: 1,
+  };
+
+  it("keeps the rich LCM image carrier and drops the duplicate plain queue envelope", () => {
+    const plain = withQueueBatchIdentity(makeUser(queueImageEnvelope), queueIdentity);
+    const rich = withQueueBatchIdentity(
+      makeUserBlocks([
+        { type: "text", text: queueImageEnvelope },
+        {
+          type: "text",
+          text: "[User image: user-image.jpg (image/jpeg, 165,311 bytes) | LCM file: file_100ae5228546430e]",
+        },
+      ]),
+      queueIdentity,
+    );
+    const assistant = makeAssistant("saw it twice");
+
+    const deduped = dedupeContextEngineQueueMediaMessages({
+      messages: [plain, rich, assistant],
+    });
+
+    expect(deduped.removedCount).toBe(1);
+    expect(deduped.messages).toEqual([rich, assistant]);
+  });
+
+  it("prefers a full two-image native copy over a partial one-image copy", () => {
+    const identity = { sourceMessageIds: ["MULTI_IMAGE"], nativeImageCount: 2 };
+    const partial = withQueueBatchIdentity(
+      makeUserWithImage("queued two images", { data: "first-image" }),
+      identity,
+    );
+    const full = withQueueBatchIdentity(
+      castAgentMessage({
+        role: "user",
+        content: [
+          { type: "text", text: "queued two images" },
+          { type: "image", data: "first-image", mimeType: "image/jpeg" },
+          { type: "image", data: "second-image", mimeType: "image/jpeg" },
+        ],
+        timestamp: Date.now(),
+      }),
+      identity,
+    );
+
+    const deduped = dedupeContextEngineQueueMediaMessages({ messages: [partial, full] });
+
+    expect(deduped.removedCount).toBe(1);
+    expect(deduped.messages).toEqual([full]);
+  });
+
+  it.each([
+    {
+      label: "audio",
+      body: "queued audio\n\nAudio Transcription:\n```text\nhello\n```",
+    },
+    {
+      label: "video",
+      body: "queued video\n\nVideo Description:\n```text\na red car moves\n```",
+    },
+  ])("reattaches typed identity to metadata-dropping $label clones before dedupe", ({ body }) => {
+    const source = withQueueBatchIdentity(makeUser(body), {
+      sourceMessageIds: ["MEDIA_SOURCE"],
+      nativeImageCount: 0,
+    });
+    const cloneWithoutHostMetadata = (): AgentMessage => {
+      const { __openclaw: _hostMetadata, ...clone } = source as unknown as Record<string, unknown>;
+      return castAgentMessage({ ...clone });
+    };
+
+    const postprocessed = postprocessContextEngineMessages({
+      sourceMessages: [source],
+      assembledMessages: [cloneWithoutHostMetadata(), cloneWithoutHostMetadata()],
+    });
+
+    expect(postprocessed.removedCount).toBe(1);
+    expect(postprocessed.messages).toHaveLength(1);
+    expect(
+      (postprocessed.messages[0] as unknown as { __openclaw?: unknown })["__openclaw"],
+    ).toEqual({
+      queueBatchIdentity: {
+        version: 1,
+        routeKey: "whatsapp:work:15550001111",
+        sourceMessageIds: ["MEDIA_SOURCE"],
+        nativeImageCount: 0,
+      },
+    });
+  });
+
+  it("reattaches the typed human inbound manifest to an exact Lossless clone", () => {
+    const humanInboundBatch = {
+      version: 1,
+      placement: "idle",
+      route: {
+        channel: "whatsapp",
+        accountId: "brodie",
+        conversationKind: "group",
+        conversationId: "room",
+        sessionKey: "agent:main:conversation:whatsapp:brodie:group:room",
+        queueLaneKey: "whatsapp:brodie:group:room",
+        transcriptOwner: {
+          agentId: "main",
+          sessionKey: "agent:main:conversation:whatsapp:brodie:group:room",
+        },
+      },
+      conversation: {
+        channel: "whatsapp",
+        conversationType: "group",
+        sessionKey: "agent:main:conversation:whatsapp:brodie:group:room",
+      },
+      inbounds: [],
+    } as const;
+    const source = castAgentMessage({
+      ...makeUser("[📋 QUEUE ENGINE]: [MESSAGE]"),
+      __openclaw: { humanInboundBatch },
+    });
+    const { __openclaw: _metadata, ...clone } = source as unknown as Record<string, unknown>;
+
+    const postprocessed = postprocessContextEngineMessages({
+      sourceMessages: [source],
+      assembledMessages: [castAgentMessage(clone)],
+    });
+
+    expect(
+      (postprocessed.messages[0] as unknown as { __openclaw?: unknown })["__openclaw"],
+    ).toEqual({ humanInboundBatch });
+  });
+
+  it("caps duplicated LCM image carriers to the queue image descriptor count", () => {
+    const plain = withQueueBatchIdentity(makeUser(queueImageEnvelope), queueIdentity);
+    const rich = withQueueBatchIdentity(
+      makeUserBlocks([
+        { type: "text", text: queueImageEnvelope },
+        {
+          type: "text",
+          text: "[User image: user-image.jpg (image/jpeg, 165,311 bytes) | LCM file: file_100ae5228546430e]",
+        },
+        {
+          type: "text",
+          text: "[User image: user-image.jpg (image/jpeg, 165,311 bytes) | LCM file: file_bbd8dca1f1fc4148]",
+        },
+      ]),
+      queueIdentity,
+    );
+
+    const assistant = makeAssistant("between");
+    const deduped = dedupeContextEngineQueueMediaMessages({
+      messages: [plain, assistant, rich],
+    });
+
+    expect(deduped.removedCount).toBe(2);
+    expect(deduped.messages).toHaveLength(2);
+    const content = (deduped.messages[0] as { content: Array<{ text?: string }> }).content;
+    expect(content.map((block) => block.text).join("\n")).toContain("file_100ae5228546430e");
+    expect(content.map((block) => block.text).join("\n")).not.toContain("file_bbd8dca1f1fc4148");
+    expect(deduped.messages[1]).toBe(assistant);
+  });
+
+  it("keeps the plain envelope when it is the only copy", () => {
+    const plain = withQueueBatchIdentity(makeUser(queueImageEnvelope), queueIdentity);
+    const messages = [plain];
+
+    const deduped = dedupeContextEngineQueueMediaMessages({ messages });
+
+    expect(deduped.removedCount).toBe(0);
+    expect(deduped.messages).toBe(messages);
+    expect(deduped.messages).toEqual([plain]);
+  });
+
+  it("does not collapse quote messages that only share a quoted message id", () => {
+    const first = makeUser(`[Conversation Metadata]:
+\`\`\`json
+{ "channel": "whatsapp" }
+\`\`\`
+
+[Inbound #1]: [nova]
+Message Metadata:
+\`\`\`json
+{ "message_id": "CURRENT_ONE" }
+\`\`\`
+Quote Replied Message:
+\`\`\`json
+{ "message_id": "QUOTED_SHARED" }
+\`\`\`
+Message Body:
+\`\`\`\`text
+one
+\`\`\`\``);
+    const second = makeUser(`[Conversation Metadata]:
+\`\`\`json
+{ "channel": "whatsapp" }
+\`\`\`
+
+[Inbound #1]: [nova]
+Message Metadata:
+\`\`\`json
+{ "message_id": "CURRENT_TWO" }
+\`\`\`
+Quote Replied Message:
+\`\`\`json
+{ "message_id": "QUOTED_SHARED" }
+\`\`\`
+Message Body:
+\`\`\`\`text
+two
+\`\`\`\``);
+
+    const deduped = dedupeContextEngineQueueMediaMessages({
+      messages: [
+        withQueueBatchIdentity(first, {
+          sourceMessageIds: ["CURRENT_ONE"],
+          nativeImageCount: 0,
+        }),
+        withQueueBatchIdentity(second, {
+          sourceMessageIds: ["CURRENT_TWO"],
+          nativeImageCount: 0,
+        }),
+      ],
+    });
+
+    expect(deduped.removedCount).toBe(0);
+    expect(deduped.messages).toHaveLength(2);
+  });
+
+  it("does not merge batches whose envelope id sets differ", () => {
+    const single = makeUser(queueImageEnvelope);
+    const superset = makeUserBlocks([
+      { type: "text", text: queueImageEnvelope },
+      {
+        type: "text",
+        text: `[Inbound #2]: [aria]
+Message Metadata:
+\`\`\`json
+{ "message_id": "3AB46D9053D465055218" }
+\`\`\``,
+      },
+      {
+        type: "text",
+        text: "[User image: user-image.jpg (image/jpeg, 165,311 bytes) | LCM file: file_100ae5228546430e]",
+      },
+    ]);
+
+    const typedSingle = withQueueBatchIdentity(single, queueIdentity);
+    const typedSuperset = withQueueBatchIdentity(superset, {
+      sourceMessageIds: ["3AB46D9053D465055217", "3AB46D9053D465055218"],
+      nativeImageCount: 1,
+    });
+    const deduped = dedupeContextEngineQueueMediaMessages({
+      messages: [typedSingle, typedSuperset],
+    });
+
+    expect(deduped.removedCount).toBe(0);
+    expect(deduped.messages).toEqual([typedSingle, typedSuperset]);
+  });
+
+  it("uses typed image counts to remove zero-descriptor LCM lines from string content", () => {
+    const stray = withQueueBatchIdentity(
+      makeUser("[User image: stray.jpg (image/jpeg, 1 byte) | LCM file: file_100ae5228546430e]"),
+      { sourceMessageIds: ["NO_MEDIA"], nativeImageCount: 0 },
+    );
+
+    const deduped = dedupeContextEngineQueueMediaMessages({ messages: [stray] });
+
+    expect(deduped.removedCount).toBe(1);
+    expect((deduped.messages[0] as { content?: unknown }).content).toBe("");
+  });
+
+  it("prefers media-understanding output over a plain copy", () => {
+    const identity = { sourceMessageIds: ["AUDIO_ONE"], nativeImageCount: 0 };
+    const plain = withQueueBatchIdentity(makeUser("queued audio"), identity);
+    const understood = withQueueBatchIdentity(
+      makeUser("queued audio\n\nAudio Transcription:\n```text\nhello\n```"),
+      identity,
+    );
+
+    const deduped = dedupeContextEngineQueueMediaMessages({ messages: [plain, understood] });
+
+    expect(deduped.messages).toEqual([understood]);
   });
 });
 
@@ -282,6 +934,23 @@ describe("installToolResultContextGuard", () => {
     expect(getToolResultText(contextForNextCall[1])).toBe("x".repeat(5_000));
   });
 
+  it("never lets the char high-water terminate an engine-owned turn when precheck is disabled", async () => {
+    const agent = makeGuardableAgent();
+    const contextForNextCall = [
+      makeUser("u".repeat(50_000)),
+      makeToolResult("call_big", "x".repeat(5_000)),
+    ];
+    installToolResultContextGuard({
+      agent,
+      contextWindowTokens: 1_000,
+      contextEngineOwnsAssembly: true,
+    });
+
+    await expect(
+      agent.transformContext?.(contextForNextCall, new AbortController().signal),
+    ).resolves.toBeInstanceOf(Array);
+  });
+
   it("throws instead of rewriting older tool results under aggregate pressure", async () => {
     const agent = makeGuardableAgent();
     const contextForNextCall = [
@@ -353,6 +1022,26 @@ describe("installToolResultContextGuard", () => {
       expect(typeof signal.request.overflowTokens).toBe("number");
       expect(typeof signal.request.toolResultReducibleChars).toBe("number");
     }
+  });
+
+  it("keeps a fitting engine-assembled prompt alive when the char estimate is pessimistic", async () => {
+    const agent = makeGuardableAgent();
+    const contextForNextCall = [
+      makeUser("u".repeat(300_000)),
+      makeToolResult("call_big", "x".repeat(60_000)),
+    ];
+
+    const transformed = await applyMidTurnPrecheckGuardToContext(agent, contextForNextCall, {
+      contextWindowTokens: 272_000,
+      contextTokenBudget: 272_000,
+      reserveTokens: 42_000,
+      toolResultMaxChars: 69_000,
+      prePromptMessageCount: 1,
+      systemPrompt: "s".repeat(380_000),
+      authoritativePromptTokens: 55_000,
+    });
+
+    expect(transformed).toBe(contextForNextCall);
   });
 
   it("does not run mid-turn precheck when no new tool result was appended", async () => {
@@ -502,6 +1191,31 @@ describe("installContextEngineLoopHook", () => {
   const tokenBudget = 4096;
   const modelId = "test-model";
 
+  it("reports the engine's assembled token estimate to the mid-turn guard", async () => {
+    const agent = makeGuardableAgent();
+    const engine = makeMockEngine({
+      assemble: async ({ messages }) => ({ messages, estimatedTokens: 54_798.9 }),
+    });
+    const onAssembledTokenEstimate = vi.fn();
+    const remove = installContextEngineLoopHook({
+      agent,
+      contextEngine: engine,
+      sessionId,
+      sessionKey,
+      sessionFile,
+      tokenBudget,
+      modelId,
+      onAssembledTokenEstimate,
+    });
+
+    const initial = [makeUser("prompt")];
+    await callTransform(agent, initial);
+    await callTransform(agent, [...initial, makeToolResult("call_estimate", "result")]);
+
+    expect(onAssembledTokenEstimate).toHaveBeenCalledWith(54_798);
+    remove();
+  });
+
   function installHook(
     agent: ReturnType<typeof makeGuardableAgent>,
     engine: MockedEngine,
@@ -545,6 +1259,7 @@ describe("installContextEngineLoopHook", () => {
     const removeGuard = installToolResultContextGuard({
       agent,
       contextWindowTokens: options.contextWindowTokens ?? 200_000,
+      contextEngineOwnsAssembly: true,
       midTurnPrecheck: {
         enabled: true,
         contextTokenBudget: options.contextTokenBudget ?? 20_000,
@@ -580,6 +1295,115 @@ describe("installContextEngineLoopHook", () => {
     return { initial, withNew, transformed };
   }
 
+  it("restores current-prompt image blocks after loop-hook assembly", async () => {
+    const agent = makeGuardableAgent();
+    const source = makeUserWithImage("[media attached: media://inbound/live-photo.jpg]", {
+      data: "live-image-bytes",
+    });
+    const rewrittenView = [
+      makeUser(
+        "[User image: live-photo.jpg (image/jpeg, 101,293 bytes) | LCM file: file_da899f6826fc4650]",
+      ),
+    ];
+    const engine = makeMockEngine({
+      assemble: async () => ({ messages: rewrittenView, estimatedTokens: 0 }),
+    });
+    const remove = installContextEngineLoopHook({
+      agent,
+      contextEngine: engine,
+      sessionId,
+      sessionKey,
+      sessionFile,
+      tokenBudget,
+      modelId,
+      maxImageInputCount: 50,
+      getPrePromptMessageCount: () => 0,
+    });
+
+    const toolResult = makeToolResult("call_1", "ok");
+    const transformed = (await callTransform(agent, [source, toolResult])) as AgentMessage[];
+
+    expect((transformed[0] as { content?: unknown }).content).toEqual([
+      {
+        type: "text",
+        text: "[User image: live-photo.jpg (image/jpeg, 101,293 bytes) | LCM file: file_da899f6826fc4650]",
+      },
+      { type: "image", data: "live-image-bytes", mimeType: "image/jpeg" },
+    ]);
+    remove();
+  });
+
+  it("restores current-prompt images when an engine mutates and returns its input array", async () => {
+    const agent = makeGuardableAgent();
+    const source = makeUserWithImage("[media attached: media://inbound/in-place.jpg]", {
+      data: "in-place-image-bytes",
+    });
+    const engine = makeMockEngine({
+      assemble: async ({ messages }) => {
+        (messages[0] as unknown as { content: string }).content =
+          "[User image: in-place.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4650]";
+        return { messages, estimatedTokens: 0 };
+      },
+    });
+    const remove = installContextEngineLoopHook({
+      agent,
+      contextEngine: engine,
+      sessionId,
+      sessionKey,
+      sessionFile,
+      tokenBudget,
+      modelId,
+      maxImageInputCount: 50,
+      getPrePromptMessageCount: () => 0,
+    });
+
+    const transformed = (await callTransform(agent, [
+      source,
+      makeToolResult("call_in_place", "ok"),
+    ])) as AgentMessage[];
+
+    expect((transformed[0] as { content?: unknown }).content).toEqual([
+      {
+        type: "text",
+        text: "[User image: in-place.jpg (image/jpeg, 123 bytes) | LCM file: file_da899f6826fc4650]",
+      },
+      { type: "image", data: "in-place-image-bytes", mimeType: "image/jpeg" },
+    ]);
+    remove();
+  });
+
+  it("leaves externalized image refs textual when the model lacks image input", async () => {
+    const agent = makeGuardableAgent();
+    const source = makeUserWithImage("[media attached: media://inbound/live-photo.jpg]", {
+      data: "live-image-bytes",
+    });
+    const rewrittenView = [
+      makeUser(
+        "[User image: live-photo.jpg (image/jpeg, 101,293 bytes) | LCM file: file_da899f6826fc4650]",
+      ),
+    ];
+    const engine = makeMockEngine({
+      assemble: async () => ({ messages: rewrittenView, estimatedTokens: 0 }),
+    });
+    const remove = installContextEngineLoopHook({
+      agent,
+      contextEngine: engine,
+      sessionId,
+      sessionKey,
+      sessionFile,
+      tokenBudget,
+      modelId,
+      maxImageInputCount: 0,
+      getPrePromptMessageCount: () => 1,
+    });
+
+    const toolResult = makeToolResult("call_1", "ok");
+    const transformed = await callTransform(agent, [source, toolResult]);
+
+    expect(transformed).toBe(rewrittenView);
+    remove();
+  });
+
   it("returns early when the current messages match the pre-prompt baseline", async () => {
     const agent = makeGuardableAgent();
     const engine = makeMockEngine();
@@ -593,7 +1417,7 @@ describe("installContextEngineLoopHook", () => {
     expect(engine.assemble).not.toHaveBeenCalled();
   });
 
-  it("keeps the pressure guard active around ownsCompaction loop assembly", async () => {
+  it("uses the engine estimate instead of char pressure after ownsCompaction assembly", async () => {
     const agent = makeGuardableAgent();
     const engine = makeMockEngine();
     installOwnsCompactionHookWithGuard(agent, engine, {
@@ -606,7 +1430,7 @@ describe("installContextEngineLoopHook", () => {
 
     const messages = [makeUser("first"), makeToolResult("call_1", "x".repeat(80_000))];
 
-    await expect(callTransform(agent, messages)).rejects.toBeInstanceOf(MidTurnPrecheckSignal);
+    await expect(callTransform(agent, messages)).resolves.toStrictEqual(messages);
     expect(engine.afterTurn).toHaveBeenCalledTimes(1);
     expect(engine.assemble).toHaveBeenCalledTimes(1);
   });
@@ -651,9 +1475,18 @@ describe("installContextEngineLoopHook", () => {
   it("passes runtimeContext through loop-hook afterTurn calls", async () => {
     const agent = makeGuardableAgent();
     const engine = makeMockEngine();
+    const externalFiles = [
+      {
+        marker: "[OpenClaw External File: external_file_1]",
+        idempotencyKey: "external_file_1",
+        attachmentIndex: 0,
+        mediaRef: "media://inbound/clip.mp4",
+      },
+    ];
     installHook(agent, engine, 1, () => ({
       provider: "anthropic",
       modelId,
+      externalFiles,
       promptCache: {
         retention: "short",
         lastCacheTouchAt: 123,
@@ -669,11 +1502,13 @@ describe("installContextEngineLoopHook", () => {
     expect(afterTurnParams?.runtimeContext).toEqual({
       provider: "anthropic",
       modelId,
+      externalFiles,
       promptCache: {
         retention: "short",
         lastCacheTouchAt: 123,
       },
     });
+    expect(recordMockArg(engine.assemble).runtimeContext).toEqual(afterTurnParams?.runtimeContext);
   });
 
   it("passes runtimeSettings through loop-hook afterTurn and assemble calls", async () => {
@@ -718,7 +1553,7 @@ describe("installContextEngineLoopHook", () => {
     });
   });
 
-  it("projects marked model prompts for ingest without leaking the marker to assembly", async () => {
+  it("ingests the exact provider view for marked model prompts without leaking the marker", async () => {
     const agent = makeGuardableAgent();
     const engine = makeMockEngine();
     installHook(agent, engine, 0);
@@ -732,7 +1567,12 @@ describe("installContextEngineLoopHook", () => {
     const assembleMessage = (recordMockArg(engine.assemble).messages as AgentMessage[])[0];
     const transformedMessage = (transformed as AgentMessage[])[0];
 
-    expect(afterTurnMessage).toMatchObject({ role: "user", content: "visible prompt" });
+    // The hook only exists for assembly-authoritative engines, so ingest and
+    // assembly must both see the provider text, never the transcript projection.
+    expect(afterTurnMessage).toMatchObject({
+      role: "user",
+      content: "model-only hook context\n\nvisible prompt",
+    });
     expect(JSON.stringify(afterTurnMessage)).not.toContain("__openclawTranscriptPromptText");
     expect(assembleMessage).toMatchObject({
       role: "user",
@@ -744,6 +1584,32 @@ describe("installContextEngineLoopHook", () => {
       content: "model-only hook context\n\nvisible prompt",
     });
     expect(JSON.stringify(transformedMessage)).not.toContain("__openclawTranscriptPromptText");
+  });
+
+  it("keeps marked model prompt content on the wire when assembly rebuilds from ingested state", async () => {
+    const agent = makeGuardableAgent();
+    // DB-authoritative engine: assemble() returns what afterTurn ingested,
+    // ignoring the messages passed to assemble (the lossless-claw shape).
+    let ingested: AgentMessage[] = [];
+    const engine = makeMockEngine({
+      afterTurn: async (params) => {
+        ingested = params.messages.map((message) => structuredClone(message));
+      },
+      assemble: async () => ({ messages: ingested, estimatedTokens: 0 }),
+    });
+    installHook(agent, engine, 0);
+
+    const modelPrompt = makeUser("model-only reset bootstrap\n\nbrodie /new");
+    markTranscriptPromptText(modelPrompt, "brodie /new");
+    const messages = [modelPrompt, makeToolResult("call_1", "result")];
+    const transformed = await callTransform(agent, messages);
+
+    const transformedMessage = (transformed as AgentMessage[])[0];
+    expect(transformedMessage).toMatchObject({
+      role: "user",
+      content: "model-only reset bootstrap\n\nbrodie /new",
+    });
+    expect(JSON.stringify(transformed)).not.toContain("__openclawTranscriptPromptText");
   });
 
   it("calls afterTurn and assemble when new messages are appended after the first call", async () => {
@@ -857,7 +1723,7 @@ describe("installContextEngineLoopHook", () => {
     );
   });
 
-  it("repairs same-reference ownsCompaction assembled loop views", async () => {
+  it("repairs disposable same-reference ownsCompaction assembled loop views", async () => {
     const agent = makeGuardableAgent();
     const engine = makeMockEngine();
     installContextEngineLoopHook({
@@ -876,7 +1742,8 @@ describe("installContextEngineLoopHook", () => {
       firstResultText: "r",
     });
 
-    expect(recordMockArg(engine.assemble).messages).toBe(withNew);
+    expect(recordMockArg(engine.assemble).messages).not.toBe(withNew);
+    expect(recordMockArg(engine.assemble).messages).toEqual(withNew);
     expect(transformed).not.toBe(withNew);
     expect(transformed).toEqual([expect.objectContaining({ role: "user", content: "first" })]);
     expect((transformed as AgentMessage[]).some((message) => message.role === "toolResult")).toBe(
@@ -906,7 +1773,8 @@ describe("installContextEngineLoopHook", () => {
     expect(await callTransform(agent, secondSource)).toBe(secondSource);
 
     const retry = await callTransform(agent, secondSource);
-    expect(retry).toBe(secondSource);
+    expect(retry).toStrictEqual(secondSource);
+    expect(retry).not.toBe(secondSource);
     expect(retry).not.toBe(compactedView);
     expect(engine.assemble).toHaveBeenCalledTimes(3);
   });
@@ -934,7 +1802,8 @@ describe("installContextEngineLoopHook", () => {
     expect(await callTransform(agent, longSource)).toBe(compactedView);
 
     const resetSource = [makeUser("reset")];
-    expect(await callTransform(agent, resetSource)).toBe(resetSource);
+    const reset = await callTransform(agent, resetSource);
+    expect(reset).toStrictEqual(resetSource);
   });
 
   it("clears an assembled view when source history resets at the same length", async () => {
@@ -960,7 +1829,9 @@ describe("installContextEngineLoopHook", () => {
     expect(await callTransform(agent, source)).toBe(compactedView);
 
     const resetSource = [makeUser("reset"), makeToolResult("call_3", "r3"), makeUser("fresh")];
-    expect(await callTransform(agent, resetSource)).toBe(resetSource);
+    const reset = await callTransform(agent, resetSource);
+    expect(reset).toStrictEqual(resetSource);
+    expect(reset).not.toBe(resetSource);
   });
 
   it("returns the assembled view when the engine rewrites content without changing count", async () => {
@@ -980,14 +1851,15 @@ describe("installContextEngineLoopHook", () => {
     expect(transformed).toBe(rewrittenView);
   });
 
-  it("returns the source when the engine returns the same array reference", async () => {
+  it("returns an equivalent disposable view when the engine returns its input reference", async () => {
     const agent = makeGuardableAgent();
     const engine = makeMockEngine();
     installHook(agent, engine);
 
     const { transformed, withNew } = await callAfterInitialToolResult(agent);
 
-    expect(transformed).toBe(withNew);
+    expect(transformed).not.toBe(withNew);
+    expect(transformed).toEqual(withNew);
   });
 
   it("does not mutate the source messages array", async () => {
@@ -1079,10 +1951,12 @@ describe("installContextEngineLoopHook", () => {
     expect(transformed).toBe(withNew);
   });
 
-  it("falls through to source messages when engine.assemble throws", async () => {
+  it("falls through to uncorrupted source messages when engine mutates its input then throws", async () => {
     const agent = makeGuardableAgent();
     const engine = makeMockEngine({
-      assemble: async () => {
+      assemble: async ({ messages }) => {
+        (messages[0] as unknown as { content: string }).content = "corrupted by engine";
+        messages.splice(1);
         throw new Error("engine assemble boom");
       },
     });
@@ -1091,6 +1965,9 @@ describe("installContextEngineLoopHook", () => {
     const { transformed, withNew } = await callAfterInitialToolResult(agent);
 
     expect(transformed).toBe(withNew);
+    expect(withNew).toHaveLength(4);
+    expect((withNew[0] as unknown as { content?: unknown }).content).toBe("first");
+    expect(JSON.stringify(withNew)).not.toContain("corrupted by engine");
   });
 
   it("invokes any pre-existing transformContext before the engine sees messages", async () => {

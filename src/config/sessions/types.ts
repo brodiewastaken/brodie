@@ -228,6 +228,15 @@ export type RestartRecoveryRun = {
   lifecycleGeneration: string;
 };
 
+export type CronSessionArchiveReceipt = {
+  version: 1;
+  stableKey: string;
+  archivedKey: string;
+  sessionId: string;
+  idempotencyId: string;
+  archivedAt: number;
+};
+
 export type SessionEntry = {
   /**
    * Last delivered heartbeat payload (used to suppress duplicate heartbeat notifications).
@@ -254,6 +263,8 @@ export type SessionEntry = {
   updatedAt: number;
   /** Opaque owner revision used to reject stale lifecycle mutations. */
   lifecycleRevision?: string;
+  /** Immutable exact-run key retained for one isolated cron generation. */
+  cronRunSessionKey?: string;
   // archivedAt/pinnedAt mirror the Codex thread-management shape (state DB
   // threads.archived_at: the boolean is always derived from the timestamp and
   // stamped server-side). Codex serializes camelCase but in epoch SECONDS;
@@ -261,6 +272,8 @@ export type SessionEntry = {
   // codex plugin seam when exchanging thread metadata.
   /** Timestamp (ms) when the session was archived from active session lists. */
   archivedAt?: number;
+  /** Durable receipt for relocating one archived stable cron generation. */
+  cronArchiveReceipt?: CronSessionArchiveReceipt;
   /** Timestamp (ms) when the session was pinned for quick access. */
   pinnedAt?: number;
   /** Timestamp (ms) when an operator client last marked the session read. */

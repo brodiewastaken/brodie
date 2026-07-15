@@ -369,6 +369,70 @@ describe("resolveMemoryBackendConfig", () => {
     expect(devNames).toStrictEqual(["memory-dir-dev", "memory-root-dev", "notion-mirror"]);
   });
 
+  it("preserves explicit workspace-local collection names when preserveName is enabled", () => {
+    const cfg = {
+      agents: {
+        defaults: { workspace: "/workspace/root" },
+        list: [{ id: "main", default: true, workspace: "/workspace/root" }],
+      },
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          paths: [
+            {
+              path: "/workspace/root",
+              name: "nova-workspace",
+              preserveName: true,
+              pattern: "**/*.md",
+            },
+          ],
+        },
+      },
+    } as OpenClawConfig;
+    const resolved = resolveMemoryBackendConfig({ cfg, agentId: "main" });
+    expect(collectionNames(resolved)).toStrictEqual(["nova-workspace"]);
+  });
+
+  it("keeps workspace-local explicit names agent-scoped without preserveName", () => {
+    const cfg = {
+      agents: {
+        defaults: { workspace: "/workspace/root" },
+        list: [{ id: "main", default: true, workspace: "/workspace/root" }],
+      },
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          paths: [{ path: "/workspace/root", name: "nova-workspace", pattern: "**/*.md" }],
+        },
+      },
+    } as OpenClawConfig;
+    const resolved = resolveMemoryBackendConfig({ cfg, agentId: "main" });
+    expect(collectionNames(resolved)).toStrictEqual(["nova-workspace-main"]);
+  });
+
+  it("resolves and sanitizes configured session collection names", () => {
+    const cfg = {
+      agents: {
+        defaults: { workspace: "/workspace/root" },
+        list: [{ id: "main", default: true, workspace: "/workspace/root" }],
+      },
+      memory: {
+        backend: "qmd",
+        qmd: {
+          includeDefaultMemory: false,
+          sessions: { enabled: true, name: "Nova Sessions" },
+        },
+      },
+    } as OpenClawConfig;
+    const resolved = resolveMemoryBackendConfig({ cfg, agentId: "main" });
+    expect(requireQmdConfig(resolved).sessions).toMatchObject({
+      enabled: true,
+      name: "nova-sessions",
+    });
+  });
+
   it("keeps symlinked workspace paths agent-scoped when deciding custom collection names", async () => {
     const tmpRoot = await createFixtureDir("symlinked-workspace");
     const workspaceDir = path.join(tmpRoot, "workspace");

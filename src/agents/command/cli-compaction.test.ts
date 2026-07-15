@@ -195,83 +195,90 @@ describe("runCliTurnCompactionLifecycle", () => {
     expect(updatedEntry?.claudeCliSessionId).toBeUndefined();
   });
 
-  it("treats below-target CLI transcript compaction as a no-op", async () => {
-    const sessionKey = "agent:main:cli-under-target";
-    const sessionId = "session-cli-under-target";
-    const sessionFile = path.join(tmpDir, "session-under-target.jsonl");
-    const storePath = path.join(tmpDir, "sessions-under-target.json");
-    await writeSessionFile({ sessionFile, sessionId });
+  it.each(["already under target", "no eligible context to compact"])(
+    "treats skip-like CLI transcript compaction as a no-op: %s",
+    async (reason) => {
+      const sessionKey = "agent:main:cli-under-target";
+      const sessionId = "session-cli-under-target";
+      const sessionFile = path.join(tmpDir, "session-under-target.jsonl");
+      const storePath = path.join(tmpDir, "sessions-under-target.json");
+      await writeSessionFile({ sessionFile, sessionId });
 
-    const sessionEntry: SessionEntry = {
-      sessionId,
-      updatedAt: Date.now(),
-      sessionFile,
-      contextTokens: 1_000,
-      totalTokens: 950,
-      totalTokensFresh: true,
-      cliSessionBindings: {
-        "claude-cli": { sessionId: "claude-session" },
-      },
-    };
-    const sessionStore: Record<string, SessionEntry> = { [sessionKey]: sessionEntry };
-    await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2), "utf-8");
-
-    const compactCalls: Array<Parameters<ContextEngine["compact"]>[0]> = [];
-    const maintenance = vi.fn(async () => ({ changed: false, bytesFreed: 0, rewrittenEntries: 0 }));
-    const recordCliCompactionInStore = vi.fn();
-    setCliCompactionTestDeps({
-      resolveContextEngine: async () => ({
-        ...buildContextEngine({ compactCalls }),
-        async compact(compactParams) {
-          compactCalls.push(compactParams);
-          return {
-            ok: true,
-            compacted: false,
-            reason: "already under target",
-          };
+      const sessionEntry: SessionEntry = {
+        sessionId,
+        updatedAt: Date.now(),
+        sessionFile,
+        contextTokens: 1_000,
+        totalTokens: 950,
+        totalTokensFresh: true,
+        cliSessionBindings: {
+          "claude-cli": { sessionId: "claude-session" },
         },
-      }),
-      createPreparedEmbeddedAgentSettingsManager: async () => ({
-        getCompactionReserveTokens: () => 200,
-        getCompactionKeepRecentTokens: () => 0,
-        applyOverrides: () => {},
-      }),
-      shouldPreemptivelyCompactBeforePrompt: () => ({
-        route: "fits",
-        shouldCompact: false,
-        estimatedPromptTokens: 600,
-        promptBudgetBeforeReserve: 800,
-        overflowTokens: 0,
-        toolResultReducibleChars: 0,
-        effectiveReserveTokens: 200,
-      }),
-      resolveLiveToolResultMaxChars: () => 20_000,
-      runContextEngineMaintenance: maintenance,
-      recordCliCompactionInStore,
-    });
+      };
+      const sessionStore: Record<string, SessionEntry> = { [sessionKey]: sessionEntry };
+      await fs.writeFile(storePath, JSON.stringify(sessionStore, null, 2), "utf-8");
 
-    const updatedEntry = await runCliTurnCompactionLifecycle({
-      cfg: {} as OpenClawConfig,
-      sessionId,
-      sessionKey,
-      sessionEntry,
-      sessionStore,
-      storePath,
-      sessionAgentId: "main",
-      workspaceDir: tmpDir,
-      agentDir: tmpDir,
-      provider: "claude-cli",
-      model: "opus",
-    });
+      const compactCalls: Array<Parameters<ContextEngine["compact"]>[0]> = [];
+      const maintenance = vi.fn(async () => ({
+        changed: false,
+        bytesFreed: 0,
+        rewrittenEntries: 0,
+      }));
+      const recordCliCompactionInStore = vi.fn();
+      setCliCompactionTestDeps({
+        resolveContextEngine: async () => ({
+          ...buildContextEngine({ compactCalls }),
+          async compact(compactParams) {
+            compactCalls.push(compactParams);
+            return {
+              ok: true,
+              compacted: false,
+              reason,
+            };
+          },
+        }),
+        createPreparedEmbeddedAgentSettingsManager: async () => ({
+          getCompactionReserveTokens: () => 200,
+          getCompactionKeepRecentTokens: () => 0,
+          applyOverrides: () => {},
+        }),
+        shouldPreemptivelyCompactBeforePrompt: () => ({
+          route: "fits",
+          shouldCompact: false,
+          estimatedPromptTokens: 600,
+          promptBudgetBeforeReserve: 800,
+          overflowTokens: 0,
+          toolResultReducibleChars: 0,
+          effectiveReserveTokens: 200,
+        }),
+        resolveLiveToolResultMaxChars: () => 20_000,
+        runContextEngineMaintenance: maintenance,
+        recordCliCompactionInStore,
+      });
 
-    expect(compactCalls).toHaveLength(1);
-    expect(maintenance).not.toHaveBeenCalled();
-    expect(recordCliCompactionInStore).not.toHaveBeenCalled();
-    expect(updatedEntry).toBe(sessionEntry);
-    expect(sessionStore[sessionKey]?.cliSessionBindings?.["claude-cli"]?.sessionId).toBe(
-      "claude-session",
-    );
-  });
+      const updatedEntry = await runCliTurnCompactionLifecycle({
+        cfg: {} as OpenClawConfig,
+        sessionId,
+        sessionKey,
+        sessionEntry,
+        sessionStore,
+        storePath,
+        sessionAgentId: "main",
+        workspaceDir: tmpDir,
+        agentDir: tmpDir,
+        provider: "claude-cli",
+        model: "opus",
+      });
+
+      expect(compactCalls).toHaveLength(1);
+      expect(maintenance).not.toHaveBeenCalled();
+      expect(recordCliCompactionInStore).not.toHaveBeenCalled();
+      expect(updatedEntry).toBe(sessionEntry);
+      expect(sessionStore[sessionKey]?.cliSessionBindings?.["claude-cli"]?.sessionId).toBe(
+        "claude-session",
+      );
+    },
+  );
 
   it("treats already-compacted CLI transcript compaction as a no-op", async () => {
     const sessionKey = "agent:main:qwen-already-compacted";

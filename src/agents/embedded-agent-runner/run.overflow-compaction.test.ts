@@ -29,6 +29,7 @@ import {
   mockedCoerceToFailoverError,
   mockedCompactDirect,
   mockedContextEngine,
+  mockedCreatePreparedEmbeddedAgentSettingsManager,
   mockedDescribeFailoverError,
   mockedEvaluateContextWindowGuard,
   mockedEnsureAuthProfileStore,
@@ -2175,6 +2176,163 @@ describe("runEmbeddedAgent overflow compaction trigger routing", () => {
     });
   });
 
+  it("uses the reserve-adjusted budget when a plugin harness omits its attempt budget", async () => {
+    const { clearAgentHarnesses, registerAgentHarness } = await import("../harness/registry.js");
+    const pluginRunAttempt = vi
+      .fn<AgentHarness["runAttempt"]>()
+      .mockResolvedValueOnce(makeAttemptResult({ promptError: makeOverflowError() }))
+      .mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+    const runtimePlan = makeForwardedRuntimePlan({
+      resolvedRef: {
+        provider: "anthropic",
+        modelId: "test-model",
+        harnessId: "anthropic-plugin",
+      },
+    });
+    mockedResolveContextWindowInfo.mockReturnValue({
+      tokens: 272_000,
+      source: "model",
+    });
+    mockedContextEngine.info.ownsCompaction = true;
+    mockedCompactDirect.mockResolvedValueOnce(
+      makeCompactionSuccess({
+        summary: "plugin harness overflow compaction",
+        tokensAfter: 100_000,
+      }),
+    );
+    clearAgentHarnesses();
+    registerAgentHarness({
+      id: "anthropic-plugin",
+      label: "Anthropic plugin",
+      supports: (ctx) =>
+        ctx.provider === "anthropic" ? { supported: true, priority: 100 } : { supported: false },
+      runAttempt: pluginRunAttempt,
+    });
+    mockedBuildAgentRuntimePlan.mockReturnValueOnce(runtimePlan);
+
+    try {
+      await runEmbeddedAgent({
+        ...overflowBaseRunParams,
+        provider: "anthropic",
+        model: "test-model",
+        agentHarnessId: "anthropic-plugin",
+        config: {
+          agents: {
+            defaults: {
+              compaction: {
+                reserveTokens: 42_000,
+                reserveTokensFloor: 42_000,
+              },
+            },
+          },
+        },
+        runId: "plugin-harness-reserve-adjusted-overflow-budget",
+      });
+    } finally {
+      clearAgentHarnesses();
+    }
+
+    expect(pluginRunAttempt).toHaveBeenCalledTimes(2);
+    expectMockCallFields(mockedCompactDirect, {
+      tokenBudget: 230_000,
+    });
+  });
+
+  it("uses a settings-level reserve for both attempt assembly and overflow recovery", async () => {
+    const { clearAgentHarnesses, registerAgentHarness } = await import("../harness/registry.js");
+    const actualSettingsModule = await vi.importActual<
+      typeof import("../agent-project-settings.js")
+    >("../agent-project-settings.js");
+    const settingsRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "openclaw-cycle3-settings-reserve-"),
+    );
+    const workspaceDir = path.join(settingsRoot, "workspace");
+    const agentDir = path.join(settingsRoot, "agent");
+    await fs.mkdir(workspaceDir, { recursive: true });
+    await fs.mkdir(agentDir, { recursive: true });
+    await fs.writeFile(
+      path.join(agentDir, "settings.json"),
+      JSON.stringify({ compaction: { reserveTokens: 50_000 } }),
+      "utf8",
+    );
+    const pluginRunAttempt = vi
+      .fn<AgentHarness["runAttempt"]>()
+      .mockResolvedValueOnce(makeAttemptResult({ promptError: makeOverflowError() }))
+      .mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+    mockedResolveContextWindowInfo.mockReturnValue({
+      tokens: 272_000,
+      source: "model",
+    });
+    mockedCreatePreparedEmbeddedAgentSettingsManager.mockImplementation(
+      actualSettingsModule.createPreparedEmbeddedAgentSettingsManager,
+    );
+    mockedContextEngine.info.ownsCompaction = true;
+    mockedCompactDirect.mockResolvedValueOnce(
+      makeCompactionSuccess({
+        summary: "settings reserve overflow compaction",
+        tokensAfter: 100_000,
+      }),
+    );
+    clearAgentHarnesses();
+    registerAgentHarness({
+      id: "anthropic-plugin",
+      label: "Anthropic plugin",
+      supports: (ctx) =>
+        ctx.provider === "anthropic" ? { supported: true, priority: 100 } : { supported: false },
+      runAttempt: pluginRunAttempt,
+    });
+    mockedBuildAgentRuntimePlan.mockReturnValue(
+      makeForwardedRuntimePlan({
+        resolvedRef: {
+          provider: "anthropic",
+          modelId: "test-model",
+          harnessId: "anthropic-plugin",
+        },
+      }),
+    );
+
+    try {
+      await runEmbeddedAgent({
+        ...overflowBaseRunParams,
+        provider: "anthropic",
+        model: "test-model",
+        agentHarnessId: "anthropic-plugin",
+        workspaceDir,
+        agentDir,
+        config: {
+          agents: {
+            defaults: {
+              compaction: {
+                reserveTokensFloor: 42_000,
+              },
+            },
+          },
+        },
+        runId: "settings-reserve-shared-overflow-budget",
+      });
+    } finally {
+      clearAgentHarnesses();
+      await fs.rm(settingsRoot, { recursive: true, force: true });
+    }
+
+    expect(pluginRunAttempt).toHaveBeenCalledTimes(2);
+    expectMockCallFields(pluginRunAttempt, {
+      contextBudget: {
+        contextWindowTokens: 272_000,
+        effectiveReserveTokens: 50_000,
+        usablePromptTokenBudget: 222_000,
+      },
+    });
+    const compactParams = expectMockCallFields(mockedCompactDirect, {});
+    expect(compactParams.tokenBudget).toBe(222_000);
+    expect(compactParams.runtimeSettings).toMatchObject({
+      limits: {
+        promptTokenBudget: 222_000,
+        maxOutputTokens: 50_000,
+      },
+    });
+  });
+
   it("threads prompt-cache runtime context into overflow compaction", async () => {
     mockedRunEmbeddedAttempt
       .mockResolvedValueOnce(
@@ -2386,7 +2544,7 @@ describe("runEmbeddedAgent overflow compaction trigger routing", () => {
     expect(result.meta.error).toBeUndefined();
   });
 
-  it("passes minimally over-budget count when overflow text is confirmed but unparseable", async () => {
+  it("passes minimally over-usable-budget count when overflow text is confirmed but unparseable", async () => {
     mockedExtractObservedOverflowTokenCount.mockReturnValueOnce(undefined);
     mockedRunEmbeddedAttempt
       .mockResolvedValueOnce(
@@ -2412,7 +2570,7 @@ describe("runEmbeddedAgent overflow compaction trigger routing", () => {
     const result = await runEmbeddedAgent(overflowBaseRunParams);
 
     expectMockCallFields(mockedCompactDirect, {
-      currentTokenCount: 200001,
+      currentTokenCount: 180001,
     });
     expect(result.meta.error).toBeUndefined();
   });
@@ -2628,6 +2786,52 @@ describe("runEmbeddedAgent overflow compaction trigger routing", () => {
       expectRecordFields(mockCallArg(mockedGlobalHookRunner.runAfterCompaction, 0, 1), {
         sessionId: "rotated-session",
       });
+    } finally {
+      replyOperation.complete();
+    }
+  });
+
+  it("adopts an unmeasured rotated compaction without authorizing a retry", async () => {
+    mockedContextEngine.info.ownsCompaction = true;
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({ promptError: makeOverflowError() }),
+    );
+    mockedCompactDirect.mockResolvedValueOnce({
+      ok: true,
+      compacted: true,
+      result: {
+        summary: "unmeasured rotated compaction",
+        tokensBefore: 80_000,
+        sessionTarget: {
+          kind: "file",
+          sessionId: "unmeasured-rotated-session",
+          sessionKey: "test-key",
+          sessionFile: "/tmp/unmeasured-rotated-session.json",
+        },
+      },
+    });
+
+    const replyOperation = createReplyOperation({
+      sessionKey: "test-key",
+      sessionId: "test-session",
+      resetTriggered: false,
+    });
+    const onSessionIdChanged = vi.fn();
+    replyOperation.setPhase("running");
+    try {
+      await runEmbeddedAgent({
+        ...overflowBaseRunParams,
+        replyOperation,
+        onSessionIdChanged,
+      });
+
+      expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
+      expectMockCallFields(mockedRunContextEngineMaintenance, {
+        sessionId: "unmeasured-rotated-session",
+        sessionFile: "/tmp/unmeasured-rotated-session.json",
+      });
+      expect(replyOperation.sessionId).toBe("unmeasured-rotated-session");
+      expect(onSessionIdChanged).toHaveBeenCalledWith("unmeasured-rotated-session");
     } finally {
       replyOperation.complete();
     }

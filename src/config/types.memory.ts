@@ -55,12 +55,16 @@ export type MemoryQmdIndexPath = {
   path: string;
   name?: string;
   pattern?: string;
+  /** Keep an explicit collection name even when the path is inside the workspace. */
+  preserveName?: boolean;
 };
 
 /** Session export settings for QMD memory indexing. */
 export type MemoryQmdSessionConfig = {
   enabled?: boolean;
   exportDir?: string;
+  /** Stable collection name for session exports. */
+  name?: string;
   retentionDays?: number;
 };
 

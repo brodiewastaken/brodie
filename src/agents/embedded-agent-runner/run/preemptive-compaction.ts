@@ -50,6 +50,32 @@ export type LlmBoundaryTokenPressure = {
   renderedChars?: number;
 };
 
+/** Resolves the one usable prompt budget shared by prechecks and context-engine compaction. */
+export function resolveUsablePromptTokenBudget(params: {
+  contextTokenBudget: number;
+  reserveTokens: number;
+}): {
+  contextTokenBudget: number;
+  effectiveReserveTokens: number;
+  usablePromptTokenBudget: number;
+} {
+  const contextTokenBudget = Math.max(1, Math.floor(params.contextTokenBudget));
+  const requestedReserveTokens = Math.max(0, Math.floor(params.reserveTokens));
+  const minPromptBudget = Math.min(
+    MIN_PROMPT_BUDGET_TOKENS,
+    Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
+  );
+  const effectiveReserveTokens = Math.min(
+    requestedReserveTokens,
+    Math.max(0, contextTokenBudget - minPromptBudget),
+  );
+  return {
+    contextTokenBudget,
+    effectiveReserveTokens,
+    usablePromptTokenBudget: Math.max(1, contextTokenBudget - effectiveReserveTokens),
+  };
+}
+
 function estimateStringTokenPressure(text: string, charsPerToken = ESTIMATED_CHARS_PER_TOKEN) {
   return Math.ceil(estimateStringChars(text) / charsPerToken);
 }
@@ -342,18 +368,11 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
       pressureSource = "unwindowed_transcript_estimate";
     }
   }
-  const contextTokenBudget = Math.max(1, Math.floor(params.contextTokenBudget));
-  const requestedReserveTokens = Math.max(0, Math.floor(params.reserveTokens));
-  const minPromptBudget = Math.min(
-    MIN_PROMPT_BUDGET_TOKENS,
-    Math.max(1, Math.floor(contextTokenBudget * MIN_PROMPT_BUDGET_RATIO)),
-  );
-  // Keep a minimum prompt budget even when reserveTokens asks for most of the context window.
-  const effectiveReserveTokens = Math.min(
-    requestedReserveTokens,
-    Math.max(0, contextTokenBudget - minPromptBudget),
-  );
-  const promptBudgetBeforeReserve = Math.max(1, contextTokenBudget - effectiveReserveTokens);
+  const { effectiveReserveTokens, usablePromptTokenBudget: promptBudgetBeforeReserve } =
+    resolveUsablePromptTokenBudget({
+      contextTokenBudget: params.contextTokenBudget,
+      reserveTokens: params.reserveTokens,
+    });
   const overflowTokens = Math.max(0, estimatedPromptTokens - promptBudgetBeforeReserve);
   const toolResultPotential = estimateToolResultReductionPotential({
     messages: messagesForPressure,

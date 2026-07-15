@@ -1313,7 +1313,11 @@ describe("Codex app-server thread lifecycle bindings", () => {
       assemble: vi.fn(),
       compact: vi.fn(),
     } as never;
-    params.contextTokenBudget = 400_000;
+    params.contextBudget = {
+      contextWindowTokens: 400_000,
+      effectiveReserveTokens: 0,
+      usablePromptTokenBudget: 400_000,
+    };
     const appServer = createThreadLifecycleAppServerOptions();
     const request = vi.fn(async (method: string) => {
       if (method === "thread/start") {
@@ -1364,7 +1368,11 @@ describe("Codex app-server thread lifecycle bindings", () => {
       assemble: vi.fn(),
       compact: vi.fn(),
     } as never;
-    params.contextTokenBudget = 400_000;
+    params.contextBudget = {
+      contextWindowTokens: 400_000,
+      effectiveReserveTokens: 0,
+      usablePromptTokenBudget: 400_000,
+    };
     const appServer = createThreadLifecycleAppServerOptions();
     const request = vi.fn(async (method: string) => {
       if (method === "thread/resume") {
@@ -1458,7 +1466,11 @@ describe("Codex app-server thread lifecycle bindings", () => {
       compact: vi.fn(),
     } as never;
     params.config = { memory: { citations: "inline" } } as never;
-    params.contextTokenBudget = 400_000;
+    params.contextBudget = {
+      contextWindowTokens: 400_000,
+      effectiveReserveTokens: 0,
+      usablePromptTokenBudget: 400_000,
+    };
     const appServer = createThreadLifecycleAppServerOptions();
     const request = vi.fn(async (method: string) => {
       if (method === "thread/start") {

@@ -37,6 +37,7 @@ import { sleepWithAbort } from "../../infra/backoff.js";
 import { freezeDiagnosticTraceContext } from "../../infra/diagnostic-trace-context.js";
 import { formatErrorMessage, toErrorObject } from "../../infra/errors.js";
 import { redactIdentifier } from "../../logging/redact-identifier.js";
+import { getCurrentPluginMetadataSnapshot } from "../../plugins/current-plugin-metadata-snapshot.js";
 import { buildAgentHookContextChannelFields } from "../../plugins/hook-agent-context.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { resolveProviderAuthProfileId } from "../../plugins/provider-runtime.js";
@@ -49,6 +50,7 @@ import {
   retireSessionMcpRuntime,
   retireSessionMcpRuntimeForSessionKey,
 } from "../agent-bundle-mcp-tools.js";
+import { createPreparedEmbeddedAgentSettingsManager } from "../agent-project-settings.js";
 import {
   resolveAgentDir,
   resolveSessionAgentIds,
@@ -192,6 +194,7 @@ import {
   hasCodexAppServerRecoveryRetryBudget,
   resolveCodexAppServerRecoveryRetry,
 } from "./run/codex-app-server-recovery.js";
+import { classifyContextEngineCompactionProgress } from "./run/context-engine-compaction-progress.js";
 import { createFailoverDecisionLogger } from "./run/failover-observation.js";
 import { mergeRetryFailoverReason, resolveRunFailoverDecision } from "./run/failover-policy.js";
 import { hasEmbeddedRunConfiguredModelFallbacks } from "./run/fallbacks.js";
@@ -237,6 +240,7 @@ import {
 } from "./run/incomplete-turn.js";
 import type { RunEmbeddedAgentParams } from "./run/params.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
+import { resolveUsablePromptTokenBudget } from "./run/preemptive-compaction.js";
 import { handleRetryLimitExhaustion } from "./run/retry-limit.js";
 import {
   buildBeforeModelResolveAttachments,
@@ -358,6 +362,10 @@ function resolveAttemptDispatchApiKey(params: {
     return undefined;
   }
   return params.apiKeyInfo?.apiKey;
+}
+
+function resolveAttemptAuthMode(params: { apiKeyInfo: ApiKeyInfo | null }): string | undefined {
+  return params.apiKeyInfo?.mode;
 }
 
 function buildBeforeAgentFinalizeRetryPrompt(reason: string): string {
@@ -1204,6 +1212,29 @@ async function runEmbeddedAgentInternal(
         runtimeModel,
       });
       const ctxInfo = resolvedRuntimeModel.ctxInfo;
+      const settingsCwd = params.cwd ? resolveUserPath(params.cwd) : resolvedWorkspace;
+      const preparedSettingsManager = createPreparedEmbeddedAgentSettingsManager({
+        cwd: settingsCwd,
+        agentDir,
+        cfg: params.config,
+        pluginMetadataSnapshot: getCurrentPluginMetadataSnapshot({
+          allowScopedSnapshot: true,
+          config: params.config,
+          env: process.env,
+          workspaceDir: resolvedWorkspace,
+        }),
+        contextTokenBudget: ctxInfo.tokens,
+      });
+      const resolvedPromptBudget = resolveUsablePromptTokenBudget({
+        contextTokenBudget: ctxInfo.tokens,
+        reserveTokens: preparedSettingsManager.getCompactionReserveTokens(),
+      });
+      const contextBudget = {
+        contextWindowTokens: ctxInfo.tokens,
+        effectiveReserveTokens: resolvedPromptBudget.effectiveReserveTokens,
+        usablePromptTokenBudget: resolvedPromptBudget.usablePromptTokenBudget,
+      };
+      const { usablePromptTokenBudget } = contextBudget;
       let effectiveModel = resolvedRuntimeModel.effectiveModel;
       startupStages.mark("model-resolution");
       notifyExecutionPhase("model_resolution", { provider, model: modelId });
@@ -2204,7 +2235,8 @@ async function runEmbeddedAgentInternal(
             config: params.config,
             allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
             contextEngine,
-            contextTokenBudget: ctxInfo.tokens,
+            contextBudget,
+            preparedSettingsManager,
             contextWindowInfo: ctxInfo,
             skillsSnapshot: params.skillsSnapshot,
             prompt,
@@ -2212,6 +2244,11 @@ async function runEmbeddedAgentInternal(
             userTurnTranscriptRecorder: params.userTurnTranscriptRecorder,
             currentInboundEventKind: params.currentInboundEventKind,
             currentInboundContext: params.currentInboundContext,
+            externalFiles: params.externalFiles,
+            queueBatchIdentity: params.queueBatchIdentity,
+            promptImageRefExclusions: params.promptImageRefExclusions,
+            maxNativeImages: params.maxNativeImages,
+            maxNativeImagesSource: params.maxNativeImagesSource,
             images: params.images,
             imageOrder: params.imageOrder,
             clientTools: params.clientTools,
@@ -2245,6 +2282,7 @@ async function runEmbeddedAgentInternal(
               params.config,
             ),
             resolvedApiKey: resolvedStreamApiKey,
+            resolvedAuthMode: resolveAttemptAuthMode({ apiKeyInfo }),
             authProfileId: lastProfileId,
             authProfileIdSource: lockedProfileId ? "user" : "auto",
             initialReplayState: accumulatedReplayState,
@@ -2659,12 +2697,13 @@ async function runEmbeddedAgentInternal(
                     sessionId: activeSessionId,
                     sessionKey: params.sessionKey,
                     sessionFile: activeSessionFile,
-                    tokenBudget: ctxInfo.tokens,
+                    tokenBudget: usablePromptTokenBudget,
                     force: true,
                     compactionTarget: "budget",
                     runtimeContext: timeoutCompactionRuntimeContext,
                     runtimeSettings: buildEmbeddedContextEngineRuntimeSettings({
-                      tokenBudget: ctxInfo.tokens,
+                      tokenBudget: usablePromptTokenBudget,
+                      maxOutputTokens: contextBudget.effectiveReserveTokens,
                     }),
                   },
                   resolveCompactionTimeoutMs(params.config),
@@ -2680,7 +2719,9 @@ async function runEmbeddedAgentInternal(
                   reason: String(compactErr),
                 };
               }
-              const previousSessionId = timeoutCompactResult.compacted
+              const timeoutCompactionProgress =
+                classifyContextEngineCompactionProgress(timeoutCompactResult);
+              const previousSessionId = timeoutCompactionProgress.mutated
                 ? adoptCompactionTranscript(timeoutCompactResult)
                 : undefined;
               await runOwnsCompactionAfterHook(
@@ -2688,22 +2729,21 @@ async function runEmbeddedAgentInternal(
                 timeoutCompactResult,
                 previousSessionId,
               );
-              if (timeoutCompactResult.compacted) {
+              if (
+                timeoutCompactionProgress.successfulMutation &&
+                contextEngine.info.ownsCompaction === true
+              ) {
+                await runPostCompactionSideEffects({
+                  config: params.config,
+                  sessionKey: params.sessionKey,
+                  agentId: sessionAgentId,
+                  sessionFile: activeSessionFile,
+                });
+              }
+              if (timeoutCompactionProgress.retryAuthorized) {
                 autoCompactionCount += 1;
-                if (
-                  typeof timeoutCompactResult.result?.tokensAfter === "number" &&
-                  Number.isFinite(timeoutCompactResult.result.tokensAfter) &&
-                  timeoutCompactResult.result.tokensAfter >= 0
-                ) {
-                  lastCompactionTokensAfter = Math.floor(timeoutCompactResult.result.tokensAfter);
-                }
-                if (contextEngine.info.ownsCompaction === true) {
-                  await runPostCompactionSideEffects({
-                    config: params.config,
-                    sessionKey: params.sessionKey,
-                    agentId: sessionAgentId,
-                    sessionFile: activeSessionFile,
-                  });
+                if (timeoutCompactionProgress.tokensAfter !== undefined) {
+                  lastCompactionTokensAfter = timeoutCompactionProgress.tokensAfter;
                 }
                 log.info(
                   `[timeout-compaction] compaction succeeded for ${provider}/${modelId}; retrying prompt`,
@@ -2712,7 +2752,10 @@ async function runEmbeddedAgentInternal(
                 continue;
               } else {
                 log.warn(
-                  `[timeout-compaction] compaction did not reduce context for ${provider}/${modelId}; falling through to normal handling`,
+                  `[timeout-compaction] compaction did not produce a successful measured reduction for ` +
+                    `${provider}/${modelId}; falling through to normal handling ` +
+                    `ok=${timeoutCompactResult.ok} compacted=${timeoutCompactResult.compacted} ` +
+                    `exhausted=${timeoutCompactionProgress.exhausted}`,
                 );
               }
             }
@@ -2753,10 +2796,10 @@ async function runEmbeddedAgentInternal(
             const overflowTokenCountForCompaction =
               observedOverflowTokens ??
               preflightEstimatedPromptTokens ??
-              (ctxInfo.tokens > 0
+              (usablePromptTokenBudget > 0
                 ? // Confirmed overflow with an unparseable provider message still carries a
                   // minimally over-budget count for compaction engines and diagnostics.
-                  ctxInfo.tokens + 1
+                  usablePromptTokenBudget + 1
                 : undefined);
             log.warn(
               `[context-overflow-diag] sessionKey=${params.sessionKey ?? params.sessionId} ` +
@@ -2769,6 +2812,7 @@ async function runEmbeddedAgentInternal(
                 `error=${errorText.slice(0, 200)}`,
             );
             const isCompactionFailure = isCompactionFailureError(errorText);
+            let compactionTerminalReason: string | undefined;
             const hadAttemptLevelCompaction = attemptCompactionCount > 0;
             // If this attempt already compacted (SDK auto-compaction), avoid immediately
             // running another explicit compaction for the same overflow trigger.
@@ -2866,7 +2910,8 @@ async function runEmbeddedAgentInternal(
                 // surfaces as a thrown error handled by the catch below.
                 const overflowCompactionRuntimeSettings = buildEmbeddedContextEngineRuntimeSettings(
                   {
-                    tokenBudget: ctxInfo.tokens,
+                    tokenBudget: usablePromptTokenBudget,
+                    maxOutputTokens: contextBudget.effectiveReserveTokens,
                     degradedReason: "context_overflow",
                   },
                 );
@@ -2876,7 +2921,7 @@ async function runEmbeddedAgentInternal(
                     sessionId: activeSessionId,
                     sessionKey: params.sessionKey,
                     sessionFile: activeSessionFile,
-                    tokenBudget: ctxInfo.tokens,
+                    tokenBudget: usablePromptTokenBudget,
                     ...(overflowTokenCountForCompaction !== undefined
                       ? { currentTokenCount: overflowTokenCountForCompaction }
                       : {}),
@@ -2888,8 +2933,11 @@ async function runEmbeddedAgentInternal(
                   resolveCompactionTimeoutMs(params.config),
                   params.abortSignal,
                 );
-                if (compactResult.ok && compactResult.compacted) {
+                const compactProgress = classifyContextEngineCompactionProgress(compactResult);
+                if (compactProgress.mutated) {
                   previousSessionId = adoptCompactionTranscript(compactResult);
+                }
+                if (compactProgress.successfulMutation) {
                   await runContextEngineMaintenance({
                     contextEngine,
                     sessionId: activeSessionId,
@@ -2934,14 +2982,10 @@ async function runEmbeddedAgentInternal(
                 }
                 continue;
               }
-              if (compactResult.compacted) {
-                adoptCompactionTranscript(compactResult);
-                if (
-                  typeof compactResult.result?.tokensAfter === "number" &&
-                  Number.isFinite(compactResult.result.tokensAfter) &&
-                  compactResult.result.tokensAfter >= 0
-                ) {
-                  lastCompactionTokensAfter = Math.floor(compactResult.result.tokensAfter);
+              const compactProgress = classifyContextEngineCompactionProgress(compactResult);
+              if (compactProgress.retryAuthorized) {
+                if (compactProgress.tokensAfter !== undefined) {
+                  lastCompactionTokensAfter = compactProgress.tokensAfter;
                 }
                 if (preflightRecovery?.route === "compact_then_truncate") {
                   const truncResult = await truncateOversizedToolResultsInSession({
@@ -2987,8 +3031,15 @@ async function runEmbeddedAgentInternal(
                 }
                 continue;
               }
+              compactionTerminalReason = compactProgress.exhausted
+                ? compactProgress.reason || "no eligible context remained to compact"
+                : compactResult.compacted
+                  ? "compaction changed context but did not complete with a measured token reduction"
+                  : compactResult.reason || "compaction did not change context";
               log.warn(
-                `auto-compaction failed for ${provider}/${modelId}: ${compactResult.reason ?? "nothing to compact"}`,
+                `auto-compaction failed to justify a retry for ${provider}/${modelId}: ` +
+                  `${compactionTerminalReason}; ok=${compactResult.ok} ` +
+                  `compacted=${compactResult.compacted} exhausted=${compactProgress.exhausted}`,
               );
             }
             if (!toolResultTruncationAttempted) {
@@ -3050,6 +3101,9 @@ async function runEmbeddedAgentInternal(
             const kind = isCompactionFailure ? "compaction_failure" : "context_overflow";
             const overflowRecoveryText =
               "Context overflow: prompt too large for the model. " +
+              (compactionTerminalReason
+                ? `Recovery stopped because ${compactionTerminalReason}. `
+                : "") +
               "Try /reset (or /new) to start a fresh session, or use a larger-context model.";
             log.warn(
               `[context-overflow-recovery] exhausted provider overflow recovery for ${provider}/${modelId}; ` +

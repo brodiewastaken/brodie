@@ -37,6 +37,10 @@ describe("classifyCompactionReason", () => {
     );
   });
 
+  it('classifies "no eligible context" as a skip-like reason', () => {
+    expect(classifyCompactionReason("no eligible context to compact")).toBe("not_eligible");
+  });
+
   it('classifies "already under target" as below threshold', () => {
     expect(classifyCompactionReason("already under target")).toBe("below_threshold");
   });

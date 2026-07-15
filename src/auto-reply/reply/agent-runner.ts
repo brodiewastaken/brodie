@@ -1230,7 +1230,8 @@ export async function runReplyAgent(params: {
       config: followupRun.run.config,
       attributes: traceAttributes,
     });
-  const effectiveShouldSteer = !isHeartbeat && !effectiveResetTriggered && shouldSteer;
+  const effectiveShouldSteer =
+    !isHeartbeat && !effectiveResetTriggered && shouldSteer && !followupRun.externalFiles?.length;
   const effectiveShouldFollowup = !effectiveResetTriggered && shouldFollowup;
   const typingSignals = createTypingSignaler({
     typing,
@@ -1285,6 +1286,7 @@ export async function runReplyAgent(params: {
         ...(followupRun.userTurnTranscriptRecorder
           ? { userTurnTranscriptRecorder: followupRun.userTurnTranscriptRecorder }
           : {}),
+        ...(followupRun.images ? { images: followupRun.images } : {}),
       },
     );
     if (steerOutcome.queued) {

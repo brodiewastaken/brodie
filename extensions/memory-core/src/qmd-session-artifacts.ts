@@ -169,6 +169,93 @@ export function replaceQmdSessionArtifactMappings(params: {
   }
 }
 
+/** Applies only the session artifacts touched by an incremental QMD mutation. */
+export function upsertQmdSessionArtifactMappings(params: {
+  indexPath: string;
+  mappings: QmdSessionArtifactMapping[];
+}): void {
+  if (params.mappings.length === 0) {
+    return;
+  }
+  const db = openQmdSessionArtifactDb(params.indexPath);
+  let transactionStarted = false;
+  try {
+    ensureQmdSessionArtifactSchema(db);
+    const upsert = db.prepare(
+      `INSERT INTO ${QMD_SESSION_ARTIFACT_TABLE}
+       (collection, artifact_path, search_path, docid, memory_key, agent_id, session_id, archived, updated_at)
+       VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)
+       ON CONFLICT(collection, artifact_path) DO UPDATE SET
+         search_path=excluded.search_path,
+         docid=NULL,
+         memory_key=excluded.memory_key,
+         agent_id=excluded.agent_id,
+         session_id=excluded.session_id,
+         archived=excluded.archived,
+         updated_at=excluded.updated_at`,
+    );
+    db.exec("BEGIN");
+    transactionStarted = true;
+    const updatedAt = Date.now();
+    for (const mapping of params.mappings) {
+      upsert.run(
+        mapping.collection,
+        mapping.artifactPath,
+        mapping.searchPath,
+        mapping.memoryKey,
+        mapping.agentId,
+        mapping.sessionId,
+        mapping.archived ? 1 : 0,
+        updatedAt,
+      );
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    if (transactionStarted) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+    }
+    throw err;
+  } finally {
+    db.close();
+  }
+}
+
+/** Removes identities for session artifacts deleted by an incremental QMD mutation. */
+export function deleteQmdSessionArtifactMappings(params: {
+  collection: string;
+  indexPath: string;
+  artifactPaths: string[];
+}): void {
+  if (params.artifactPaths.length === 0) {
+    return;
+  }
+  const db = openQmdSessionArtifactDb(params.indexPath);
+  let transactionStarted = false;
+  try {
+    ensureQmdSessionArtifactSchema(db);
+    const remove = db.prepare(
+      `DELETE FROM ${QMD_SESSION_ARTIFACT_TABLE} WHERE collection = ? AND artifact_path = ?`,
+    );
+    db.exec("BEGIN");
+    transactionStarted = true;
+    for (const artifactPath of new Set(params.artifactPaths)) {
+      remove.run(params.collection, artifactPath);
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    if (transactionStarted) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+    }
+    throw err;
+  } finally {
+    db.close();
+  }
+}
+
 export function refreshQmdSessionArtifactDocIds(params: {
   collection: string;
   indexPath: string;

@@ -81,7 +81,11 @@ describe("runPreflightCompactionIfNeeded stale totalTokens gating", () => {
     await fs.rm(rootDir, { recursive: true, force: true });
   });
 
-  async function runWithEntry(sessionEntry: SessionEntry, sessionFile: string) {
+  async function runWithEntry(
+    sessionEntry: SessionEntry,
+    sessionFile: string,
+    agentCfgContextTokens = 100_000,
+  ) {
     return await runPreflightCompactionIfNeeded({
       cfg: { agents: { defaults: { compaction: { memoryFlush: {} } } } },
       followupRun: createTestFollowupRun({
@@ -90,7 +94,7 @@ describe("runPreflightCompactionIfNeeded stale totalTokens gating", () => {
         sessionKey: "agent:main:main",
       }),
       defaultModel: "anthropic/claude-opus-4-6",
-      agentCfgContextTokens: 100_000,
+      agentCfgContextTokens,
       sessionEntry,
       sessionStore: { "agent:main:main": sessionEntry },
       sessionKey: "agent:main:main",
@@ -123,6 +127,46 @@ describe("runPreflightCompactionIfNeeded stale totalTokens gating", () => {
     const entry = await runWithEntry(sessionEntry, sessionFile);
 
     expect(entry).toBe(sessionEntry);
+    expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("uses exact context usage from an embedded gap fill instead of aggregate billing", async () => {
+    const sessionFile = path.join(rootDir, "session.jsonl");
+    await fs.writeFile(
+      sessionFile,
+      `${JSON.stringify({
+        message: {
+          role: "assistant",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            contextUsage: {
+              state: "available",
+              promptTokens: 99_492,
+              totalTokens: 99_670,
+            },
+          },
+        },
+      })}\n`,
+      "utf8",
+    );
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      sessionFile,
+      updatedAt: Date.now(),
+      totalTokens: 297_193,
+      totalTokensFresh: false,
+    };
+    compactEmbeddedAgentSessionMock.mockResolvedValueOnce({
+      ok: false,
+      compacted: false,
+      reason: "no eligible context to compact",
+    });
+
+    await expect(runWithEntry(sessionEntry, sessionFile, 272_000)).resolves.toBe(sessionEntry);
     expect(compactEmbeddedAgentSessionMock).not.toHaveBeenCalled();
   });
 
