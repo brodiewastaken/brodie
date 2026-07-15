@@ -20,7 +20,6 @@ import {
   markMcpLoopbackToolCallFinished,
   markMcpLoopbackToolCallStarted,
   recordMcpLoopbackToolCallResult,
-  resolveMcpLoopbackYieldContext,
   setActiveMcpLoopbackRuntime,
   updateMcpLoopbackToolCallCapture,
 } from "./mcp-http.loopback-runtime.js";
@@ -227,13 +226,10 @@ export async function startMcpLoopbackServer(port = 0): Promise<{
         markMcpLoopbackRequestClassified(cliRequestCaptureHandle);
         const cfg = getRuntimeConfig();
         const requestContext = resolveMcpRequestContext(req, cfg, auth);
-        const yieldContext = resolveMcpLoopbackYieldContext(cliRequestCaptureHandle);
         const scopedTools = toolCache.resolve({
           cfg,
           sessionKey: requestContext.sessionKey,
           sessionId: requestContext.sessionId,
-          yieldContextCacheKey: yieldContext?.cacheKey,
-          onYield: yieldContext?.onYield,
           messageProvider: requestContext.messageProvider,
           currentChannelId: requestContext.currentChannelId,
           currentThreadTs: requestContext.currentThreadTs,

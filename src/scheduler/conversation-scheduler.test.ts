@@ -505,6 +505,94 @@ describe("ConversationScheduler", () => {
     ]);
   });
 
+  it("retries only the failed receipt requested by its controller", async () => {
+    const { route: baseRoute, database } = await fixture();
+    const route = directRoute(baseRoute);
+    const original = createConversationScheduler({
+      database,
+      dispatch: async () => ({
+        outcome: "failed",
+        failure: { kind: "controller_delivery_failed" },
+      }),
+    });
+    const completion = (id: string): ScheduledEvent => ({
+      ...event(route, id),
+      producerKind: "subagent_completion",
+      human: false,
+    });
+    const older = await original.admit(completion("failed-older-controller"));
+    const requested = await original.admit(completion("failed-requested-controller"));
+    if (!older.accepted || !requested.accepted) {
+      throw new Error("expected durable completion admissions");
+    }
+    await eventually(async () => {
+      return (
+        (await original.waitForReceiptTerminal?.(older.receiptId)) === "failed" &&
+        (await original.waitForReceiptTerminal?.(requested.receiptId)) === "failed"
+      );
+    });
+
+    const retried: SchedulerDispatchBatch[] = [];
+    const recovered = createConversationScheduler({
+      database,
+      dispatch: async (batch) => {
+        retried.push(batch);
+        return delivered(batch);
+      },
+    });
+    await recovered.retryReceipt(requested.receiptId);
+    await eventually(() => retried.length === 1);
+
+    expect(retried[0]?.events.map((entry) => entry.id)).toEqual(["failed-requested-controller"]);
+    expect(await recovered.waitForReceiptTerminal?.(older.receiptId)).toBe("failed");
+  });
+
+  it("parks a deferred receipt without blocking its lane and resumes only that receipt", async () => {
+    const { route: baseRoute, database } = await fixture();
+    const route = directRoute(baseRoute);
+    const batches: string[][] = [];
+    const scheduler = createConversationScheduler({
+      database,
+      dispatch: async (batch) => {
+        const eventIds = batch.events.map((entry) => entry.id);
+        batches.push(eventIds);
+        if (
+          eventIds.includes("deferred-controller") &&
+          batches.filter((candidate) => candidate.includes("deferred-controller")).length === 1
+        ) {
+          return {
+            outcome: "deferred",
+            reason: { kind: "pending_descendants" },
+            runCorrelationId: "run:deferred-controller",
+          } as unknown as SchedulerDispatchResult;
+        }
+        return delivered(batch);
+      },
+    });
+    const completion = (id: string): ScheduledEvent => ({
+      ...event(route, id),
+      producerKind: "subagent_completion",
+      human: false,
+    });
+    const deferredAdmission = await scheduler.admit(completion("deferred-controller"));
+    if (!deferredAdmission.accepted) {
+      throw new Error("expected deferred completion admission");
+    }
+    await eventually(async () => {
+      const lane = (await scheduler.snapshot(route)).lanes[0];
+      return lane?.pendingCount === 1 && lane.activeState === undefined;
+    });
+
+    await scheduler.admit(completion("unrelated-controller"));
+    await eventually(() => batches.some((batch) => batch.includes("unrelated-controller")));
+    expect((await scheduler.snapshot(route)).lanes[0]?.failureCount).toBe(0);
+
+    await scheduler.retryReceipt(deferredAdmission.receiptId);
+    await eventually(
+      () => batches.filter((batch) => batch.includes("deferred-controller")).length === 2,
+    );
+  });
+
   it("settles successful callbacks once and retains callback failures for recovery", async () => {
     const { route: baseRoute, database } = await fixture();
     const route = directRoute(baseRoute);
@@ -693,7 +781,10 @@ describe("ConversationScheduler", () => {
     const { route: baseRoute, database } = await fixture();
     const route = directRoute(baseRoute);
     const scheduler = createConversationScheduler({ database });
-    await scheduler.admit(event(route, "live-interrupted"));
+    const admitted = await scheduler.admit(event(route, "live-interrupted"));
+    if (!admitted.accepted) {
+      throw new Error("expected live interrupted admission");
+    }
     const { db } = openOpenClawStateDatabase(database);
     db.prepare(
       `UPDATE conversation_scheduler_events
@@ -717,7 +808,7 @@ describe("ConversationScheduler", () => {
     await eventually(
       async () => (await recovered.snapshot(route)).lanes[0]?.activeState === "running",
     );
-    await recovered.retryFailed(route);
+    await recovered.retryReceipt(admitted.receiptId);
 
     expect(batches).toEqual([]);
     expect((await recovered.snapshot(route)).lanes[0]?.activeState).toBe("running");
@@ -790,6 +881,73 @@ describe("ConversationScheduler", () => {
       transcript_evidence: "transcript:controller-run-restarted",
       run_correlation_id: "controller-run-restarted",
     });
+  });
+
+  it("rekeys durable subagent receipts on restart without reviving failed work", async () => {
+    const { route: baseRoute, database } = await fixture();
+    const oldRoute = directRoute(baseRoute, "-root");
+    const controllerSessionKey = "agent:main:subagent:controller-a";
+    const correctedRoute: ConversationRoute = {
+      channel: "internal",
+      accountId: "main",
+      conversationKind: "direct",
+      conversationId: controllerSessionKey,
+      sessionKey: controllerSessionKey,
+      queueLaneKey: "internal:main:direct:agent%3Amain%3Asubagent%3Acontroller-a",
+      transcriptOwner: { agentId: "main", sessionKey: controllerSessionKey },
+    };
+    const original = createConversationScheduler({
+      database,
+      dispatch: async () => ({
+        outcome: "failed",
+        failure: { kind: "controller_delivery_failed" },
+      }),
+    });
+    const admitted = await original.admit({
+      ...event(oldRoute, "legacy-controller-completion", { taskRunId: "task-legacy" }),
+      producerKind: "subagent_completion",
+      human: false,
+    });
+    if (!admitted.accepted) {
+      throw new Error("expected durable completion admission");
+    }
+    await eventually(
+      async () => (await original.waitForReceiptTerminal?.(admitted.receiptId)) === "failed",
+    );
+    const { db } = openOpenClawStateDatabase(database);
+    const beforeMigration = db
+      .prepare(
+        `SELECT receipt_id, state, ready_at, failure_json, callback_state
+           FROM conversation_scheduler_events WHERE event_id = 'legacy-controller-completion'`,
+      )
+      .get();
+
+    const batches: SchedulerDispatchBatch[] = [];
+    const recovered = createConversationScheduler({
+      database,
+      resolveDurableRoute: (durableEvent) =>
+        durableEvent.producerKind === "subagent_completion" ? correctedRoute : undefined,
+      dispatch: async (batch) => {
+        batches.push(batch);
+        return delivered(batch);
+      },
+    });
+
+    await eventually(async () => {
+      const snapshot = await recovered.snapshot(correctedRoute);
+      return snapshot.lanes[0]?.failureCount === 1;
+    });
+    expect(batches).toEqual([]);
+    expect(await recovered.waitForReceiptTerminal?.(admitted.receiptId)).toBe("failed");
+    expect((await recovered.snapshot(oldRoute)).lanes).toEqual([]);
+    expect(
+      db
+        .prepare(
+          `SELECT receipt_id, state, ready_at, failure_json, callback_state
+             FROM conversation_scheduler_events WHERE event_id = 'legacy-controller-completion'`,
+        )
+        .get(),
+    ).toEqual(beforeMigration);
   });
 
   it("fails a cold pending handoff once when runtime proof stays absent after grace", async () => {
@@ -1001,7 +1159,10 @@ describe("ConversationScheduler", () => {
     const { route: baseRoute, database } = await fixture();
     const route = directRoute(baseRoute);
     const scheduler = createConversationScheduler({ database });
-    await scheduler.admit(event(route, "unresolved-interrupted"));
+    const admitted = await scheduler.admit(event(route, "unresolved-interrupted"));
+    if (!admitted.accepted) {
+      throw new Error("expected unresolved interrupted admission");
+    }
     const { db } = openOpenClawStateDatabase(database);
     db.prepare(
       `UPDATE conversation_scheduler_events
@@ -1023,7 +1184,7 @@ describe("ConversationScheduler", () => {
     });
     await eventually(async () => (await recovered.snapshot(route)).lanes[0]?.failureCount === 1);
 
-    await recovered.retryFailed(route);
+    await recovered.retryReceipt(admitted.receiptId);
 
     expect(batches).toEqual([]);
     expect(
@@ -1131,7 +1292,10 @@ describe("ConversationScheduler", () => {
     const { route: baseRoute, database } = await fixture();
     const route = directRoute(baseRoute);
     const scheduler = createConversationScheduler({ database });
-    await scheduler.admit(event(route, "retryable-interrupted"));
+    const admitted = await scheduler.admit(event(route, "retryable-interrupted"));
+    if (!admitted.accepted) {
+      throw new Error("expected retryable interrupted admission");
+    }
     const { db } = openOpenClawStateDatabase(database);
     db.prepare(
       `UPDATE conversation_scheduler_events
@@ -1179,7 +1343,7 @@ describe("ConversationScheduler", () => {
       }),
     });
 
-    await recovered.retryFailed(route);
+    await recovered.retryReceipt(admitted.receiptId);
     await eventually(() => batches.length === 1);
     await eventually(async () => (await recovered.snapshot(route)).lanes[0]?.pendingCount === 0);
   });
@@ -1192,6 +1356,22 @@ describe("ConversationScheduler", () => {
     await scheduler.stopSession(route, { descendants: true });
     expect(await scheduler.snapshot(route)).toMatchObject({
       lanes: [{ pendingCount: 0, callbackPendingCount: 0 }],
+    });
+  });
+
+  it("cancels one receipt without terminalizing its sibling", async () => {
+    const { route, database } = await fixture();
+    const scheduler = createConversationScheduler({ database });
+    const first = await scheduler.admit(event(route, "cancel-one"));
+    const second = await scheduler.admit(event(route, "keep-one"));
+    if (!first.accepted || !second.accepted) {
+      throw new Error("expected scheduler admissions");
+    }
+
+    await expect(scheduler.cancelReceipt(first.receiptId)).resolves.toBe(true);
+    expect(await scheduler.waitForReceiptTerminal?.(first.receiptId)).toBe("cancelled");
+    expect(await scheduler.snapshot(route)).toMatchObject({
+      lanes: [{ pendingCount: 1, outstandingCount: 1 }],
     });
   });
 

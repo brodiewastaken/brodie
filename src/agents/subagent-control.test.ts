@@ -930,37 +930,30 @@ describe("killSubagentRunAdmin", () => {
     expect(abortedLastRunWrites).toEqual([true, false]);
   });
 
-  it("kills a run that yields while the kill path awaits persistence", async () => {
-    const childSessionKey = "agent:main:subagent:yield-race";
-    const storePath = writeSessionStoreFixture("admin-kill-yield-race", {
+  it("kills an active run while the kill path awaits persistence", async () => {
+    const childSessionKey = "agent:main:subagent:kill-race";
+    const storePath = writeSessionStoreFixture("admin-kill-race", {
       [childSessionKey]: {
-        sessionId: "sess-yield-race",
+        sessionId: "sess-kill-race",
         updatedAt: Date.now(),
       },
     });
     const run = {
-      runId: "run-yield-race",
+      runId: "run-kill-race",
       childSessionKey,
       controllerSessionKey: "agent:main:controller",
       requesterSessionKey: "agent:main:requester",
       requesterDisplayKey: "requester",
-      task: "yield while cancellation starts",
+      task: "active while cancellation starts",
       cleanup: "keep" as const,
       createdAt: Date.now() - 5_000,
       startedAt: Date.now() - 4_000,
     };
-    const yieldedAt = Date.now() - 1_000;
     addSubagentRunForTests(run);
     setSubagentControlDepsForTest({
       isEmbeddedAgentRunActive: () => true,
       abortEmbeddedAgentRun: () => true,
-      patchSessionEntry: async () => {
-        Object.assign(run, {
-          endedAt: yieldedAt,
-          pauseReason: "sessions_yield" as const,
-        });
-        return null;
-      },
+      patchSessionEntry: async () => null,
     });
 
     const result = await killSubagentRunAdmin({
@@ -971,7 +964,7 @@ describe("killSubagentRunAdmin", () => {
     expect(result).toMatchObject({
       found: true,
       killed: true,
-      runId: "run-yield-race",
+      runId: "run-kill-race",
       targetState: {
         state: "terminal",
         task: { status: "cancelled", error: SUBAGENT_KILL_TASK_ERROR },
@@ -979,20 +972,19 @@ describe("killSubagentRunAdmin", () => {
     });
     expect(getSubagentRunByChildSessionKey(childSessionKey)).toMatchObject({
       endedReason: SUBAGENT_ENDED_REASON_KILLED,
-      endedAt: yieldedAt,
+      endedAt: expect.any(Number),
       outcome: {
         status: "error",
-        endedAt: yieldedAt,
-        elapsedMs: yieldedAt - run.startedAt,
+        endedAt: expect.any(Number),
+        elapsedMs: expect.any(Number),
       },
     });
-    expect(getSubagentRunByChildSessionKey(childSessionKey)?.pauseReason).toBeUndefined();
     expect(detachedTaskRuntimeMocks.finalizeTaskRunByRunId).toHaveBeenCalledWith(
-      expect.objectContaining({ runId: "run-yield-race", status: "cancelled" }),
+      expect.objectContaining({ runId: "run-kill-race", status: "cancelled" }),
     );
     const [finalizeArgs] = detachedTaskRuntimeMocks.finalizeTaskRunByRunId.mock.calls[0] ?? [];
     const killedAt = (finalizeArgs as { endedAt?: number } | undefined)?.endedAt;
-    expect(killedAt).toBeGreaterThan(yieldedAt);
+    expect(killedAt).toBeGreaterThan(run.startedAt);
 
     const repeated = await killSubagentRunAdmin({
       cfg: cfgWithSessionStore(storePath),
@@ -1199,7 +1191,7 @@ describe("killControlledSubagentRun", () => {
     expect(getSubagentRunByChildSessionKey(childSessionKey)?.runId).toBe("run-current");
   });
 
-  it("kills a yielded descendant without reviving a stale child row", async () => {
+  it("kills an active descendant without reviving a stale child row", async () => {
     const parentSessionKey = "agent:main:subagent:kill-parent";
     const childSessionKey = `${parentSessionKey}:subagent:child`;
     const leafSessionKey = `${childSessionKey}:subagent:leaf`;
@@ -1251,8 +1243,6 @@ describe("killControlledSubagentRun", () => {
       cleanup: "keep",
       createdAt: Date.now() - 1_000,
       startedAt: Date.now() - 900,
-      endedAt: Date.now() - 800,
-      pauseReason: "sessions_yield",
     });
 
     const result = await killControlledSubagentRun({
@@ -1513,7 +1503,7 @@ describe("killAllControlledSubagentRuns", () => {
     expect(getSubagentRunByChildSessionKey(childSessionKey)?.runId).toBe("run-current-bulk");
   });
 
-  it("does not let a stale bulk entry suppress the current yielded entry", async () => {
+  it("does not let a stale bulk entry suppress the current active entry", async () => {
     const childSessionKey = "agent:main:subagent:stale-kill-all-shadow-worker";
     const storePath = writeSessionStoreFixture("stale-kill-all-shadow", {
       [childSessionKey]: {
@@ -1531,8 +1521,6 @@ describe("killAllControlledSubagentRuns", () => {
       cleanup: "keep",
       createdAt: Date.now() - 4_000,
       startedAt: Date.now() - 3_000,
-      endedAt: Date.now() - 2_000,
-      pauseReason: "sessions_yield",
     });
 
     const result = await killAllControlledSubagentRuns({
@@ -1565,8 +1553,6 @@ describe("killAllControlledSubagentRuns", () => {
           cleanup: "keep",
           createdAt: Date.now() - 4_000,
           startedAt: Date.now() - 3_000,
-          endedAt: Date.now() - 2_000,
-          pauseReason: "sessions_yield",
         },
       ],
     });
@@ -1972,33 +1958,24 @@ describe("steerControlledSubagentRun", () => {
     });
   });
 
-  it("steers a yielded run even though the paused attempt has ended", async () => {
-    const childSessionKey = "agent:main:subagent:yield-steer-worker";
+  it("rejects steering a completed run", async () => {
+    const childSessionKey = "agent:main:subagent:completed-steer-worker";
     addSubagentRunForTests({
-      runId: "run-yielded-steer",
+      runId: "run-completed-steer",
       childSessionKey,
       controllerSessionKey: "agent:main:main",
       requesterSessionKey: "agent:main:main",
       requesterDisplayKey: "main",
-      task: "yielded steer task",
+      task: "completed steer task",
       cleanup: "keep",
       createdAt: Date.now() - 5_000,
       startedAt: Date.now() - 4_000,
       endedAt: Date.now() - 1_000,
-      pauseReason: "sessions_yield",
+      outcome: { status: "ok" },
     });
 
-    setSubagentControlDepsForTest({
-      callGateway: async <T = Record<string, unknown>>(request: CallGatewayOptions) => {
-        if (request.method === "agent.wait") {
-          return {} as T;
-        }
-        if (request.method === "agent") {
-          return { runId: "run-yielded-followup" } as T;
-        }
-        throw new Error(`unexpected method: ${request.method}`);
-      },
-    });
+    const callGateway = vi.fn();
+    setSubagentControlDepsForTest({ callGateway });
 
     const result = await steerControlledSubagentRun({
       cfg: cfgWithSessionStore(),
@@ -2009,30 +1986,28 @@ describe("steerControlledSubagentRun", () => {
         controlScope: "children",
       },
       entry: {
-        runId: "run-yielded-steer",
+        runId: "run-completed-steer",
         childSessionKey,
         requesterSessionKey: "agent:main:main",
         requesterDisplayKey: "main",
         controllerSessionKey: "agent:main:main",
-        task: "yielded steer task",
+        task: "completed steer task",
         cleanup: "keep",
         createdAt: Date.now() - 5_000,
         startedAt: Date.now() - 4_000,
         endedAt: Date.now() - 1_000,
-        pauseReason: "sessions_yield",
+        outcome: { status: "ok" },
       },
       message: "continue now",
     });
 
     expect(result).toEqual({
-      status: "accepted",
-      runId: "run-yielded-followup",
+      status: "done",
+      runId: "run-completed-steer",
       sessionKey: childSessionKey,
-      sessionId: undefined,
-      mode: "restart",
-      label: "yielded steer task",
-      text: "steered yielded steer task.",
+      text: "completed steer task is already finished.",
     });
+    expect(callGateway).not.toHaveBeenCalled();
   });
 
   it("rotates the child session when restarting a previously active session", async () => {

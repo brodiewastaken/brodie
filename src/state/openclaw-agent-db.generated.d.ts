@@ -82,6 +82,54 @@ export interface SchemaMeta {
   updated_at: number;
 }
 
+export interface SubagentRuns {
+  accumulated_runtime_ms: number | null;
+  agent_dir: string | null;
+  announce_retry_count: number | null;
+  archive_at_ms: number | null;
+  child_session_key: string;
+  cleanup: string;
+  cleanup_completed_at: number | null;
+  cleanup_handled: number | null;
+  completion_announced_at: number | null;
+  controller_session_key: string | null;
+  created_at: number;
+  ended_at: number | null;
+  ended_hook_emitted_at: number | null;
+  ended_reason: string | null;
+  expects_completion_message: number | null;
+  fallback_frozen_result_captured_at: number | null;
+  fallback_frozen_result_text: string | null;
+  frozen_result_captured_at: number | null;
+  frozen_result_text: string | null;
+  label: string | null;
+  last_announce_delivery_error: string | null;
+  last_announce_retry_at: number | null;
+  model: string | null;
+  outcome_json: string | null;
+  pause_reason: string | null;
+  payload_json: Generated<string>;
+  pending_final_delivery: number | null;
+  pending_final_delivery_attempt_count: number | null;
+  pending_final_delivery_created_at: number | null;
+  pending_final_delivery_last_attempt_at: number | null;
+  pending_final_delivery_last_error: string | null;
+  pending_final_delivery_payload_json: string | null;
+  requester_display_key: string;
+  requester_origin_json: string | null;
+  requester_session_key: string;
+  run_id: string;
+  run_timeout_seconds: number | null;
+  session_started_at: number | null;
+  spawn_mode: string | null;
+  started_at: number | null;
+  suppress_announce_reason: string | null;
+  task: string;
+  task_name: string | null;
+  wake_on_descendant_settle: number | null;
+  workspace_dir: string | null;
+}
+
 export interface DB {
   auth_profile_state: AuthProfileState;
   auth_profile_store: AuthProfileStore;
@@ -92,4 +140,5 @@ export interface DB {
   memory_index_sources: MemoryIndexSources;
   memory_index_state: MemoryIndexState;
   schema_meta: SchemaMeta;
+  subagent_runs: SubagentRuns;
 }

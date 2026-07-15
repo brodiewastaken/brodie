@@ -257,7 +257,7 @@ function mapHarnessCompletionStatus(
 export function isDurableAgentHarnessCompletionDelivery(
   delivery: AgentHarnessCompletionDelivery,
 ): boolean {
-  if (!delivery.delivered) {
+  if (delivery.status !== "delivered") {
     return false;
   }
   if (delivery.path === "steered") {
@@ -271,7 +271,8 @@ export function isDurableAgentHarnessCompletionDelivery(
     return true;
   }
   return phases.some(
-    (phase) => phase.phase === "direct-primary" && phase.delivered && phase.path === "direct",
+    (phase) =>
+      phase.phase === "direct-primary" && phase.status === "delivered" && phase.path === "direct",
   );
 }
 

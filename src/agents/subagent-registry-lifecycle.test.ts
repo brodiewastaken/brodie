@@ -2,6 +2,10 @@
 // detached task status, and resource retirement around child-run endings.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CallGatewayOptions } from "../gateway/call.js";
+import type {
+  ScheduledEvent,
+  SchedulerDispatchBatch,
+} from "../scheduler/conversation-scheduler.js";
 import { SUBAGENT_KILL_TASK_ERROR } from "../tasks/detached-task-runtime-contract.js";
 import {
   buildAnnounceIdFromChildRun,
@@ -14,10 +18,13 @@ import {
   SUBAGENT_ENDED_REASON_KILLED,
 } from "./subagent-lifecycle-events.js";
 import { createSubagentRegistryLifecycleController } from "./subagent-registry-lifecycle.js";
-import { markSubagentRunPausedAfterYield } from "./subagent-registry-run-manager.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 type LifecycleControllerParams = Parameters<typeof createSubagentRegistryLifecycleController>[0];
+type CleanupDecision =
+  | { kind: "defer-descendants"; delayMs: number }
+  | { kind: "give-up"; reason: "retry-limit" | "expiry"; retryCount?: number }
+  | { kind: "retry"; retryCount: number; resumeDelayMs?: number };
 
 const taskExecutorMocks = vi.hoisted(() => ({
   completeTaskRunByRunId: vi.fn(),
@@ -33,6 +40,13 @@ const helperMocks = vi.hoisted(() => ({
   persistSubagentSessionTiming: vi.fn(async () => {}),
   safeRemoveAttachmentsDir: vi.fn(async () => {}),
   logAnnounceGiveUp: vi.fn(),
+}));
+
+const cleanupMocks = vi.hoisted(() => ({
+  resolveDeferredCleanupDecision: vi.fn<() => CleanupDecision>(() => ({
+    kind: "give-up",
+    reason: "retry-limit",
+  })),
 }));
 
 const runtimeMocks = vi.hoisted(() => ({
@@ -87,7 +101,7 @@ vi.mock("./subagent-announce.js", () => ({
 
 vi.mock("./subagent-registry-cleanup.js", () => ({
   resolveCleanupCompletionReason: () => SUBAGENT_ENDED_REASON_COMPLETE,
-  resolveDeferredCleanupDecision: () => ({ kind: "give-up", reason: "retry-limit" }),
+  resolveDeferredCleanupDecision: cleanupMocks.resolveDeferredCleanupDecision,
 }));
 
 vi.mock("./subagent-registry-helpers.js", () => ({
@@ -175,10 +189,12 @@ function buildExpectedAnnounceIdempotencyKey(entry: SubagentRunRecord): string {
 function createLifecycleController({
   entry,
   runs = new Map([[entry.runId, entry]]),
+  autoDispatchScheduledCompletion = true,
   ...overrides
 }: {
   entry: SubagentRunRecord;
   runs?: Map<string, SubagentRunRecord>;
+  autoDispatchScheduledCompletion?: boolean;
 } & Partial<Parameters<typeof createSubagentRegistryLifecycleController>[0]>) {
   const params: LifecycleControllerParams = {
     runs,
@@ -199,10 +215,34 @@ function createLifecycleController({
       (await gatewayMocks.callGateway(opts)) as T,
     captureSubagentCompletionReply: vi.fn(async () => "final completion reply"),
     runSubagentAnnounceFlow: vi.fn(async () => true),
+    admitScheduledEvent: vi.fn(async (event) => ({
+      accepted: true as const,
+      receiptId: `receipt:${event.id}`,
+      durableAt: 3_500,
+    })),
+    retryScheduledReceipt: vi.fn(async () => {}),
+    cancelScheduledReceipt: vi.fn(async () => true),
     warn: vi.fn(),
   };
   Object.assign(params, overrides);
-  return createSubagentRegistryLifecycleController(params);
+  if (autoDispatchScheduledCompletion) {
+    const admitScheduledEvent = params.admitScheduledEvent.bind(params);
+    params.admitScheduledEvent = async (event) => {
+      const admitted = await admitScheduledEvent(event);
+      if (admitted.accepted) {
+        queueMicrotask(() => {
+          void controller.dispatchScheduledCompletion({
+            attemptId: `attempt:${admitted.receiptId}`,
+            placement: "idle",
+            events: [{ ...event, receiptId: admitted.receiptId, sequence: 1 }],
+          });
+        });
+      }
+      return admitted;
+    };
+  }
+  const controller = createSubagentRegistryLifecycleController(params);
+  return controller;
 }
 
 async function runNoReplyMirrorScenario(params: {
@@ -228,7 +268,7 @@ async function runNoReplyMirrorScenario(params: {
       onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void;
     }) => {
       announceParams.onDeliveryResult?.({
-        delivered: false,
+        status: "failed",
         path: "direct",
         error: "completion agent did not produce a visible reply",
       });
@@ -274,6 +314,252 @@ describe("subagent registry lifecycle hardening", () => {
     browserLifecycleCleanupMocks.cleanupBrowserSessionsForLifecycleEnd.mockClear();
     bundleMcpRuntimeMocks.retireSessionMcpRuntimeForSessionKey.mockClear();
     bundleMcpRuntimeMocks.retireSessionMcpRuntimeForSessionKey.mockResolvedValue(true);
+    cleanupMocks.resolveDeferredCleanupDecision.mockReset();
+    cleanupMocks.resolveDeferredCleanupDecision.mockReturnValue({
+      kind: "give-up",
+      reason: "retry-limit",
+    });
+  });
+
+  it("admits completion before scheduler-owned controller handoff", async () => {
+    const order: string[] = [];
+    let admittedEvent: ScheduledEvent | undefined;
+    const entry = createRunEntry({
+      endedAt: 4_000,
+      expectsCompletionMessage: true,
+      completion: { required: true, resultText: "done" },
+    });
+    const admitScheduledEvent = vi.fn(async (event) => {
+      order.push(`admit:${event.id}`);
+      admittedEvent = event;
+      return { accepted: true as const, receiptId: "receipt-1", durableAt: 4_100 };
+    });
+    const runSubagentAnnounceFlow = vi.fn(
+      async (params: { onDeliveryResult?: (result: SubagentAnnounceDeliveryResult) => void }) => {
+        order.push("controller-handoff");
+        params.onDeliveryResult?.({
+          status: "delivered",
+          deliveredAt: 4_200,
+          path: "steered",
+        });
+        return true;
+      },
+    );
+    const controller = createLifecycleController({
+      entry,
+      admitScheduledEvent,
+      runSubagentAnnounceFlow,
+      autoDispatchScheduledCompletion: false,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: true,
+    });
+    expect(runSubagentAnnounceFlow).not.toHaveBeenCalled();
+    if (!admittedEvent) {
+      throw new Error("expected completion admission");
+    }
+    const batch: SchedulerDispatchBatch = {
+      attemptId: "attempt-1",
+      placement: "idle",
+      events: [{ ...admittedEvent, receiptId: "receipt-1", sequence: 1 }],
+    };
+    await expect(controller.dispatchScheduledCompletion(batch)).resolves.toMatchObject({
+      outcome: "completed",
+      transcriptEvidence: "steered:4200",
+      runCorrelationId: entry.runId,
+    });
+
+    expect(order).toEqual(["admit:subagent:run-1:completion", "controller-handoff"]);
+    expect(entry.schedulerReceiptId).toBe("receipt-1");
+    expect(entry.controllerTranscriptEvidence).toBe("steered:4200");
+  });
+
+  it("retains delete-mode recovery state until the scheduler receipt is terminal", async () => {
+    let admittedEvent: ScheduledEvent | undefined;
+    const entry = createRunEntry({
+      cleanup: "delete",
+      endedAt: 4_000,
+      expectsCompletionMessage: true,
+      completion: { required: true, resultText: "done" },
+    });
+    const runs = new Map([[entry.runId, entry]]);
+    const controller = createLifecycleController({
+      entry,
+      runs,
+      autoDispatchScheduledCompletion: false,
+      admitScheduledEvent: vi.fn(async (event) => {
+        admittedEvent = event;
+        return { accepted: true as const, receiptId: "receipt-delete", durableAt: 4_100 };
+      }),
+      runSubagentAnnounceFlow: vi.fn(
+        async (params: { onDeliveryResult?: (result: SubagentAnnounceDeliveryResult) => void }) => {
+          params.onDeliveryResult?.({ status: "delivered", deliveredAt: 4_200, path: "steered" });
+          return true;
+        },
+      ),
+    });
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: true,
+    });
+    if (!admittedEvent) {
+      throw new Error("expected completion admission");
+    }
+    const scheduledEvent = {
+      ...admittedEvent,
+      receiptId: "receipt-delete",
+      sequence: 1,
+    };
+    await expect(
+      controller.dispatchScheduledCompletion({
+        attemptId: "attempt-delete",
+        placement: "idle",
+        events: [scheduledEvent],
+      }),
+    ).resolves.toMatchObject({ outcome: "completed" });
+
+    expect(runs.get(entry.runId)).toBe(entry);
+    expect(entry.cleanupCompletedAt).toBeUndefined();
+
+    await controller.settleScheduledCompletion({
+      event: scheduledEvent,
+      transcriptEvidence: "controller:terminal-delete",
+      runCorrelationId: entry.runId,
+    });
+    expect(runs.has(entry.runId)).toBe(false);
+  });
+
+  it("reports descendant deferral without misclassifying it as controller delivery failure", async () => {
+    cleanupMocks.resolveDeferredCleanupDecision.mockReturnValueOnce({
+      kind: "defer-descendants",
+      delayMs: 1_000,
+    });
+    let admittedEvent: ScheduledEvent | undefined;
+    const entry = createRunEntry({
+      endedAt: 4_000,
+      expectsCompletionMessage: true,
+      completion: { required: true, resultText: "done" },
+    });
+    const controller = createLifecycleController({
+      entry,
+      autoDispatchScheduledCompletion: false,
+      countPendingDescendantRuns: () => 1,
+      admitScheduledEvent: vi.fn(async (event) => {
+        admittedEvent = event;
+        return { accepted: true as const, receiptId: "receipt-descendants", durableAt: 4_100 };
+      }),
+      runSubagentAnnounceFlow: vi.fn(async () => false),
+    });
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: true,
+    });
+    if (!admittedEvent) {
+      throw new Error("expected completion admission");
+    }
+
+    const result = await controller.dispatchScheduledCompletion({
+      attemptId: "attempt-descendants",
+      placement: "idle",
+      events: [{ ...admittedEvent, receiptId: "receipt-descendants", sequence: 1 }],
+    });
+
+    expect(result).toMatchObject({
+      outcome: "deferred",
+      runCorrelationId: entry.runId,
+      reason: { kind: "pending_descendants", runId: entry.runId },
+    });
+    expect(entry.wakeOnDescendantSettle).toBe(true);
+    expect(entry.delivery?.status).not.toBe("failed");
+    controller.clearScheduledResumeTimers();
+  });
+
+  it("keeps accepted controller work pending until transcript consumption is proven", async () => {
+    let admittedEvent: ScheduledEvent | undefined;
+    const entry = createRunEntry({
+      endedAt: 4_000,
+      expectsCompletionMessage: true,
+      completion: { required: true, resultText: "done" },
+    });
+    const runSubagentAnnounceFlow = vi.fn(
+      async (params: {
+        recordRunCorrelationId?: (runId: string) => void;
+        onDeliveryResult?: (result: SubagentAnnounceDeliveryResult) => void;
+      }) => {
+        params.recordRunCorrelationId?.("controller-run-pending");
+        params.onDeliveryResult?.({
+          status: "pending",
+          path: "direct",
+          runCorrelationId: "controller-run-pending",
+          reason: "completion_handoff_pending",
+          enqueuedAt: 4_200,
+        });
+        return false;
+      },
+    );
+    const controller = createLifecycleController({
+      entry,
+      admitScheduledEvent: vi.fn(async (event) => {
+        admittedEvent = event;
+        return { accepted: true as const, receiptId: "receipt-pending", durableAt: 4_100 };
+      }),
+      runSubagentAnnounceFlow,
+      autoDispatchScheduledCompletion: false,
+    });
+
+    await controller.completeSubagentRun({
+      runId: entry.runId,
+      endedAt: 4_000,
+      outcome: { status: "ok" },
+      reason: SUBAGENT_ENDED_REASON_COMPLETE,
+      triggerCleanup: true,
+    });
+    if (!admittedEvent) {
+      throw new Error("expected completion admission");
+    }
+    const recordRunCorrelationId = vi.fn();
+    const result = await controller.dispatchScheduledCompletion({
+      attemptId: "attempt-pending",
+      placement: "idle",
+      events: [{ ...admittedEvent, receiptId: "receipt-pending", sequence: 1 }],
+      recordRunCorrelationId,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "pending",
+      runCorrelationId: "controller-run-pending",
+    });
+    expect(entry.controllerTranscriptEvidence).toBeUndefined();
+    expect(entry.delivery?.enqueuedAt).toBe(4_200);
+    expect(entry.delivery?.deliveredAt).toBeUndefined();
+    expect(entry.cleanupCompletedAt).toBeUndefined();
+    expect(recordRunCorrelationId).toHaveBeenCalledWith("controller-run-pending");
+
+    const settlement = {
+      event: { ...admittedEvent, receiptId: "receipt-pending", sequence: 1 },
+      transcriptEvidence: "session:controller:run:controller-run-pending",
+      runCorrelationId: "controller-run-pending",
+    };
+    await controller.settleScheduledCompletion(settlement);
+    const cleanupCompletedAt = entry.cleanupCompletedAt;
+    await controller.settleScheduledCompletion(settlement);
+
+    expect(entry.controllerTranscriptEvidence).toBe(settlement.transcriptEvidence);
+    expect(entry.delivery?.status).toBe("delivered");
+    expect(cleanupCompletedAt).toBeTypeOf("number");
+    expect(entry.cleanupCompletedAt).toBe(cleanupCompletedAt);
+    expect(runSubagentAnnounceFlow).toHaveBeenCalledOnce();
   });
 
   it("does not reject completion when task finalization throws", async () => {
@@ -708,154 +994,6 @@ describe("subagent registry lifecycle hardening", () => {
     expectFields(taskExecutorMocks.completeTaskRunByRunId.mock.calls.at(-1)?.[0], {
       progressSummary: "Canonical final reply.",
     });
-  });
-
-  it.each(["keep", "delete"] as const)(
-    "invalidates in-flight %s cleanup when an authoritative yield revives the run",
-    async (cleanup) => {
-      const entry = createRunEntry({
-        cleanup,
-        expectsCompletionMessage: true,
-      });
-      const runs = new Map([[entry.runId, entry]]);
-      let finishAnnounce: ((didAnnounce: boolean) => void) | undefined;
-      const runSubagentAnnounceFlow = vi.fn(
-        () =>
-          new Promise<boolean>((resolve) => {
-            finishAnnounce = resolve;
-          }),
-      );
-      const controller = createLifecycleController({
-        entry,
-        runs,
-        runSubagentAnnounceFlow,
-        captureSubagentCompletionReply: vi.fn(async () => "premature terminal reply"),
-      });
-
-      await controller.completeSubagentRun({
-        runId: entry.runId,
-        endedAt: 4_000,
-        outcome: { status: "ok" },
-        reason: SUBAGENT_ENDED_REASON_COMPLETE,
-        triggerCleanup: true,
-      });
-      expect(runSubagentAnnounceFlow).toHaveBeenCalledOnce();
-      expect(entry.cleanupHandled).toBe(true);
-
-      expect(
-        markSubagentRunPausedAfterYield({
-          entry,
-          startedAt: 2_000,
-          endedAt: 4_001,
-        }),
-      ).toBe(true);
-      finishAnnounce?.(true);
-      await vi.waitFor(() => expect(entry.pauseReason).toBe("sessions_yield"));
-
-      expect(runs.get(entry.runId)).toBe(entry);
-      expect(entry.cleanupHandled).toBe(false);
-      expect(entry.cleanupCompletedAt).toBeUndefined();
-      expect(helperMocks.safeRemoveAttachmentsDir).not.toHaveBeenCalled();
-      expect(gatewayMocks.callGateway).not.toHaveBeenCalledWith(
-        expect.objectContaining({ method: "sessions.delete" }),
-      );
-    },
-  );
-
-  it("rejects a yield after direct delete cleanup has been dispatched", async () => {
-    const entry = createRunEntry({ cleanup: "delete", expectsCompletionMessage: false });
-    const runs = new Map([[entry.runId, entry]]);
-    let releaseDelete: (() => void) | undefined;
-    gatewayMocks.callGateway.mockImplementation((opts) => {
-      if (opts.method !== "sessions.delete") {
-        return Promise.resolve({});
-      }
-      return new Promise<Record<string, unknown>>((resolve) => {
-        releaseDelete = () => resolve({});
-      });
-    });
-    const controller = createLifecycleController({ entry, runs });
-
-    await controller.completeSubagentRun({
-      runId: entry.runId,
-      endedAt: 4_000,
-      outcome: { status: "ok" },
-      reason: SUBAGENT_ENDED_REASON_COMPLETE,
-      triggerCleanup: true,
-    });
-    await vi.waitFor(() => expect(entry.deleteCleanupDispatchedAt).toBeTypeOf("number"));
-
-    expect(markSubagentRunPausedAfterYield({ entry, endedAt: 4_001 })).toBe(false);
-    expect(entry.pauseReason).toBeUndefined();
-    expect(entry.endedReason).toBe(SUBAGENT_ENDED_REASON_COMPLETE);
-
-    releaseDelete?.();
-    await vi.waitFor(() => expect(runs.has(entry.runId)).toBe(false));
-  });
-
-  it("rejects a yield after announce cleanup hands off delete dispatch", async () => {
-    const entry = createRunEntry({ cleanup: "delete", expectsCompletionMessage: true });
-    const runs = new Map([[entry.runId, entry]]);
-    let releaseAnnounce: (() => void) | undefined;
-    const runSubagentAnnounceFlow: LifecycleControllerParams["runSubagentAnnounceFlow"] = vi.fn(
-      (announceParams) =>
-        new Promise<boolean>((resolve) => {
-          expect(announceParams.onBeforeDeleteChildSession?.()).toBe(true);
-          releaseAnnounce = () => resolve(true);
-        }),
-    );
-    const controller = createLifecycleController({ entry, runs, runSubagentAnnounceFlow });
-
-    await controller.completeSubagentRun({
-      runId: entry.runId,
-      endedAt: 4_000,
-      outcome: { status: "ok" },
-      reason: SUBAGENT_ENDED_REASON_COMPLETE,
-      triggerCleanup: true,
-    });
-    await vi.waitFor(() => expect(entry.deleteCleanupDispatchedAt).toBeTypeOf("number"));
-
-    expect(markSubagentRunPausedAfterYield({ entry, endedAt: 4_001 })).toBe(false);
-    expect(entry.pauseReason).toBeUndefined();
-    expect(entry.endedReason).toBe(SUBAGENT_ENDED_REASON_COMPLETE);
-
-    releaseAnnounce?.();
-    await vi.waitFor(() => expect(runs.has(entry.runId)).toBe(false));
-  });
-
-  it("discards completion capture when an authoritative yield arrives during the await", async () => {
-    const entry = createRunEntry({ expectsCompletionMessage: true });
-    let finishCapture: ((result: string) => void) | undefined;
-    const captureSubagentCompletionReply = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          finishCapture = resolve;
-        }),
-    );
-    const controller = createLifecycleController({
-      entry,
-      captureSubagentCompletionReply,
-    });
-
-    const completion = controller.completeSubagentRun({
-      runId: entry.runId,
-      endedAt: 4_000,
-      outcome: { status: "ok" },
-      reason: SUBAGENT_ENDED_REASON_COMPLETE,
-      triggerCleanup: true,
-    });
-    await vi.waitFor(() => expect(captureSubagentCompletionReply).toHaveBeenCalledOnce());
-    expect(markSubagentRunPausedAfterYield({ entry, endedAt: 4_001 })).toBe(true);
-    finishCapture?.("stale pre-yield reply");
-    await completion;
-
-    expect(entry).toMatchObject({
-      pauseReason: "sessions_yield",
-      completion: { required: true },
-    });
-    expect(entry.completion?.resultText).toBeUndefined();
-    expect(entry.completion?.capturedAt).toBeUndefined();
-    expect(taskExecutorMocks.completeTaskRunByRunId).not.toHaveBeenCalled();
   });
 
   it("abandons a killed callback tail after success becomes canonical", async () => {
@@ -1951,7 +2089,7 @@ describe("subagent registry lifecycle hardening", () => {
       expectsCompletionMessage: true,
     });
     const delivery: SubagentAnnounceDeliveryResult = {
-      delivered: true,
+      status: "delivered",
       path: "steered",
       enqueuedAt: 4_100,
       deliveredAt: 12_300,
@@ -1995,10 +2133,9 @@ describe("subagent registry lifecycle hardening", () => {
     const runSubagentAnnounceFlow: LifecycleControllerParams["runSubagentAnnounceFlow"] = vi.fn(
       async (announceParams) => {
         announceParams.onDeliveryResult?.({
-          delivered: false,
+          status: "terminal_failure",
           path: "direct",
           error: "prompt lock failed after visible send",
-          terminal: true,
         });
         return true;
       },
@@ -2485,6 +2622,36 @@ describe("subagent registry lifecycle hardening", () => {
     expect(Number.isNaN(entry.cleanupCompletedAt)).toBe(false);
   });
 
+  it("cancels a failed delete-mode receipt before removing its recovery state", async () => {
+    const entry = createRunEntry({
+      cleanup: "delete",
+      endedAt: 4_000,
+      expectsCompletionMessage: true,
+      schedulerReceiptId: "receipt-failed-delete",
+      completion: { required: true, resultText: "final answer" },
+      delivery: { status: "pending", lastError: "controller delivery failed" },
+    });
+    const runs = new Map([[entry.runId, entry]]);
+    const cancelScheduledReceipt = vi.fn(async () => {
+      expect(runs.get(entry.runId)).toBe(entry);
+      return true;
+    });
+    const controller = createLifecycleController({
+      entry,
+      runs,
+      cancelScheduledReceipt,
+    });
+
+    await controller.finalizeResumedAnnounceGiveUp({
+      runId: entry.runId,
+      entry,
+      reason: "retry-limit",
+    });
+
+    expect(cancelScheduledReceipt).toHaveBeenCalledWith("receipt-failed-delete");
+    expect(runs.has(entry.runId)).toBe(false);
+  });
+
   it("suspends successful keep-mode final delivery instead of completing cleanup on retry exhaustion", async () => {
     const persist = vi.fn();
     const entry = createRunEntry({
@@ -2648,32 +2815,22 @@ describe("subagent registry lifecycle hardening", () => {
     });
     const runSubagentAnnounceFlow = vi.fn(
       async (announceParams: {
-        onDeliveryResult?: (delivery: {
-          delivered: false;
-          path: "direct";
-          error: string;
-          phases: Array<{
-            phase: "direct-primary" | "steer-fallback";
-            delivered: boolean;
-            path: "direct" | "none";
-            error?: string;
-          }>;
-        }) => void;
+        onDeliveryResult?: (delivery: SubagentAnnounceDeliveryResult) => void;
       }) => {
         announceParams.onDeliveryResult?.({
-          delivered: false,
+          status: "failed",
           path: "direct",
           error: "UNAVAILABLE: requester wake failed",
           phases: [
             {
               phase: "direct-primary",
-              delivered: false,
+              status: "failed",
               path: "direct",
               error: "UNAVAILABLE: requester wake failed",
             },
             {
               phase: "steer-fallback",
-              delivered: false,
+              status: "failed",
               path: "none",
             },
           ],

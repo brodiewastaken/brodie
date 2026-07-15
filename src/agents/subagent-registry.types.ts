@@ -3,10 +3,11 @@
  *
  * Defines execution, completion, delivery, pending-delivery, and attachment state stored for child runs.
  */
+import type { ConversationRoute } from "../routing/conversation-route.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import type { SubagentRunOutcome } from "./subagent-announce-output.js";
 import type { SubagentLifecycleEndedReason } from "./subagent-lifecycle-events.js";
-import type { SpawnSubagentMode } from "./subagent-spawn.types.js";
+import type { SpawnSubagentContextMode, SpawnSubagentMode } from "./subagent-spawn.types.js";
 
 export type PendingFinalDeliveryPayload = {
   requesterSessionKey: string;
@@ -85,7 +86,7 @@ export type SubagentCompletionDeliveryState = {
 };
 
 type SubagentKillReconciliationState = {
-  /** Actual cancellation time; a yielded run may have an older execution end. */
+  /** Actual cancellation time for the task run. */
   killedAt: number;
   /** Requester aborts must not re-inject a delayed completion after queues are cleared. */
   suppressTaskDelivery?: boolean;
@@ -95,10 +96,18 @@ type SubagentKillReconciliationState = {
 
 export type SubagentRunRecord = {
   runId: string;
+  /** Agent-scoped database owner for this task graph row. */
+  ownerAgentId?: string;
   /** Detached task owner; steer/restart changes runId but continues the same task. */
   taskRunId?: string;
   childSessionKey: string;
   controllerSessionKey?: string;
+  /** Immediate controller lane. Nested completions never skip this route. */
+  controllerRoute?: ConversationRoute;
+  /** Original human-facing route, inherited unchanged through the task graph. */
+  rootSourceRoute?: ConversationRoute;
+  originalControllerTranscriptId?: string;
+  originalSourceTranscriptId?: string;
   requesterSessionKey: string;
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
@@ -111,6 +120,13 @@ export type SubagentRunRecord = {
   workspaceDir?: string;
   runTimeoutSeconds?: number;
   spawnMode?: SpawnSubagentMode;
+  contextMode?: SpawnSubagentContextMode;
+  resolvedRunPolicy?: Record<string, unknown>;
+  descendantTaskRunIds?: string[];
+  completionEventId?: string;
+  schedulerReceiptId?: string;
+  completionAdmittedAt?: number;
+  controllerTranscriptEvidence?: string;
   /** Monotonic ownership generation within one child session. */
   generation?: number;
   createdAt: number;
@@ -129,7 +145,6 @@ export type SubagentRunRecord = {
   suppressCompletionDelivery?: boolean;
   expectsCompletionMessage?: boolean;
   endedReason?: SubagentLifecycleEndedReason;
-  pauseReason?: "sessions_yield";
   wakeOnDescendantSettle?: boolean;
   execution?: SubagentExecutionState;
   completion?: SubagentCompletionState;

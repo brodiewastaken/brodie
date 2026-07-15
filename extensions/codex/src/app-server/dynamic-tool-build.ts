@@ -78,7 +78,6 @@ export type DynamicToolBuildParams = {
   forceHeartbeatTool?: boolean;
   ignoreDisableMessageTool?: boolean;
   ignoreRuntimePlan?: boolean;
-  onYieldDetected: () => void;
   onCodexAppServerEvent?: (event: CodexDynamicToolBuildEvent) => void;
   onPersistentWebSearchPolicyResolved?: (allowed: boolean) => void;
   onWebSearchPolicyResolved?: (allowed: boolean) => void;
@@ -306,13 +305,6 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
     forceMessageTool: shouldForceMessageTool(messagePolicyParams),
     enableHeartbeatTool: params.trigger === "heartbeat" || input.forceHeartbeatTool === true,
     forceHeartbeatTool: params.trigger === "heartbeat" || input.forceHeartbeatTool === true,
-    onYield: (message) => {
-      input.onYieldDetected();
-      input.onCodexAppServerEvent?.({
-        stream: "codex_app_server.tool",
-        data: { name: "sessions_yield", message },
-      });
-    },
     recordToolPrepStage: (name) => {
       toolBuildStages.mark(name);
     },

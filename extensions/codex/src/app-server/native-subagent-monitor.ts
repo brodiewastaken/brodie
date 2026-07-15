@@ -637,7 +637,14 @@ export class CodexNativeSubagentMonitor {
         this.markCompletionDeliveryDelivered(completion);
         return;
       }
-      const error = delivery.error ?? "completion delivery did not produce a parent response";
+      const error =
+        delivery.status === "pending"
+          ? delivery.reason
+          : delivery.status === "failed" ||
+              delivery.status === "terminal_failure" ||
+              delivery.status === "unresolved"
+            ? (delivery.error ?? "completion delivery did not produce a parent response")
+            : "completion delivery did not produce a parent response";
       this.markCompletionDeliveryPending(completion, error);
       this.scheduleCompletionDeliveryRetry(childState);
     } catch (error) {

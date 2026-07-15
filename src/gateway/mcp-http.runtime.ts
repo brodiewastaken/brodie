@@ -29,8 +29,6 @@ type McpLoopbackScopeParams = {
   cfg: OpenClawConfig;
   sessionKey: string;
   sessionId?: string;
-  yieldContextCacheKey?: string;
-  onYield?: (message: string) => Promise<void> | void;
   messageProvider: string | undefined;
   currentChannelId: string | undefined;
   currentThreadTs: string | undefined;
@@ -67,7 +65,6 @@ export class McpLoopbackToolCache {
     const cacheKey = [
       params.sessionKey,
       params.sessionId ?? "",
-      params.yieldContextCacheKey ?? "",
       params.messageProvider ?? "",
       params.currentChannelId ?? "",
       params.currentThreadTs ?? "",

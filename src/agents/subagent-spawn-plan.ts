@@ -58,7 +58,10 @@ export function resolveSubagentModelAndThinkingPlan(params: {
   targetAgentConfig?: unknown;
   modelOverride?: string;
   thinkingOverrideRaw?: string;
+  fastModeOverride?: boolean;
   callerThinkingRaw?: string;
+  callerFastMode?: boolean | "auto";
+  callerIsCron?: boolean;
 }) {
   const resolvedModel = resolveSubagentSpawnModelSelection({
     cfg: params.cfg,
@@ -85,6 +88,28 @@ export function resolveSubagentModelAndThinkingPlan(params: {
   }
 
   const modelOverrideSource = params.modelOverride?.trim() ? "user" : "auto";
+  const requesterSubagentFastMode = (
+    params.requesterAgentConfig as { subagents?: { fastMode?: unknown } } | undefined
+  )?.subagents?.fastMode;
+  const targetSubagentFastMode = (
+    params.targetAgentConfig as { subagents?: { fastMode?: unknown } } | undefined
+  )?.subagents?.fastMode;
+  const configuredFastMode =
+    typeof requesterSubagentFastMode === "boolean"
+      ? requesterSubagentFastMode
+      : typeof targetSubagentFastMode === "boolean"
+        ? targetSubagentFastMode
+        : params.cfg.agents?.defaults?.subagents?.fastMode;
+  const fastMode =
+    typeof params.fastModeOverride === "boolean"
+      ? params.fastModeOverride
+      : params.callerIsCron && typeof params.callerFastMode === "boolean"
+        ? params.callerFastMode
+        : typeof configuredFastMode === "boolean"
+          ? configuredFastMode
+          : typeof params.callerFastMode === "boolean"
+            ? params.callerFastMode
+            : false;
   const hasConfiguredAutoModel =
     modelOverrideSource === "auto" &&
     Boolean(
@@ -127,6 +152,7 @@ export function resolveSubagentModelAndThinkingPlan(params: {
           }
         : {}),
       ...thinkingPlan.initialSessionPatch,
+      fastMode,
     },
   };
 }

@@ -62,6 +62,51 @@ describe("subagent spawn model + thinking plan", () => {
     expect(plan.initialSessionPatch.thinkingLevel).toBe("high");
   });
 
+  it("keeps the compatibility Fast default off when no policy is configured", () => {
+    const plan = expectOkPlan(
+      resolveSubagentModelAndThinkingPlan({
+        cfg: createConfig(),
+        targetAgentId: "research",
+      }),
+    );
+    expect(plan.initialSessionPatch.fastMode).toBe(false);
+  });
+
+  it("lets cron parents override the conversation subagent default", () => {
+    const plan = expectOkPlan(
+      resolveSubagentModelAndThinkingPlan({
+        cfg: createConfig({ agents: { defaults: { subagents: { fastMode: true } } } }),
+        targetAgentId: "research",
+        callerFastMode: false,
+        callerIsCron: true,
+      }),
+    );
+    expect(plan.initialSessionPatch.fastMode).toBe(false);
+  });
+
+  it("uses the configured conversation subagent mode instead of the caller mode", () => {
+    const plan = expectOkPlan(
+      resolveSubagentModelAndThinkingPlan({
+        cfg: createConfig({ agents: { defaults: { subagents: { fastMode: true } } } }),
+        targetAgentId: "research",
+        callerFastMode: false,
+        callerIsCron: false,
+      }),
+    );
+    expect(plan.initialSessionPatch.fastMode).toBe(true);
+  });
+
+  it("applies explicit Fast mode before configured policy", () => {
+    const plan = expectOkPlan(
+      resolveSubagentModelAndThinkingPlan({
+        cfg: createConfig({ agents: { defaults: { subagents: { fastMode: false } } } }),
+        targetAgentId: "research",
+        fastModeOverride: true,
+      }),
+    );
+    expect(plan.initialSessionPatch.fastMode).toBe(true);
+  });
+
   it("rejects invalid thinking levels before any runtime work", () => {
     const plan = resolveSubagentModelAndThinkingPlan({
       cfg: createConfig(),

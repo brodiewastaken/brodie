@@ -63,11 +63,17 @@ describe("subagent registry nested agent tracking", () => {
     const mainRuns = listSubagentRunsForRequester("agent:main:main");
     expect(mainRuns).toHaveLength(1);
     expect(mainRuns[0].runId).toBe("run-orch");
+    expect(mainRuns[0].descendantTaskRunIds).toEqual(["run-leaf"]);
 
     // Orchestrator sees its direct child (the leaf)
     const orchRuns = listSubagentRunsForRequester("agent:main:subagent:orch-uuid");
     expect(orchRuns).toHaveLength(1);
     expect(orchRuns[0].runId).toBe("run-leaf");
+    expect(orchRuns[0].rootSourceRoute).toEqual(mainRuns[0].rootSourceRoute);
+    expect(orchRuns[0].controllerRoute).toMatchObject({
+      channel: "internal",
+      sessionKey: "agent:main:subagent:orch-uuid",
+    });
 
     // Leaf has no children
     const leafRuns = listSubagentRunsForRequester(
@@ -96,6 +102,54 @@ describe("subagent registry nested agent tracking", () => {
     expect(orchRuns).toHaveLength(1);
     expect(orchRuns[0].requesterSessionKey).toBe("agent:main:subagent:orch");
     expect(orchRuns[0].childSessionKey).toBe("agent:main:subagent:orch:subagent:child");
+  });
+
+  it("isolates nested controller scheduler lanes inherited from one root source", () => {
+    const { registerSubagentRun, listSubagentRunsForRequester } = subagentRegistry;
+    const requesterSessionKey = "agent:main:conversation:whatsapp:brodie:group:root-group@g.us";
+    const requesterOrigin = {
+      channel: "whatsapp",
+      accountId: "brodie",
+      to: "root-group@g.us",
+    };
+    const controllers = ["controller-a", "controller-b"].map((id) => `agent:main:subagent:${id}`);
+
+    for (const [index, controllerSessionKey] of controllers.entries()) {
+      registerSubagentRun({
+        runId: `run-controller-${index}`,
+        childSessionKey: controllerSessionKey,
+        requesterSessionKey,
+        requesterDisplayKey: "root-group",
+        requesterOrigin,
+        task: `controller ${index}`,
+        cleanup: "keep",
+      });
+      registerSubagentRun({
+        runId: `run-leaf-${index}`,
+        childSessionKey: `${controllerSessionKey}:subagent:leaf`,
+        requesterSessionKey: controllerSessionKey,
+        requesterDisplayKey: `controller-${index}`,
+        requesterOrigin,
+        task: `leaf ${index}`,
+        cleanup: "keep",
+      });
+    }
+
+    const routes = controllers.map(
+      (controllerSessionKey) =>
+        listSubagentRunsForRequester(controllerSessionKey)[0]?.controllerRoute,
+    );
+    expect(routes[0]).toMatchObject({
+      channel: "internal",
+      conversationId: controllers[0],
+      sessionKey: controllers[0],
+    });
+    expect(routes[1]).toMatchObject({
+      channel: "internal",
+      conversationId: controllers[1],
+      sessionKey: controllers[1],
+    });
+    expect(routes[0]?.queueLaneKey).not.toBe(routes[1]?.queueLaneKey);
   });
 
   it("countActiveRunsForSession only counts active children of the specific session", () => {

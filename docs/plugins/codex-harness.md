@@ -593,8 +593,8 @@ Persistent effective search-policy changes rotate the bound Codex thread
 before the next turn; transient per-turn restrictions use a temporary
 restricted thread and preserve the existing binding for later resume.
 
-`sessions_yield` and message-tool-only source replies stay direct because
-those are turn-control contracts. `sessions_spawn` stays searchable so
+Message-tool-only source replies stay direct because they are turn-control
+contracts. `sessions_spawn` stays searchable so
 Codex's native `spawn_agent` remains the primary Codex subagent surface,
 while explicit OpenClaw or ACP delegation is still available through the
 `openclaw` dynamic tool namespace. Heartbeat collaboration instructions

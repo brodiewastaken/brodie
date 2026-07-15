@@ -112,12 +112,14 @@ describe("readSubagentOutput", () => {
     testing.setDepsForTest();
   });
 
-  it("does not treat a sessions_yield wait turn as subagent completion output", async () => {
+  it("treats legacy sessions_yield text as historical output, not waiting control flow", async () => {
     const deps = installOutputDeps({
       messages: sessionsYieldTurn(),
     });
 
-    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBeUndefined();
+    await expect(readSubagentOutput("agent:main:subagent:child")).resolves.toBe(
+      "Waiting for subagent completion.",
+    );
     expect(deps.callGateway).toHaveBeenCalledOnce();
   });
 

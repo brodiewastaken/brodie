@@ -295,10 +295,9 @@ The branch already has a real shared SQLite base:
 - Runtime stores derive selected and inserted row types from those generated
   Kysely `DB` interfaces instead of shadowing SQLite row shapes by hand. Raw SQL
   remains limited to schema application, pragmas, and migration-only DDL.
-- The SQLite schemas are collapsed to `user_version = 1` because this database
-  layout has not shipped yet. Runtime openers create the current schema only;
-  file-to-database import remains in doctor code, and branch-local
-  database upgrade helpers have been deleted.
+- The shared SQLite schema remains at `user_version = 1`. Agent databases use
+  version 2 to add durable delegated-task ownership and import legacy shared
+  subagent rows once at the owning runtime boundary.
 - Relational ownership is enforced where the ownership boundary is canonical:
   source migration rows cascade from `migration_runs`, task delivery state
   cascades from `task_runs`, and transcript identity rows cascade from
@@ -313,7 +312,7 @@ The branch already has a real shared SQLite base:
   `current_conversation_bindings`, `plugin_binding_approvals`,
   `tui_last_sessions`, `acp_sessions`, `acp_replay_sessions`,
   `acp_replay_events`, `task_runs`, `task_delivery_state`, `flow_runs`,
-  `subagent_runs`, `migration_runs`, and `backup_runs`.
+  `migration_runs`, and `backup_runs`.
 - Arbitrary plugin-owned state does not get host-owned typed tables. Installed
   plugins use `plugin_state_entries` for versioned JSON payloads and
   `plugin_blob_entries` for bytes, with namespace/key ownership, TTL cleanup,
@@ -392,7 +391,7 @@ The branch already has a real shared SQLite base:
   Opening a shipped generic-name memory index migrates its metadata, sources,
   chunks, and embedding cache into the canonical tables; derived FTS/vector
   tables are rebuilt under their canonical names.
-- Subagent run recovery state now lives in typed shared `subagent_runs` rows
+- Subagent run recovery state now lives in typed per-agent `subagent_runs` rows
   with indexed child, requester, and controller session keys. The old
   `subagents/runs.json` file is doctor migration input only.
 - Current conversation bindings now live in typed shared
@@ -1332,7 +1331,7 @@ sessionId})`; create, branch, continue, list, and fork flows live in their
 - ACPX wrapper scripts and the isolated Codex home are generated in the
   OpenClaw temp root. They are recreated as needed and are not backup or
   migration inputs.
-- Subagent run registry persistence uses typed shared `subagent_runs` rows. The
+- Subagent run registry persistence uses typed per-agent `subagent_runs` rows. The
   old `subagents/runs.json` path is now only a doctor migration input, and
   runtime helper names no longer describe the state layer as disk-backed.
   Runtime tests no longer create invalid or empty `runs.json` fixtures to prove
@@ -1438,7 +1437,6 @@ agent_databases(agent_id, path, schema_version, last_seen_at, size_bytes)
 task_runs(...)
 task_delivery_state(...)
 flow_runs(...)
-subagent_runs(run_id, child_session_key, requester_session_key, controller_session_key, created_at, ended_at, cleanup_handled, payload_json)
 current_conversation_bindings(binding_key, binding_id, target_agent_id, target_session_id, target_session_key, channel, account_id, conversation_kind, parent_conversation_id, conversation_id, target_kind, status, bound_at, expires_at, metadata_json, updated_at)
 plugin_binding_approvals(plugin_root, channel, account_id, plugin_id, plugin_name, approved_at)
 tui_last_sessions(scope_key, session_key, updated_at)
@@ -1492,6 +1490,7 @@ vfs_entries(namespace, path, kind, content_blob, metadata_json, updated_at)
 tool_artifacts(run_id, artifact_id, kind, metadata_json, blob, created_at)
 run_artifacts(run_id, path, kind, metadata_json, blob, created_at)
 trajectory_runtime_events(session_id, run_id, seq, event_json, created_at)
+subagent_runs(run_id, child_session_key, requester_session_key, controller_session_key, created_at, ended_at, cleanup_handled, payload_json)
 memory_index_meta(key, value)
 memory_index_sources(path, source, hash, mtime, size)
 memory_index_chunks(id, path, source, start_line, end_line, hash, model, text, embedding, updated_at)

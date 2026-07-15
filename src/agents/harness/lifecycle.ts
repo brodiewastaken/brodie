@@ -184,7 +184,6 @@ function emitAgentHarnessRunCompleted(params: {
       ...(result.agentHarnessResultClassification
         ? { resultClassification: result.agentHarnessResultClassification }
         : {}),
-      ...(typeof result.yieldDetected === "boolean" ? { yieldDetected: result.yieldDetected } : {}),
       itemLifecycle: { ...result.itemLifecycle },
     },
     errorMessage ? { errorMessage } : undefined,

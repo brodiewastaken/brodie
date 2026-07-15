@@ -1539,28 +1539,6 @@ describe("CodexAppServerEventProjector", () => {
     expect(result.lastAssistant).toBeUndefined();
   });
 
-  it("preserves sessions_yield detection in attempt results", () => {
-    const projector = new CodexAppServerEventProjector(
-      {
-        prompt: "hello",
-        sessionId: "session-1",
-        sessionFile: "/tmp/session.jsonl",
-        workspaceDir: "/tmp",
-        runId: "run-1",
-        provider: "openai",
-        modelId: "gpt-5.4-codex",
-        model: createCodexTestModel(),
-        thinkLevel: "medium",
-      } as EmbeddedRunAttemptParams,
-      THREAD_ID,
-      TURN_ID,
-    );
-
-    const result = projector.buildResult(buildEmptyToolTelemetry(), { yieldDetected: true });
-
-    expect(result.yieldDetected).toBe(true);
-  });
-
   it("projects guardian review lifecycle details into agent events", async () => {
     const onAgentEvent = vi.fn();
     const projector = await createProjector({ ...(await createParams()), onAgentEvent });

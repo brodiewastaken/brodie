@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type {
+  AgentHarnessCompletionDelivery,
   AgentHarnessTaskRecord,
   AgentHarnessTaskRuntimeScope,
 } from "openclaw/plugin-sdk/agent-harness-task-runtime";
@@ -42,17 +43,6 @@ function createClient() {
 }
 
 function createRuntime() {
-  type DeliveryResult = {
-    delivered: boolean;
-    path: "direct" | "steered" | "none";
-    error?: string;
-    phases?: Array<{
-      phase: "direct-primary" | "steer-primary" | "steer-fallback";
-      delivered: boolean;
-      path: "direct" | "steered" | "none";
-      error?: string;
-    }>;
-  };
   const createRunningTaskRun = vi.fn(
     (params): AgentHarnessTaskRecord => ({
       taskId: params.sourceId ?? params.runId,
@@ -86,8 +76,8 @@ function createRuntime() {
     ...taskRuntime,
     createAgentHarnessTaskRuntime: vi.fn(() => taskRuntime),
     deliverAgentHarnessTaskCompletion: vi.fn(
-      async (): Promise<DeliveryResult> => ({
-        delivered: true,
+      async (): Promise<AgentHarnessCompletionDelivery> => ({
+        status: "delivered",
         path: "direct" as const,
       }),
     ),
@@ -1419,14 +1409,17 @@ describe("CodexNativeSubagentMonitor", () => {
       const runtime = createRuntime();
       runtime.deliverAgentHarnessTaskCompletion
         .mockResolvedValueOnce({
-          delivered: false,
+          status: "pending",
           path: "direct" as const,
-          error: "completion handoff is still pending",
+          reason: "completion_handoff_pending",
+          runCorrelationId: "run-parent-handoff",
         })
         .mockResolvedValueOnce({
-          delivered: true,
+          status: "delivered",
           path: "direct" as const,
-          phases: [{ phase: "direct-primary" as const, delivered: true, path: "direct" as const }],
+          phases: [
+            { phase: "direct-primary" as const, status: "delivered", path: "direct" as const },
+          ],
         });
       const monitor = new CodexNativeSubagentMonitor(client, runtime, {
         completionDeliveryRetryDelaysMs: [10],

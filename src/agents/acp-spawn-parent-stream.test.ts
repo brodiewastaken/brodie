@@ -5,6 +5,7 @@ import { mergeMockedModule } from "../test-utils/vitest-module-mocks.js";
 
 const enqueueSystemEventMock = vi.fn();
 const requestHeartbeatMock = vi.fn();
+const admitDurableSystemEventWakeMock = vi.fn();
 const readAcpSessionEntryMock = vi.fn();
 const resolveSessionFilePathMock = vi.fn();
 const resolveSessionFilePathOptionsMock = vi.fn();
@@ -23,6 +24,36 @@ vi.mock("../infra/heartbeat-wake.js", async () => {
     }),
   );
 });
+
+vi.mock("../infra/durable-system-event-wake.js", () => ({
+  admitDurableSystemEventWake: async (options: {
+    agentId?: string;
+    sessionKey: string;
+    systemEvent: { text: string; contextKey?: string | null; deliveryContext?: unknown };
+    source: string;
+    intent: string;
+    reason: string;
+    sourceGeneration: string;
+    producerKind: string;
+  }) => {
+    admitDurableSystemEventWakeMock(options);
+    enqueueSystemEventMock(options.systemEvent.text, {
+      sessionKey: options.sessionKey,
+      contextKey: options.systemEvent.contextKey,
+      deliveryContext: options.systemEvent.deliveryContext,
+    });
+    requestHeartbeatMock({
+      source: options.source,
+      intent: options.intent,
+      reason: options.reason,
+      ...(options.agentId ? { agentId: options.agentId } : {}),
+      sessionKey: options.sessionKey,
+      sourceGeneration: options.sourceGeneration,
+      producerKind: options.producerKind,
+    });
+    return { accepted: false, reason: "disabled" };
+  },
+}));
 
 vi.mock("../acp/runtime/session-meta.js", async () => {
   return await mergeMockedModule(
@@ -110,6 +141,7 @@ describe("startAcpSpawnParentStreamRelay", () => {
   beforeEach(() => {
     enqueueSystemEventMock.mockClear();
     requestHeartbeatMock.mockClear();
+    admitDurableSystemEventWakeMock.mockClear();
     readAcpSessionEntryMock.mockReset();
     resolveSessionFilePathMock.mockReset();
     resolveSessionFilePathOptionsMock.mockReset();
@@ -196,29 +228,68 @@ describe("startAcpSpawnParentStreamRelay", () => {
         deliveryContext,
       },
     ]);
-    const heartbeatCalls = requestHeartbeatMock.mock.calls as Array<
-      [{ source?: string; intent?: string; reason?: string; sessionKey?: string }]
+    const durableCalls = admitDurableSystemEventWakeMock.mock.calls as Array<
+      [
+        {
+          agentId?: string;
+          sessionKey?: string;
+          sourceGeneration?: string;
+          producerKind?: string;
+        },
+      ]
     >;
-    expect(heartbeatCalls.map(([options]) => options)).toEqual([
+    expect(durableCalls).toHaveLength(3);
+    expect(
+      durableCalls.map(([options]) => ({
+        agentId: options.agentId,
+        sessionKey: options.sessionKey,
+        sourceGeneration: options.sourceGeneration,
+        producerKind: options.producerKind,
+      })),
+    ).toEqual([
       {
-        source: "acp-spawn",
-        intent: "event",
-        reason: "acp:spawn:stream",
+        agentId: undefined,
         sessionKey: "agent:main:main",
+        sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+        producerKind: "system",
       },
       {
-        source: "acp-spawn",
-        intent: "event",
-        reason: "acp:spawn:stream",
+        agentId: undefined,
         sessionKey: "agent:main:main",
+        sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+        producerKind: "system",
       },
       {
-        source: "acp-spawn",
-        intent: "event",
-        reason: "acp:spawn:stream",
+        agentId: undefined,
         sessionKey: "agent:main:main",
+        sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+        producerKind: "system",
       },
     ]);
+    expect(new Set(durableCalls.map(([options]) => options.sourceGeneration)).size).toBe(3);
+    const heartbeatCalls = requestHeartbeatMock.mock.calls as Array<
+      [
+        {
+          source?: string;
+          intent?: string;
+          reason?: string;
+          sessionKey?: string;
+          sourceGeneration?: string;
+          producerKind?: string;
+        },
+      ]
+    >;
+    expect(heartbeatCalls).toHaveLength(3);
+    for (const [options] of heartbeatCalls) {
+      expect(options).toEqual({
+        source: "acp-spawn",
+        intent: "event",
+        reason: "acp:spawn:stream",
+        sessionKey: "agent:main:main",
+        sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+        producerKind: "system",
+      });
+    }
     relay.dispose();
   });
 
@@ -257,7 +328,7 @@ describe("startAcpSpawnParentStreamRelay", () => {
       | undefined;
     expect(heartbeatOptions?.agentId).toBe("ops");
     expect(heartbeatOptions?.reason).toBe("acp:spawn:stream");
-    expect(heartbeatOptions).not.toHaveProperty("sessionKey");
+    expect(heartbeatOptions).toHaveProperty("sessionKey", "global");
     relay.dispose();
   });
 

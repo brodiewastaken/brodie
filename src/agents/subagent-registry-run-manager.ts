@@ -18,6 +18,7 @@ import { buildAgentRunTerminalOutcomeFromWaitResult } from "./agent-run-terminal
 import { removeInternalSessionEffectsTranscript } from "./internal-session-effects.js";
 import { isRecoverableAgentWaitError, waitForAgentRun } from "./run-wait.js";
 import { type SubagentRunOutcome, withSubagentOutcomeTiming } from "./subagent-announce-output.js";
+import { resolveSubagentConversationRoute } from "./subagent-conversation-route.js";
 import {
   clearDeliveryState,
   ensureCompletionState,
@@ -98,73 +99,12 @@ function resolveWaitTimeoutMsForRun(
   return Math.max(1, Math.min(normalizedWaitTimeoutMs, deadlineMs - now));
 }
 
-export function markSubagentRunPausedAfterYield(params: {
-  entry: SubagentRunRecord;
-  startedAt?: number;
-  endedAt?: number;
-  now?: number;
-}): boolean {
-  const { entry } = params;
-  if (
-    entry.endedReason === SUBAGENT_ENDED_REASON_KILLED ||
-    entry.suppressAnnounceReason === "killed" ||
-    (entry.cleanup === "delete" && Number.isFinite(entry.deleteCleanupDispatchedAt))
-  ) {
-    // agent.wait and lifecycle events can report the old yield after control
-    // killed the run. Once delete dispatch starts, reviving the row would expose
-    // a live run whose backing session may already be gone.
-    return false;
-  }
-  let mutated = false;
-  if (typeof params.startedAt === "number" && entry.startedAt !== params.startedAt) {
-    entry.startedAt = params.startedAt;
-    if (typeof entry.sessionStartedAt !== "number") {
-      entry.sessionStartedAt = params.startedAt;
-    }
-    mutated = true;
-  }
-  const endedAt = typeof params.endedAt === "number" ? params.endedAt : (params.now ?? Date.now());
-  if (entry.endedAt !== endedAt) {
-    entry.endedAt = endedAt;
-    mutated = true;
-  }
-  if (entry.pauseReason !== "sessions_yield") {
-    entry.pauseReason = "sessions_yield";
-    mutated = true;
-  }
-  if (entry.outcome !== undefined) {
-    entry.outcome = undefined;
-    mutated = true;
-  }
-  if (entry.endedReason !== undefined) {
-    entry.endedReason = undefined;
-    mutated = true;
-  }
-  if (entry.cleanupHandled === true) {
-    entry.cleanupHandled = false;
-    mutated = true;
-  }
-  if (entry.cleanupCompletedAt !== undefined) {
-    entry.cleanupCompletedAt = undefined;
-    mutated = true;
-  }
-  if (entry.delivery !== undefined) {
-    clearDeliveryState(entry);
-    mutated = true;
-  }
-  const completion = ensureCompletionState(entry);
-  if (completion.resultText !== undefined) {
-    completion.resultText = undefined;
-    completion.capturedAt = undefined;
-    mutated = true;
-  }
-  return mutated;
-}
-
 export type RegisterSubagentRunParams = {
   runId: string;
   childSessionKey: string;
   controllerSessionKey?: string;
+  controllerRoute?: import("../routing/conversation-route.js").ConversationRoute;
+  rootSourceRoute?: import("../routing/conversation-route.js").ConversationRoute;
   requesterSessionKey: string;
   requesterOrigin?: DeliveryContext;
   requesterDisplayKey: string;
@@ -180,6 +120,9 @@ export type RegisterSubagentRunParams = {
   runTimeoutSeconds?: number;
   expectsCompletionMessage?: boolean;
   spawnMode?: "run" | "session";
+  contextMode?: "isolated" | "fork";
+  resolvedRunPolicy?: Record<string, unknown>;
+  deferCompletionWait?: boolean;
   attachmentsDir?: string;
   attachmentsRootDir?: string;
   retainAttachmentsOnKeep?: boolean;
@@ -317,24 +260,9 @@ export function createSubagentRunManager(params: {
         return;
       }
       const waitTerminalOutcome = buildAgentRunTerminalOutcomeFromWaitResult(wait);
-      const waitBlocked = waitTerminalOutcome?.reason === "blocked";
       const waitAborted =
         waitTerminalOutcome?.reason === "aborted" || waitTerminalOutcome?.reason === "cancelled";
       const waitStatus = waitTerminalOutcome?.status ?? wait.status;
-      if (wait.yielded === true && waitStatus !== "timeout" && !waitBlocked) {
-        params.clearPendingLifecycleError(runId);
-        params.clearPendingLifecycleTimeout(runId);
-        if (
-          markSubagentRunPausedAfterYield({
-            entry,
-            startedAt: wait.startedAt,
-            endedAt: wait.endedAt,
-          })
-        ) {
-          params.persist();
-        }
-        return;
-      }
       if (waitStatus === "error" && !waitAborted && isRecoverableAgentWaitError(wait.error)) {
         scheduleWaitRetry(entry, "subagent wait interrupted; scheduling recovery", wait.error);
         return;
@@ -491,11 +419,7 @@ export function createSubagentRunManager(params: {
           });
         }
       }
-      if (
-        typeof current.endedAt === "number" &&
-        !current.cleanupCompletedAt &&
-        current.pauseReason !== "sessions_yield"
-      ) {
+      if (typeof current.endedAt === "number" && !current.cleanupCompletedAt) {
         current.cleanupHandled = false;
         params.resumedRuns.delete(runId);
         params.resumeSubagentRun(runId);
@@ -654,7 +578,6 @@ export function createSubagentRunManager(params: {
       accumulatedRuntimeMs,
       endedAt: undefined,
       endedReason: undefined,
-      pauseReason: undefined,
       endedHookEmittedAt: undefined,
       browserCleanupDispatchedAt: undefined,
       deleteCleanupDispatchedAt: undefined,
@@ -744,11 +667,39 @@ export function createSubagentRunManager(params: {
     const runTimeoutSeconds = registerParams.runTimeoutSeconds ?? 0;
     const waitTimeoutMs = params.resolveSubagentWaitTimeoutMs(cfg, runTimeoutSeconds);
     const requesterOrigin = normalizeDeliveryContext(registerParams.requesterOrigin);
+    const controllerEntry = Array.from(params.runs.values()).find(
+      (candidate) => candidate.childSessionKey === controllerSessionKey,
+    );
+    const rootSourceRoute = registerParams.rootSourceRoute ?? controllerEntry?.rootSourceRoute;
+    const controllerRoute =
+      registerParams.controllerRoute ??
+      resolveSubagentConversationRoute({
+        sessionKey: controllerSessionKey,
+        origin: requesterOrigin,
+        internal: Boolean(controllerEntry),
+      });
+    const resolvedRootSourceRoute =
+      rootSourceRoute ??
+      resolveSubagentConversationRoute({
+        sessionKey: requesterSessionKey,
+        origin: requesterOrigin,
+      });
+    const previousDescendants = controllerEntry?.descendantTaskRunIds;
+    if (controllerEntry) {
+      controllerEntry.descendantTaskRunIds = Array.from(
+        new Set([...(controllerEntry.descendantTaskRunIds ?? []), runId]),
+      );
+    }
     const entry: SubagentRunRecord = normalizeSubagentRunState({
       runId,
+      ownerAgentId: controllerRoute.transcriptOwner.agentId,
       taskRunId: runId,
       childSessionKey,
       controllerSessionKey,
+      controllerRoute,
+      rootSourceRoute: resolvedRootSourceRoute,
+      originalControllerTranscriptId: controllerSessionKey,
+      originalSourceTranscriptId: resolvedRootSourceRoute.transcriptOwner.sessionKey,
       requesterSessionKey,
       requesterOrigin,
       requesterDisplayKey: registerParams.requesterDisplayKey,
@@ -757,6 +708,9 @@ export function createSubagentRunManager(params: {
       cleanup: registerParams.cleanup,
       expectsCompletionMessage: registerParams.expectsCompletionMessage,
       spawnMode,
+      contextMode: registerParams.contextMode,
+      resolvedRunPolicy: registerParams.resolvedRunPolicy,
+      descendantTaskRunIds: [],
       label: registerParams.label,
       model: registerParams.model,
       agentDir: registerParams.agentDir,
@@ -790,6 +744,9 @@ export function createSubagentRunManager(params: {
       params.persistOrThrow();
     } catch (error) {
       params.runs.delete(runId);
+      if (controllerEntry) {
+        controllerEntry.descendantTaskRunIds = previousDescendants;
+      }
       restoreKillReconciliationSnapshots(killReconciliationSnapshots);
       throw error;
     }
@@ -828,7 +785,9 @@ export function createSubagentRunManager(params: {
     params.startSweeper();
     // Wait for subagent completion via gateway RPC (cross-process).
     // The in-process lifecycle listener is a fallback for embedded runs.
-    void waitForSubagentCompletion(runId, waitTimeoutMs, entry);
+    if (registerParams.deferCompletionWait !== true) {
+      void waitForSubagentCompletion(runId, waitTimeoutMs, entry);
+    }
   };
 
   const releaseSubagentRun = (runId: string) => {
@@ -916,22 +875,14 @@ export function createSubagentRunManager(params: {
         entry.endedReason === SUBAGENT_ENDED_REASON_KILLED &&
         entry.killReconciliation !== undefined;
       const existingKillReconciliation = entry.killReconciliation;
-      if (
-        typeof entry.endedAt === "number" &&
-        entry.pauseReason !== "sessions_yield" &&
-        !wasKilledLifecycle
-      ) {
+      if (typeof entry.endedAt === "number" && !wasKilledLifecycle) {
         // An abort lifecycle event can mark the run killed before this shared
         // termination path runs. Re-enter only for that provisional state so
         // it receives the same reconciliation tombstone as a direct kill.
         continue;
       }
       entrySnapshots.set(entry, structuredClone(entry));
-      const wasYielded = entry.pauseReason === "sessions_yield";
-      const endedAt =
-        (wasYielded || wasKilledLifecycle) && typeof entry.endedAt === "number"
-          ? entry.endedAt
-          : now;
+      const endedAt = wasKilledLifecycle && typeof entry.endedAt === "number" ? entry.endedAt : now;
       entry.endedAt = endedAt;
       entry.outcome = withSubagentOutcomeTiming(
         { status: "error", error: reason },
@@ -948,14 +899,11 @@ export function createSubagentRunManager(params: {
           ? endedAt
           : now;
       entry.suppressAnnounceReason = "killed";
-      entry.pauseReason = undefined;
       // Setting endedAt above short-circuits the completion watcher, so the
       // lifecycle finalizer never reaches the detached task row for killed runs.
       const taskEndedAt = existingKillReconciliation
         ? (resolveKilledSubagentTaskEndedAt(entry) ?? endedAt)
-        : wasYielded
-          ? now
-          : endedAt;
+        : endedAt;
       entry.killReconciliation = {
         killedAt: existingKillReconciliation?.killedAt ?? taskEndedAt,
         suppressTaskDelivery:

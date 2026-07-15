@@ -48,7 +48,6 @@ export type ResolveAttemptTrajectoryTerminalParams = {
   acceptedSessionSpawns?: readonly AcceptedSessionSpawn[];
   heartbeatToolResponse?: unknown;
   clientToolCalls?: Array<unknown>;
-  yieldDetected?: boolean;
   lastToolError?: unknown;
   silentExpected?: boolean;
   emptyAssistantReplyIsSilent?: boolean;
@@ -164,7 +163,6 @@ export function resolveAttemptTrajectoryTerminal(
     hasAcceptedSessionSpawn(params.acceptedSessionSpawns) ||
     params.heartbeatToolResponse !== undefined ||
     (params.clientToolCalls?.length ?? 0) > 0 ||
-    params.yieldDetected === true ||
     params.lastToolError !== undefined ||
     hasAsyncStartedToolActivity(params.toolMetas);
 

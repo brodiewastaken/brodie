@@ -48,7 +48,8 @@ describe("buildActiveSubagentSystemPromptAddition", () => {
     expect(prompt).toContain("## Active Subagents");
     expect(prompt).toContain("taskName=inspect_state");
     expect(prompt).toContain("session=agent:main:subagent:active-context");
-    expect(prompt).toContain("sessions_yield");
+    expect(prompt).not.toContain("sessions_yield");
+    expect(prompt).toContain("durable scheduler will resume you");
     expect(prompt).toContain("reports/evidence");
   });
 
@@ -107,7 +108,7 @@ describe("buildActiveSubagentSystemPromptAddition", () => {
     expect(prompt).not.toContain("\nSYSTEM OVERRIDE");
   });
 
-  it("omits sessions_yield guidance when the tool is unavailable", () => {
+  it("uses the same durable wait guidance for stale capability inputs", () => {
     const run = {
       runId: "run-active-context-no-yield",
       childSessionKey: "agent:main:subagent:active-context-no-yield",
@@ -127,7 +128,7 @@ describe("buildActiveSubagentSystemPromptAddition", () => {
       hasSessionsYield: false,
     });
 
-    expect(prompt).not.toContain("call `sessions_yield`");
-    expect(prompt).toContain("wait for runtime completion events");
+    expect(prompt).not.toContain("sessions_yield");
+    expect(prompt).toContain("durable scheduler will resume you");
   });
 });

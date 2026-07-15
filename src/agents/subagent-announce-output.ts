@@ -20,7 +20,6 @@ import {
   resolveStorePath,
 } from "./subagent-announce.runtime.js";
 import { compareSubagentRunGeneration } from "./subagent-run-generation.js";
-import { assistantCallsSessionsYield, isSessionsYieldToolResult } from "./subagent-yield-output.js";
 import { extractAssistantText, sanitizeTextContent } from "./tools/chat-history-text.js";
 import { isAnnounceSkip } from "./tools/sessions-send-tokens.js";
 
@@ -54,7 +53,6 @@ type SubagentOutputSnapshot = {
   latestAssistantText?: string;
   latestSilentText?: string;
   latestToolCallCount?: number;
-  waitingForContinuation?: boolean;
 };
 
 type AgentWaitResult = {
@@ -64,7 +62,6 @@ type AgentWaitResult = {
   error?: string;
   stopReason?: string;
   livenessState?: string;
-  yielded?: boolean;
   pendingError?: boolean;
   timeoutPhase?: string;
   providerStarted?: boolean;
@@ -137,57 +134,32 @@ function countAssistantToolCalls(message: unknown): number {
 
 function summarizeSubagentOutputHistory(messages: Array<unknown>): SubagentOutputSnapshot {
   const snapshot: SubagentOutputSnapshot = {};
-  let previousAssistantCalledYield = false;
   for (const message of messages) {
     if (!message || typeof message !== "object") {
       continue;
     }
     const role = (message as { role?: unknown }).role;
     if (role === "assistant") {
-      if (assistantCallsSessionsYield(message)) {
-        snapshot.latestAssistantText = undefined;
-        snapshot.latestSilentText = undefined;
-        snapshot.waitingForContinuation = true;
-        previousAssistantCalledYield = true;
-        continue;
-      }
       const text = extractSubagentAssistantText(message).trim();
       if (!text) {
         snapshot.latestToolCallCount =
           (snapshot.latestToolCallCount ?? 0) + countAssistantToolCalls(message);
-        snapshot.waitingForContinuation = false;
-        previousAssistantCalledYield = false;
         continue;
       }
       if (isAnnounceSkip(text) || isSilentReplyText(text, SILENT_REPLY_TOKEN)) {
         snapshot.latestSilentText = text;
         snapshot.latestAssistantText = undefined;
-        snapshot.waitingForContinuation = false;
-        previousAssistantCalledYield = false;
         continue;
       }
       snapshot.latestSilentText = undefined;
       snapshot.latestAssistantText = text;
-      snapshot.waitingForContinuation = false;
-      previousAssistantCalledYield = false;
       continue;
     }
-    if (isSessionsYieldToolResult(message, previousAssistantCalledYield)) {
-      snapshot.latestAssistantText = undefined;
-      snapshot.latestSilentText = undefined;
-      snapshot.waitingForContinuation = true;
-      previousAssistantCalledYield = false;
-      continue;
-    }
-    previousAssistantCalledYield = false;
   }
   return snapshot;
 }
 
 function selectSubagentOutputText(snapshot: SubagentOutputSnapshot): string | undefined {
-  if (snapshot.waitingForContinuation) {
-    return undefined;
-  }
   if (snapshot.latestSilentText) {
     return snapshot.latestSilentText;
   }

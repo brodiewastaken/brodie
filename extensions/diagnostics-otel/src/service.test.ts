@@ -2714,7 +2714,6 @@ describe("diagnostics-otel service", () => {
       outcome: "completed",
       durationMs: 90,
       resultClassification: "reasoning-only",
-      yieldDetected: true,
       itemLifecycle: { startedCount: 3, completedCount: 2, activeCount: 1 },
       trace: {
         traceId: TRACE_ID,
@@ -2783,7 +2782,9 @@ describe("diagnostics-otel service", () => {
     expect(harnessOptions?.attributes?.["openclaw.harness.result_classification"]).toBe(
       "reasoning-only",
     );
-    expect(harnessOptions?.attributes?.["openclaw.harness.yield_detected"]).toBe(true);
+    expect(Object.hasOwn(harnessOptions?.attributes ?? {}, "openclaw.harness.yield_detected")).toBe(
+      false,
+    );
     expect(harnessOptions?.attributes?.["openclaw.harness.items.started"]).toBe(3);
     expect(harnessOptions?.attributes?.["openclaw.harness.items.completed"]).toBe(2);
     expect(harnessOptions?.attributes?.["openclaw.harness.items.active"]).toBe(1);

@@ -246,7 +246,7 @@ describe("AgentHarness lifecycle runner", () => {
     expect(completedEvent?.pluginId).toBe("codex-plugin");
     expect(completedEvent?.outcome).toBe("completed");
     expect(completedEvent?.resultClassification).toBe("reasoning-only");
-    expect(completedEvent?.yieldDetected).toBe(true);
+    expect(completedEvent).not.toHaveProperty("yieldDetected");
     expect(completedEvent?.itemLifecycle).toEqual({
       startedCount: 3,
       completedCount: 2,

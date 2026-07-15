@@ -1,4 +1,5 @@
 /** Relays child ACP session stream updates back into the requester parent session. */
+import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { asFiniteNumber } from "@openclaw/normalization-core/number-coercion";
@@ -17,16 +18,18 @@ import {
 import { resolveSessionFilePath, resolveSessionFilePathOptions } from "../config/sessions/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { onAgentEvent } from "../infra/agent-events.js";
+import { admitDurableSystemEventWake } from "../infra/durable-system-event-wake.js";
 import {
   type EventSessionRoutingPolicy,
   resolveEventSessionKeyForPolicy,
-  scopedHeartbeatWakeOptionsForPolicy,
 } from "../infra/event-session-routing.js";
-import { requestHeartbeat } from "../infra/heartbeat-wake.js";
 import { appendRegularFile } from "../infra/regular-file.js";
-import { enqueueSystemEvent } from "../infra/system-events.js";
 import { resolveNormalizedAccountEntry } from "../routing/account-lookup.js";
-import { normalizeAccountId } from "../routing/session-key.js";
+import {
+  normalizeAccountId,
+  parseAgentSessionKey,
+  resolveAgentIdFromSessionKey,
+} from "../routing/session-key.js";
 import { normalizeAssistantPhase } from "../shared/chat-message-content.js";
 import { recordTaskRunProgressByRunId } from "../tasks/detached-task-runtime.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
@@ -37,6 +40,16 @@ const DEFAULT_NO_OUTPUT_POLL_MS = 15_000;
 const DEFAULT_MAX_RELAY_LIFETIME_MS = 6 * 60 * 60 * 1000;
 const STREAM_BUFFER_MAX_CHARS = 4_000;
 const STREAM_SNIPPET_MAX_CHARS = 220;
+
+function resolveAcpWakeGeneration(runId: string, contextKey: string, text: string): string {
+  return createHash("sha256")
+    .update(runId)
+    .update("\0")
+    .update(contextKey)
+    .update("\0")
+    .update(text)
+    .digest("hex");
+}
 
 type AcpParentProgressStreamingConfig = StreamingCompatEntry & {
   accounts?: Record<string, StreamingCompatEntry | undefined>;
@@ -368,7 +381,7 @@ export function startAcpSpawnParentStreamRelay(params: {
       runId,
       parentSessionKey,
       childSessionKey: params.childSessionKey,
-      agentId: params.agentId,
+      agentId: resolveAgentIdFromSessionKey(parentSessionKey) ?? "main",
       kind,
       ...fields,
     });
@@ -383,22 +396,6 @@ export function startAcpSpawnParentStreamRelay(params: {
     mainKey: params.mainKey,
     sessionScope: params.sessionScope,
   };
-  const wake = () => {
-    if (!shouldSurfaceUpdates) {
-      return;
-    }
-    requestHeartbeat(
-      scopedHeartbeatWakeOptionsForPolicy(
-        parentSessionKey,
-        {
-          source: "acp-spawn",
-          intent: "event",
-          reason: "acp:spawn:stream",
-        },
-        eventRouting,
-      ),
-    );
-  };
   const emit = (text: string, contextKey: string) => {
     const cleaned = text.trim();
     if (!cleaned) {
@@ -408,12 +405,27 @@ export function startAcpSpawnParentStreamRelay(params: {
     if (!shouldSurfaceUpdates) {
       return;
     }
-    enqueueSystemEvent(cleaned, {
-      sessionKey: resolveEventSessionKeyForPolicy(parentSessionKey, eventRouting),
+    const sessionKey = resolveEventSessionKeyForPolicy(parentSessionKey, eventRouting);
+    const parentAgentId = resolveAgentIdFromSessionKey(parentSessionKey) ?? "main";
+    const sessionOwnsAgentRouting = parseAgentSessionKey(sessionKey) !== null;
+    const systemEvent = {
+      text: cleaned,
       contextKey,
       deliveryContext: params.deliveryContext,
+    };
+    void admitDurableSystemEventWake({
+      cfg: params.cfg,
+      ...(sessionOwnsAgentRouting ? {} : { agentId: parentAgentId }),
+      sessionKey,
+      systemEvent,
+      source: "acp-spawn",
+      intent: "event",
+      reason: "acp:spawn:stream",
+      sourceGeneration: resolveAcpWakeGeneration(runId, contextKey, cleaned),
+      producerKind: "system",
+    }).catch((error: unknown) => {
+      logEvent("durable_wake_error", { contextKey, error: String(error) });
     });
-    wake();
   };
   const emitStartNotice = () => {
     recordTaskRunProgressByRunId({

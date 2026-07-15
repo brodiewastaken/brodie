@@ -18,10 +18,31 @@ const detachedTaskRuntimeMocks = vi.hoisted(() => ({
 const taskRegistryDeliveryRuntimeMocks = vi.hoisted(() => ({
   sendMessage: vi.fn(),
 }));
+const schedulerMocks = vi.hoisted(() => ({
+  admit: vi.fn<import("../../scheduler/conversation-scheduler.js").ConversationScheduler["admit"]>(
+    async () => ({ accepted: false, reason: "disabled" }),
+  ),
+  waitForReceiptTerminal: vi.fn(),
+  registration: undefined as
+    | import("../../scheduler/scheduler-producer-registry.js").SchedulerProducerRegistration
+    | undefined,
+}));
 
 vi.mock("../subagent-announce-delivery.js", () => subagentAnnounceDeliveryMocks);
 vi.mock("../../tasks/detached-task-runtime.js", () => detachedTaskRuntimeMocks);
 vi.mock("../../tasks/task-registry-delivery-runtime.js", () => taskRegistryDeliveryRuntimeMocks);
+vi.mock("../../scheduler/runtime-conversation-scheduler.js", () => ({
+  getRuntimeConversationScheduler: () => ({
+    admit: schedulerMocks.admit,
+    waitForReceiptTerminal: schedulerMocks.waitForReceiptTerminal,
+  }),
+  registerRuntimeConversationSchedulerProducer: (
+    registration: import("../../scheduler/scheduler-producer-registry.js").SchedulerProducerRegistration,
+  ) => {
+    schedulerMocks.registration = registration;
+    return vi.fn();
+  },
+}));
 
 import {
   createMediaGenerationTaskLifecycle,
@@ -35,6 +56,9 @@ beforeEach(() => {
   subagentAnnounceDeliveryMocks.loadRequesterSessionEntry.mockReturnValue({ entry: undefined });
   detachedTaskRuntimeMocks.createRunningTaskRun.mockClear();
   taskRegistryDeliveryRuntimeMocks.sendMessage.mockReset();
+  schedulerMocks.admit.mockReset();
+  schedulerMocks.admit.mockResolvedValue({ accepted: false, reason: "disabled" });
+  schedulerMocks.waitForReceiptTerminal.mockReset();
 });
 
 function createImageMediaLifecycle() {
@@ -58,6 +82,95 @@ describe("shouldDetachMediaGenerationTask", () => {
     expect(shouldDetachMediaGenerationTask("agent:main:cron:daily-media:run:run-123")).toBe(true);
     expect(shouldDetachMediaGenerationTask(undefined)).toBe(false);
   });
+});
+
+describe("durable media completion admission", () => {
+  it("persists one restartable completion before the announcement path runs", async () => {
+    const lifecycle = createImageMediaLifecycle();
+    const recordRunCorrelationId = vi.fn();
+    const recordRunStarted = vi.fn();
+    const recordRunTerminalOutcome = vi.fn();
+    schedulerMocks.admit.mockImplementationOnce(async (event) => {
+      queueMicrotask(() => {
+        void schedulerMocks.registration?.dispatch({
+          attemptId: "media-attempt-1",
+          placement: "idle",
+          events: [{ ...event, receiptId: "media-receipt-1", sequence: 1 }],
+          recordRunCorrelationId,
+          recordRunStarted,
+          recordRunTerminalOutcome,
+        });
+      });
+      return { accepted: true, receiptId: "media-receipt-1", durableAt: 1 };
+    });
+    subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValue({
+      status: "delivered",
+      path: "direct",
+    });
+
+    const delivered = await lifecycle.wakeTaskCompletion({
+      handle: {
+        taskId: "media-task-1",
+        runId: "media-run-1",
+        requesterSessionKey: "agent:main:discord:channel:ops",
+        taskLabel: "image task",
+      },
+      status: "ok",
+      statusLabel: "completed successfully",
+      result: "generated",
+      mediaUrls: ["https://example.test/result.png"],
+    });
+
+    expect(delivered).toBe(true);
+    expect(schedulerMocks.admit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "image_generate:media-task-1:media-run-1:ok",
+        producerKind: "media_generation_completion",
+        route: expect.objectContaining({
+          sessionKey: "agent:main:discord:channel:ops",
+        }),
+      }),
+    );
+    expect(subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement).toHaveBeenCalledOnce();
+    expect(recordRunCorrelationId).toHaveBeenCalledWith("media-attempt-1");
+    expect(recordRunStarted).toHaveBeenCalledOnce();
+    expect(recordRunTerminalOutcome).toHaveBeenCalledWith(
+      "completed",
+      expect.stringContaining(":outcome:completed"),
+    );
+  });
+
+  it.each([
+    ["delivered", true],
+    ["failed", false],
+  ] as const)(
+    "resolves an already-%s duplicate from its durable receipt without replaying delivery",
+    async (terminalState, expected) => {
+      const lifecycle = createImageMediaLifecycle();
+      schedulerMocks.admit.mockResolvedValueOnce({
+        accepted: true,
+        receiptId: "media-receipt-duplicate",
+        durableAt: 1,
+      });
+      schedulerMocks.waitForReceiptTerminal.mockResolvedValueOnce(terminalState);
+
+      const delivered = await lifecycle.wakeTaskCompletion({
+        handle: {
+          taskId: "media-task-duplicate",
+          runId: "media-run-duplicate",
+          requesterSessionKey: "agent:main:discord:channel:ops",
+          taskLabel: "image task",
+        },
+        status: "ok",
+        statusLabel: "completed successfully",
+        result: "generated",
+        mediaUrls: ["https://example.test/result.png"],
+      });
+
+      expect(delivered).toBe(expected);
+      expect(subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("scheduleMediaGenerationTaskCompletion", () => {
@@ -415,7 +528,8 @@ describe("createMediaGenerationTaskLifecycle", () => {
       },
     });
     subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValueOnce({
-      delivered: true,
+      status: "delivered",
+      path: "direct",
     });
     const lifecycle = createImageMediaLifecycle();
 
@@ -536,7 +650,8 @@ describe("createMediaGenerationTaskLifecycle", () => {
 
   it("returns the completion wake delivery result", async () => {
     subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValueOnce({
-      delivered: true,
+      status: "delivered",
+      path: "direct",
     });
     const lifecycle = createImageMediaLifecycle();
 
@@ -561,9 +676,8 @@ describe("createMediaGenerationTaskLifecycle", () => {
 
   it("treats terminal generated-media fallback failure as handled", async () => {
     subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValueOnce({
-      delivered: false,
+      status: "terminal_failure",
       path: "direct",
-      terminal: true,
       error: "generated media direct delivery failed after partial upload",
     });
     const lifecycle = createImageMediaLifecycle();
@@ -589,7 +703,8 @@ describe("createMediaGenerationTaskLifecycle", () => {
 
   it("direct-delivers generated media when the completion wake misses the requester", async () => {
     subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValueOnce({
-      delivered: false,
+      status: "failed",
+      path: "direct",
       reason: "generated_media_missing",
       error: "completion agent did not deliver generated media",
     });
@@ -628,7 +743,8 @@ describe("createMediaGenerationTaskLifecycle", () => {
 
   it("includes MEDIA directives in music completion wake prompts for session-only delivery", async () => {
     subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValueOnce({
-      delivered: true,
+      status: "delivered",
+      path: "direct",
     });
     const lifecycle = createMediaGenerationTaskLifecycle({
       toolName: "music_generate",
@@ -703,7 +819,7 @@ describe("createMediaGenerationTaskLifecycle", () => {
     // Abandoned requester sessions are terminal; direct delivery would re-open a
     // conversation the task lifecycle already decided to stop.
     subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValueOnce({
-      delivered: false,
+      status: "failed",
       path: "none",
       reason: "requester_abandoned",
       error: "requester session abandoned after timeout",
@@ -734,7 +850,7 @@ describe("createMediaGenerationTaskLifecycle", () => {
 
   it("does not direct-deliver generated media after a generic handoff failure", async () => {
     subagentAnnounceDeliveryMocks.deliverSubagentAnnouncement.mockResolvedValueOnce({
-      delivered: false,
+      status: "failed",
       path: "direct",
       error: "gateway request timeout for agent",
     });

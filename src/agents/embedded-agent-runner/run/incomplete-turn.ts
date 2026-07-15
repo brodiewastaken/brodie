@@ -44,7 +44,6 @@ type IncompleteTurnAttempt = Pick<
   | "clientToolCalls"
   | "conversationOutcome"
   | "currentAttemptAssistant"
-  | "yieldDetected"
   | "didSendDeterministicApprovalPrompt"
   | "heartbeatToolResponse"
   | "toolMediaUrls"
@@ -84,7 +83,6 @@ function hasPositiveOutputTokenUsage(message: AgentMessage | null): boolean {
 type SilentToolResultAttempt = Pick<
   EmbeddedRunAttemptResult,
   | "clientToolCalls"
-  | "yieldDetected"
   | "didSendDeterministicApprovalPrompt"
   | "lastToolError"
   | "messagesSnapshot"
@@ -175,7 +173,6 @@ export function resolveAttemptReplayMetadata(attempt: {
 type TerminalAttemptState = Pick<
   EmbeddedRunAttemptResult,
   | "clientToolCalls"
-  | "yieldDetected"
   | "didSendDeterministicApprovalPrompt"
   | "heartbeatToolResponse"
   | "lastToolError"
@@ -207,7 +204,6 @@ export function hasAttemptTerminalState(attempt: TerminalAttemptState): boolean 
   return Boolean(
     hasCommittedConversationalOutcome(attempt.conversationOutcome) ||
     attempt.clientToolCalls ||
-    attempt.yieldDetected ||
     attempt.didSendDeterministicApprovalPrompt ||
     attempt.heartbeatToolResponse ||
     attempt.lastToolError ||
@@ -282,7 +278,6 @@ export function resolveIncompleteTurnPayloadText(params: {
     (params.aborted && params.externalAbort) ||
     params.timedOut ||
     params.attempt.clientToolCalls ||
-    params.attempt.yieldDetected ||
     params.attempt.didSendDeterministicApprovalPrompt ||
     params.attempt.lastToolError
   ) {
@@ -338,7 +333,6 @@ export function shouldRetryMissingAssistantTurn(params: {
     params.attempt.clientToolCalls ||
     params.attempt.currentAttemptAssistant ||
     params.attempt.lastAssistant ||
-    params.attempt.yieldDetected ||
     params.attempt.didSendDeterministicApprovalPrompt ||
     params.attempt.lastToolError
   ) {
@@ -454,7 +448,6 @@ export function resolveSilentToolResultReplyPayload(params: {
     params.timedOut ||
     (params.attempt.toolMetas?.length ?? 0) === 0 ||
     params.attempt.clientToolCalls ||
-    params.attempt.yieldDetected ||
     params.attempt.didSendDeterministicApprovalPrompt ||
     params.attempt.lastToolError ||
     (params.attempt.messagesSnapshot?.length ?? 0) === 0
@@ -536,7 +529,6 @@ export function shouldRetrySilentErrorAssistantTurn(params: {
     EmbeddedRunAttemptResult,
     | "assistantTexts"
     | "clientToolCalls"
-    | "yieldDetected"
     | "didSendDeterministicApprovalPrompt"
     | "heartbeatToolResponse"
     | "lastToolError"
@@ -647,7 +639,6 @@ function shouldSkipNonVisibleTurnRetry(params: {
     params.aborted ||
     params.timedOut ||
     params.attempt.clientToolCalls ||
-    params.attempt.yieldDetected ||
     params.attempt.didSendDeterministicApprovalPrompt ||
     params.attempt.lastToolError ||
     hasAcceptedSessionSpawn(params.attempt.acceptedSessionSpawns) ||

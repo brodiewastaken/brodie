@@ -33,7 +33,12 @@ import type { SubagentSpawnPreparation } from "../context-engine/types.js";
 import { stringifyRouteThreadId } from "../plugin-sdk/channel-route.js";
 import { listRegisteredPluginAgentPromptGuidance } from "../plugins/command-registry-state.js";
 import type { SubagentLifecycleHookRunner } from "../plugins/hooks.js";
-import { isValidAgentId, normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
+import {
+  isCronSessionKey,
+  isValidAgentId,
+  normalizeAgentId,
+  parseAgentSessionKey,
+} from "../routing/session-key.js";
 import { resolveUserPath } from "../utils.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { listAgentIds, resolveAgentDir } from "./agent-scope-config.js";
@@ -62,7 +67,12 @@ import {
 import { resolveSubagentCapabilities } from "./subagent-capabilities.js";
 import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { buildSubagentInitialUserMessage } from "./subagent-initial-user-message.js";
-import { countActiveRunsForSession, registerSubagentRun } from "./subagent-registry.js";
+import {
+  countActiveRunsForSession,
+  registerSubagentRun,
+  releaseSubagentRun,
+  replaceSubagentRunAfterSteer,
+} from "./subagent-registry.js";
 import { resolveSubagentRunTimerDelayMs } from "./subagent-run-timeout.js";
 import { resolveSubagentSpawnAcceptedNote } from "./subagent-spawn-accepted-note.js";
 import { resolveSubagentSpawnOwnership } from "./subagent-spawn-ownership.js";
@@ -164,6 +174,7 @@ type SpawnSubagentParams = {
   model?: string;
   taskName?: string;
   thinking?: string;
+  fastMode?: boolean;
   cwd?: string;
   runTimeoutSeconds?: number;
   thread?: boolean;
@@ -466,6 +477,22 @@ function readRequesterThinkingLevel(params: {
     provider: defaultModel.provider,
     model: defaultModel.model,
   });
+}
+
+function readRequesterFastMode(params: {
+  cfg: OpenClawConfig;
+  requesterInternalKey: string;
+}): boolean | "auto" | undefined {
+  try {
+    const target = resolveGatewaySessionStoreTarget({
+      cfg: params.cfg,
+      key: params.requesterInternalKey,
+    });
+    const store = loadSessionStore(target.storePath, { clone: false });
+    return resolveStoreEntryByKeys(store, target.storeKeys)?.fastMode;
+  } catch {
+    return undefined;
+  }
 }
 
 type PreparedSpawnContext =
@@ -1064,12 +1091,6 @@ async function bindThreadForSubagentSpawn(params: {
   }
 }
 
-function hasRoutableDeliveryOrigin(
-  origin?: DeliveryContext,
-): origin is DeliveryContext & { channel: string; to: string } {
-  return Boolean(origin?.channel && origin.to);
-}
-
 export async function spawnSubagentDirect(
   params: SpawnSubagentParams,
   ctx: SpawnSubagentContext,
@@ -1098,6 +1119,7 @@ export async function spawnSubagentDirect(
   }
   const modelOverride = params.model;
   const thinkingOverrideRaw = params.thinking;
+  const fastModeOverride = params.fastMode;
   const requestThreadBinding = params.thread === true;
   const sandboxMode = params.sandbox === "require" ? "require" : "inherit";
   const spawnMode = resolveSpawnMode({
@@ -1131,7 +1153,6 @@ export async function spawnSubagentDirect(
   });
   let modelApplied = false;
   let threadBindingReady = false;
-  let hasBoundThreadDeliveryOrigin = false;
   const contextMode = resolveSubagentContextMode({
     requestedContext: params.context,
     threadRequested: requestThreadBinding,
@@ -1287,6 +1308,10 @@ export async function spawnSubagentDirect(
     requesterInternalKey,
     requesterAgentId,
   });
+  const callerFastMode = readRequesterFastMode({
+    cfg,
+    requesterInternalKey,
+  });
   const plan = resolveSubagentModelAndThinkingPlan({
     cfg,
     targetAgentId,
@@ -1294,7 +1319,10 @@ export async function spawnSubagentDirect(
     targetAgentConfig,
     modelOverride,
     thinkingOverrideRaw,
+    fastModeOverride,
     callerThinkingRaw,
+    callerFastMode,
+    callerIsCron: isCronSessionKey(requesterInternalKey),
   });
   if (plan.status === "error") {
     return {
@@ -1420,7 +1448,6 @@ export async function spawnSubagentDirect(
       };
     }
     threadBindingReady = true;
-    hasBoundThreadDeliveryOrigin = hasRoutableDeliveryOrigin(bindResult.deliveryOrigin);
     childSessionOrigin =
       mergeDeliveryContext(bindResult.deliveryOrigin, childSessionOrigin) ?? childSessionOrigin;
   }
@@ -1541,11 +1568,49 @@ export async function spawnSubagentDirect(
 
   const childIdem = crypto.randomUUID();
   let childRunId: string = childIdem;
-  const deliverInitialChildRunDirectly =
-    requestThreadBinding && spawnMode === "session" && hasBoundThreadDeliveryOrigin;
-  const shouldAnnounceCompletion = deliverInitialChildRunDirectly
-    ? false
-    : expectsCompletionMessage;
+  const deliverInitialChildRunDirectly = false;
+  const shouldAnnounceCompletion = expectsCompletionMessage;
+  try {
+    registerSubagentRun({
+      runId: childIdem,
+      childSessionKey,
+      controllerSessionKey: ownership.controllerSessionKey,
+      requesterSessionKey: ownership.completionRequesterSessionKey,
+      requesterOrigin,
+      requesterDisplayKey: ownership.completionRequesterDisplayKey,
+      task,
+      taskName,
+      agentId: targetAgentId,
+      requesterAgentId,
+      cleanup,
+      label: label || undefined,
+      model: resolvedModel,
+      agentDir: targetAgentDir,
+      workspaceDir: spawnedMetadata.workspaceDir,
+      runTimeoutSeconds,
+      expectsCompletionMessage: shouldAnnounceCompletion,
+      spawnMode,
+      contextMode,
+      deferCompletionWait: true,
+      attachmentsDir: attachmentAbsDir,
+      attachmentsRootDir: attachmentRootDir,
+      retainAttachmentsOnKeep: retainOnSessionKeep,
+    });
+  } catch (err) {
+    await rollbackPreparedContextEngine(contextEnginePreparation);
+    await cleanupFailedSpawnBeforeAgentStart({
+      childSessionKey,
+      attachmentAbsDir,
+      emitLifecycleHooks: threadBindingReady,
+      deleteTranscript: true,
+    });
+    return {
+      status: "error",
+      error: `Failed to register subagent run: ${summarizeError(err)}`,
+      childSessionKey,
+      runId: childRunId,
+    };
+  }
   try {
     const {
       spawnedBy: _spawnedBy,
@@ -1587,7 +1652,21 @@ export async function spawnSubagentDirect(
     if (runId) {
       childRunId = runId;
     }
+    if (
+      !replaceSubagentRunAfterSteer({
+        previousRunId: childIdem,
+        nextRunId: childRunId,
+        runTimeoutSeconds,
+        task,
+      })
+    ) {
+      throw new Error("failed to activate durable subagent registry row");
+    }
   } catch (err) {
+    releaseSubagentRun(childIdem);
+    if (childRunId !== childIdem) {
+      releaseSubagentRun(childRunId);
+    }
     await rollbackPreparedContextEngine(contextEnginePreparation);
     if (attachmentAbsDir) {
       try {
@@ -1645,60 +1724,6 @@ export async function spawnSubagentDirect(
     return {
       status: "error",
       error: messageText,
-      childSessionKey,
-      runId: childRunId,
-    };
-  }
-
-  try {
-    registerSubagentRun({
-      runId: childRunId,
-      childSessionKey,
-      controllerSessionKey: ownership.controllerSessionKey,
-      requesterSessionKey: ownership.completionRequesterSessionKey,
-      requesterOrigin,
-      requesterDisplayKey: ownership.completionRequesterDisplayKey,
-      task,
-      taskName,
-      agentId: targetAgentId,
-      requesterAgentId,
-      cleanup,
-      label: label || undefined,
-      model: resolvedModel,
-      agentDir: targetAgentDir,
-      workspaceDir: spawnedMetadata.workspaceDir,
-      runTimeoutSeconds,
-      expectsCompletionMessage: shouldAnnounceCompletion,
-      spawnMode,
-      attachmentsDir: attachmentAbsDir,
-      attachmentsRootDir: attachmentRootDir,
-      retainAttachmentsOnKeep: retainOnSessionKeep,
-    });
-  } catch (err) {
-    await rollbackPreparedContextEngine(contextEnginePreparation);
-    if (attachmentAbsDir) {
-      try {
-        await fs.rm(attachmentAbsDir, { recursive: true, force: true });
-      } catch {
-        // Best-effort cleanup only.
-      }
-    }
-    try {
-      await callSubagentGateway({
-        method: "sessions.delete",
-        params: {
-          key: childSessionKey,
-          deleteTranscript: true,
-          emitLifecycleHooks: threadBindingReady,
-        },
-        timeoutMs: SUBAGENT_CONTROL_GATEWAY_TIMEOUT_MS,
-      });
-    } catch {
-      // Best-effort cleanup only.
-    }
-    return {
-      status: "error",
-      error: `Failed to register subagent run: ${summarizeError(err)}`,
       childSessionKey,
       runId: childRunId,
     };

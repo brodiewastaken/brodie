@@ -7,7 +7,6 @@ import {
   markMcpLoopbackToolCallFinished,
   markMcpLoopbackToolCallStarted,
   recordMcpLoopbackToolCallResult as recordMcpLoopbackToolCallResultForHandle,
-  resolveMcpLoopbackYieldContext,
 } from "../../gateway/mcp-http.loopback-runtime.js";
 import { onAgentEvent, resetAgentEventsForTest } from "../../infra/agent-events.js";
 import {
@@ -1569,15 +1568,15 @@ describe("executePreparedCliRun supervisor output capture", () => {
     expect(result.messagingToolSentTargets).toBeUndefined();
   });
 
-  it("records sessions_yield through the serialized MCP capture", async () => {
+  it("does not install legacy sessions_yield capture on CLI executions", async () => {
     const context = buildPreparedCliRunContext({ output: "text", provider: "google-gemini-cli" });
     context.mcpDeliveryCapture = true;
     supervisorSpawnMock.mockImplementationOnce(async (...args: unknown[]) => {
       const input = args[0] as SupervisorSpawnInput;
       const captureHandle = markMcpLoopbackRequestStarted(input.env?.OPENCLAW_MCP_CLI_CAPTURE_KEY);
-      await resolveMcpLoopbackYieldContext(captureHandle)?.onYield("waiting on subagents");
+      expect(captureHandle?.capture).not.toHaveProperty("onYield");
       markMcpLoopbackRequestFinished(captureHandle);
-      input.onStdout?.("yield acknowledged");
+      input.onStdout?.("completed normally");
       return createManagedRun({
         reason: "exit",
         exitCode: 0,
@@ -1592,7 +1591,7 @@ describe("executePreparedCliRun supervisor output capture", () => {
 
     const result = await executePreparedCliRun(context);
 
-    expect(result.yielded).toBe(true);
+    expect(result).not.toHaveProperty("yielded");
   });
 
   it("keeps mutation delivery out of sent-reply dedupe evidence", async () => {

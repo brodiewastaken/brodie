@@ -21,7 +21,6 @@ import {
   markMcpLoopbackToolCallFinished,
   markMcpLoopbackToolCallStarted,
   recordMcpLoopbackToolCallResult,
-  resolveMcpLoopbackYieldContext,
   updateMcpLoopbackToolCallCapture,
 } from "../gateway/mcp-http.loopback-runtime.js";
 import { resetDiagnosticEventsForTest } from "../infra/diagnostic-events.js";
@@ -40,6 +39,7 @@ import {
   setCliRunnerTestDeps,
 } from "./cli-runner.js";
 import {
+  admitDurableSystemEventWakeMock,
   createManagedRun,
   enqueueSystemEventMock,
   requestHeartbeatMock,
@@ -383,6 +383,7 @@ describe("runCliAgent reliability", () => {
   });
 
   it("enqueues a system event and heartbeat wake on no-output watchdog timeout for session runs", async () => {
+    admitDurableSystemEventWakeMock.mockClear();
     supervisorSpawnMock.mockResolvedValueOnce(
       createManagedRun({
         reason: "no-output-timeout",
@@ -412,11 +413,23 @@ describe("runCliAgent reliability", () => {
     expect(String(notice)).toContain("produced no output");
     expect(String(notice)).toContain("interactive input or an approval prompt");
     expect(requireRecord(opts, "system event options").sessionKey).toBe("agent:main:main");
+    expect(admitDurableSystemEventWakeMock).toHaveBeenCalledWith({
+      cfg: undefined,
+      sessionKey: "agent:main:main",
+      systemEvent: { text: expect.stringContaining("produced no output") },
+      source: "cli-watchdog",
+      intent: "event",
+      reason: "cli:watchdog:stall",
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "exec_completion",
+    });
     expect(requestHeartbeatMock).toHaveBeenCalledWith({
       source: "cli-watchdog",
       intent: "event",
       reason: "cli:watchdog:stall",
       sessionKey: "agent:main:main",
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "exec_completion",
     });
   });
 
@@ -2157,13 +2170,13 @@ describe("runCliAgent reliability", () => {
     expect(completion.refusal).toBe(false);
   });
 
-  it("marks CLI runs as paused after sessions_yield", async () => {
+  it("does not propagate legacy sessions_yield state into CLI completion metadata", async () => {
     supervisorSpawnMock.mockImplementationOnce(async (...args: unknown[]) => {
       const input = args[0] as Parameters<ReturnType<typeof getProcessSupervisor>["spawn"]>[0];
       const captureHandle = markMcpLoopbackRequestStarted(input.env?.OPENCLAW_MCP_CLI_CAPTURE_KEY);
-      await resolveMcpLoopbackYieldContext(captureHandle)?.onYield("waiting on subagents");
+      expect(captureHandle?.capture).not.toHaveProperty("onYield");
       markMcpLoopbackRequestFinished(captureHandle);
-      input.onStdout?.("yield acknowledged");
+      input.onStdout?.("completed normally");
       return createManagedRun({
         reason: "exit",
         exitCode: 0,
@@ -2180,15 +2193,13 @@ describe("runCliAgent reliability", () => {
 
     const result = await runPreparedCliAgent(context);
 
-    expect(result.meta).toMatchObject({
-      yielded: true,
-      livenessState: "paused",
-      stopReason: "end_turn",
-      completion: {
-        finishReason: "end_turn",
-        stopReason: "end_turn",
-        refusal: false,
-      },
+    expect(result.meta).not.toHaveProperty("yielded");
+    expect(result.meta).not.toHaveProperty("livenessState");
+    expect(result.meta).not.toHaveProperty("stopReason");
+    expect(result.meta.completion).toMatchObject({
+      finishReason: "stop",
+      stopReason: "completed",
+      refusal: false,
     });
   });
 

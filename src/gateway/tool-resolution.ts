@@ -46,7 +46,6 @@ export function resolveGatewayScopedTools(params: {
   cfg: OpenClawConfig;
   sessionKey: string;
   sessionId?: string;
-  onYield?: (message: string) => Promise<void> | void;
   messageProvider?: string;
   currentChannelId?: string;
   currentThreadTs?: string;
@@ -182,7 +181,6 @@ export function resolveGatewayScopedTools(params: {
     currentMessageId: params.currentMessageId,
     currentInboundAudio: params.currentInboundAudio,
     sessionId: params.sessionId,
-    onYield: params.onYield,
     requireExplicitMessageTarget: params.requireExplicitMessageTarget,
     senderIsOwner: params.senderIsOwner,
     allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
