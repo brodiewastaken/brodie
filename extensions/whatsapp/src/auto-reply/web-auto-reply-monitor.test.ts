@@ -384,7 +384,11 @@ describe("applyGroupGating", () => {
     });
 
     expect(result.shouldProcess).toBe(true);
-    expect(msg.groupMention).toEqual({ wasMentioned: true, requireMention: true });
+    expect(msg.groupMention).toEqual({
+      wasMentioned: true,
+      requireMention: true,
+      addressed: true,
+    });
     expect(groupHistories.get("whatsapp:default:group:123@g.us")).toBeUndefined();
   });
 
@@ -556,13 +560,42 @@ describe("applyGroupGating", () => {
       msg: createGroupMessage({
         id: "g-account-owner",
         admission: { accountId: "work" },
-        body: "/new",
+        body: "brodie /new",
         senderE164: "+111",
         senderName: "Owner",
       }),
     });
 
     expect(result.shouldProcess).toBe(true);
+  });
+
+  it("carries the mention-stripped command body into authorized group dispatch", async () => {
+    const cfg = makeConfig({
+      channels: {
+        whatsapp: {
+          allowFrom: ["+111"],
+          groups: { "*": { requireMention: true } },
+        },
+      },
+    });
+
+    const nativeSelfLid = "27710527070277@lid";
+    const authoredBody = "@27710527070277  /new";
+    const msg = createGroupMessage({
+      id: "g-mentioned-new",
+      body: authoredBody,
+      mentionedJids: [nativeSelfLid],
+      selfJid: nativeSelfLid,
+      senderE164: "+111",
+      senderName: "Owner",
+    });
+    const { result } = await runGroupGating({
+      cfg,
+      msg,
+    });
+
+    expect(result).toMatchObject({ shouldProcess: true, commandBody: "/new" });
+    expect(msg.payload.body).toBe(authoredBody);
   });
 
   it("does not treat group mention gating as self-chat under implicit self fallback", async () => {
@@ -591,20 +624,91 @@ describe("applyGroupGating", () => {
   });
 
   it.each([
-    { id: "g-new", command: "/new" },
-    { id: "g-status", command: "/status" },
+    { id: "g-new", command: "brodie /new" },
+    { id: "g-status", command: "brodie /status" },
   ])("bypasses mention gating for owner $command in group chats", async ({ id, command }) => {
-    const { result } = await runGroupGating({
-      cfg: makeOwnerGroupConfig(),
-      msg: createGroupMessage({
+    const msg = createGroupMessage({
+      id,
+      body: command,
+      senderE164: "+111",
+      senderName: "Owner",
+    });
+    const { result } = await runGroupGating({ cfg: makeOwnerGroupConfig(), msg });
+
+    expect(result.shouldProcess).toBe(true);
+    // The bypass admits the turn without claiming the owner addressed brodie.
+    expect(msg.groupMention).toEqual({
+      wasMentioned: true,
+      requireMention: true,
+      addressed: false,
+    });
+  });
+
+  it.each([
+    { id: "g-bare-new", command: "/new" },
+    { id: "g-bare-status", command: "/status" },
+  ])(
+    "stores an owner bare $command for context in a larger mention-gated group",
+    async ({ id, command }) => {
+      const msg = createGroupMessage({
         id,
         body: command,
         senderE164: "+111",
         senderName: "Owner",
+      });
+      const { result, groupHistories } = await runGroupGating({
+        cfg: makeOwnerGroupConfig(),
+        msg,
+      });
+
+      expect(result.shouldProcess).toBe(false);
+      expect(groupHistories.get("whatsapp:default:group:123@g.us")?.length).toBe(1);
+    },
+  );
+
+  it("admits an owner bare /new in an always-on larger group without addressing brodie", async () => {
+    const msg = createGroupMessage({
+      id: "g-bare-new-always",
+      body: "/new",
+      senderE164: "+111",
+      senderName: "Owner",
+    });
+    const { result } = await runGroupGating({
+      cfg: makeConfig({
+        channels: {
+          whatsapp: {
+            allowFrom: ["+111"],
+            groups: { "*": { requireMention: false } },
+          },
+        },
       }),
+      msg,
     });
 
-    expect(result.shouldProcess).toBe(true);
+    expect(result).toMatchObject({ shouldProcess: true, commandBody: "/new" });
+    expect(msg.groupMention).toEqual({
+      wasMentioned: false,
+      requireMention: false,
+      addressed: false,
+    });
+  });
+
+  it("admits an owner bare /new in a proven duo room through the command bypass", async () => {
+    const msg = createGroupMessage({
+      id: "g-duo-new",
+      admission: { duoRoom: true },
+      body: "/new",
+      senderE164: "+111",
+      senderName: "Owner",
+    });
+    const { result } = await runGroupGating({ cfg: makeOwnerGroupConfig(), msg });
+
+    expect(result).toMatchObject({ shouldProcess: true, commandBody: "/new" });
+    expect(msg.groupMention).toEqual({
+      wasMentioned: true,
+      requireMention: false,
+      addressed: false,
+    });
   });
 
   it("does not bypass mention gating for non-owner /new in group chats", async () => {

@@ -4,10 +4,11 @@ import path from "node:path";
 import {
   DEFAULT_ACCOUNT_ID,
   normalizeAccountId,
+  resolveAccountEntry,
   resolveUserPath,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/account-core";
-import type { DmPolicy, GroupPolicy, ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
+import type { DmPolicy, ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
 import { resolveOAuthDir } from "openclaw/plugin-sdk/state-paths";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolveMergedWhatsAppAccountConfig } from "./account-config.js";
@@ -33,7 +34,7 @@ export type ResolvedWhatsAppAccount = {
   selfChatMode?: boolean;
   allowFrom?: string[];
   groupAllowFrom?: string[];
-  groupPolicy?: GroupPolicy;
+  groupPolicy?: WhatsAppAccountConfig["groupPolicy"];
   mentionPatterns?: WhatsAppAccountConfig["mentionPatterns"];
   dmPolicy?: DmPolicy;
   historyLimit?: number;
@@ -47,9 +48,41 @@ export type ResolvedWhatsAppAccount = {
   direct?: WhatsAppAccountConfig["direct"];
   debounceMs?: number;
   replyToMode?: ReplyToMode;
+  gifAutoConvert?: WhatsAppAccountConfig["gifAutoConvert"];
+  autoGroupWhitelist?: WhatsAppAccountConfig["autoGroupWhitelist"];
+  groupRoster?: WhatsAppAccountConfig["groupRoster"];
+  media?: WhatsAppAccountConfig["media"];
+  sendListenerWaitMs?: number;
+  diagnostics?: WhatsAppAccountConfig["diagnostics"];
 };
 
 export const DEFAULT_WHATSAPP_MEDIA_MAX_MB = 50;
+
+type WhatsAppAutoGroupWhitelistConfig = NonNullable<WhatsAppAccountConfig["autoGroupWhitelist"]>;
+
+// B17 merge semantics: account-level config shallow-merges over root config,
+// except `profile`, which field-merges so root profile fields survive unless
+// the account overrides that specific field.
+function mergeAutoGroupWhitelist(
+  rootCfg: WhatsAppAutoGroupWhitelistConfig | undefined,
+  accountCfg: WhatsAppAutoGroupWhitelistConfig | undefined,
+): WhatsAppAutoGroupWhitelistConfig | undefined {
+  if (!rootCfg && !accountCfg) {
+    return undefined;
+  }
+  const profile =
+    rootCfg?.profile || accountCfg?.profile
+      ? {
+          ...rootCfg?.profile,
+          ...accountCfg?.profile,
+        }
+      : undefined;
+  return {
+    ...rootCfg,
+    ...accountCfg,
+    ...(profile ? { profile } : {}),
+  };
+}
 
 export function listWhatsAppAuthDirs(cfg: OpenClawConfig): string[] {
   const oauthDir = resolveOAuthDir();
@@ -119,6 +152,7 @@ export function resolveWhatsAppAccount(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
 }): ResolvedWhatsAppAccount {
+  const rootCfg = params.cfg.channels?.whatsapp;
   const merged = resolveMergedWhatsAppAccountConfig({
     cfg: params.cfg,
     accountId: params.accountId?.trim() || resolveDefaultWhatsAppAccountId(params.cfg),
@@ -155,6 +189,15 @@ export function resolveWhatsAppAccount(params: {
     direct: merged.direct,
     debounceMs: merged.debounceMs,
     replyToMode: merged.replyToMode,
+    gifAutoConvert: merged.gifAutoConvert,
+    autoGroupWhitelist: mergeAutoGroupWhitelist(
+      rootCfg?.autoGroupWhitelist,
+      resolveAccountEntry(rootCfg?.accounts, accountId)?.autoGroupWhitelist,
+    ),
+    groupRoster: merged.groupRoster,
+    media: merged.media,
+    sendListenerWaitMs: merged.sendListenerWaitMs,
+    diagnostics: merged.diagnostics,
   };
 }
 

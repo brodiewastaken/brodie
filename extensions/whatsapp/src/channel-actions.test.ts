@@ -133,6 +133,11 @@ describe("whatsapp channel action helpers", () => {
       "poll",
       "upload-file",
     ]);
+    expect(describeWhatsAppMessageActions({ cfg, accountId: "default" })?.schema).toMatchObject({
+      actions: ["react"],
+      visibility: "current-channel",
+      properties: { participant: expect.any(Object) },
+    });
   });
 
   it("returns null when WhatsApp is not configured", () => {

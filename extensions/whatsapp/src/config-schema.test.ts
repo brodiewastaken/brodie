@@ -40,6 +40,34 @@ describe("whatsapp config schema", () => {
     }
   });
 
+  it("accepts trusted-group, roster, media, and diagnostic controls at account scope", () => {
+    const res = expectWhatsAppConfigValid({
+      accounts: {
+        work: {
+          groupPolicy: "duo",
+          autoGroupWhitelist: {
+            enabled: true,
+            ownerE164: "+15550001111",
+            profile: { model: "provider/model", groupActivation: "always", setOnce: true },
+          },
+          groupRoster: {
+            workspaceContacts: { peopleDir: "memory/people", contactsFile: "_contacts.json" },
+          },
+          media: { livePhotoPairWindowMs: 3000, livePhotoFilter: true },
+          gifAutoConvert: { enabled: true, timeoutMs: 8000, maxOutputBytes: 12_000_000 },
+          sendListenerWaitMs: 5000,
+          diagnostics: { unrecognizedPayloadCapture: true, captureRetentionHours: 48 },
+        },
+      },
+    });
+
+    if (res.success) {
+      expect(res.data.accounts?.work?.groupPolicy).toBe("duo");
+      expect(res.data.accounts?.work?.media?.livePhotoFilter).toBe(true);
+      expect(res.data.accounts?.work?.diagnostics?.captureRetentionHours).toBe(48);
+    }
+  });
+
   it("accepts historyLimit overrides per account", () => {
     const res = WhatsAppConfigSchema.safeParse({
       historyLimit: 9,

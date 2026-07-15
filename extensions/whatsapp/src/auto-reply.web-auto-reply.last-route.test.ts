@@ -1,6 +1,7 @@
 // Whatsapp tests cover auto reply.web auto reply.last route plugin behavior.
 import "./test-helpers.js";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { resolveConversationRoute } from "openclaw/plugin-sdk/routing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installWebAutoReplyUnitTestHooks, makeSessionStore } from "./auto-reply.test-harness.js";
 import { buildMentionConfig } from "./auto-reply/mentions.js";
@@ -111,9 +112,13 @@ describe("web auto-reply last-route", () => {
 
   it("updates last-route for direct chats without senderE164", async () => {
     const now = Date.now();
-    const mainSessionKey = "agent:main:main";
+    const directSessionKey = resolveConversationRoute({
+      cfg: {},
+      channel: "whatsapp",
+      peer: { kind: "direct", id: "+1000" },
+    }).sessionKey;
     const store = await makeSessionStore({
-      [mainSessionKey]: { sessionId: "sid", updatedAt: now - 1 },
+      [directSessionKey]: { sessionId: "sid", updatedAt: now - 1 },
     });
 
     const cfg = makeCfg(store.storePath);
@@ -152,7 +157,7 @@ describe("web auto-reply last-route", () => {
     } = updateParams ?? {};
     expect(routeParams).toEqual({
       storeAgentId: "main",
-      sessionKey: mainSessionKey,
+      sessionKey: directSessionKey,
       channel: "whatsapp",
       to: "+1000",
       accountId: "default",
@@ -160,11 +165,13 @@ describe("web auto-reply last-route", () => {
     expect(ctx).toMatchObject({
       From: "+1000",
       To: "+2000",
-      SessionKey: mainSessionKey,
+      SessionKey: directSessionKey,
       AccountId: "default",
       ChatType: "direct",
       ConversationLabel: "+1000",
-      GroupMembers: "+1000",
+      // DMs render the self member only; with no self identity on the
+      // message there is no roster line.
+      GroupMembers: undefined,
       MessageSid: "m1",
       Provider: "whatsapp",
       Surface: "whatsapp",
@@ -184,7 +191,12 @@ describe("web auto-reply last-route", () => {
 
   it("updates last-route for group chats with account id", async () => {
     const now = Date.now();
-    const groupSessionKey = "agent:main:whatsapp:group:123@g.us";
+    const groupSessionKey = resolveConversationRoute({
+      cfg: {},
+      channel: "whatsapp",
+      accountId: "work",
+      peer: { kind: "group", id: "123@g.us" },
+    }).sessionKey;
     const store = await makeSessionStore({
       [groupSessionKey]: { sessionId: "sid", updatedAt: now - 1 },
     });
@@ -230,7 +242,7 @@ describe("web auto-reply last-route", () => {
     } = updateParams ?? {};
     expect(routeParams).toEqual({
       storeAgentId: "main",
-      sessionKey: `${groupSessionKey}:thread:whatsapp-account-work`,
+      sessionKey: groupSessionKey,
       channel: "whatsapp",
       to: "123@g.us",
       accountId: "work",
@@ -238,7 +250,7 @@ describe("web auto-reply last-route", () => {
     expect(ctx).toEqual({
       From: "123@g.us",
       To: "+2000",
-      SessionKey: `${groupSessionKey}:thread:whatsapp-account-work`,
+      SessionKey: groupSessionKey,
       AccountId: "work",
       ChatType: "group",
       ConversationLabel: "123@g.us",

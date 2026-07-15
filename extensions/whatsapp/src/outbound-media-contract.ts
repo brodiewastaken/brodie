@@ -6,6 +6,7 @@ import { writeExternalFileWithinRoot } from "openclaw/plugin-sdk/security-runtim
 import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolvePreferredOpenClawTmpDir, withTempWorkspace } from "openclaw/plugin-sdk/temp-path";
 import { resolveWhatsAppDocumentFileName } from "./document-filename.js";
+import { maybeTranscodeGifToMp4, type GifAutoConvertConfig } from "./gif-transcode.js";
 import { formatError } from "./session-errors.js";
 import { isWhatsAppSocketOperationTimeoutError } from "./socket-timing.js";
 import {
@@ -49,6 +50,8 @@ type CanonicalWhatsAppLoadedMedia = {
   kind: "image" | "audio" | "video" | "document";
   mimetype: string;
   fileName?: string;
+  /** Set when a GIF was auto-converted to MP4; the send must use gifPlayback. */
+  gifPlayback?: boolean;
 };
 
 const WHATSAPP_VOICE_FILE_NAME = "voice.ogg";
@@ -164,8 +167,40 @@ function normalizeWhatsAppLoadedMedia(
 export async function prepareWhatsAppOutboundMedia(
   media: WhatsAppLoadedMediaLike,
   mediaUrl?: string,
+  options?: {
+    /** Account-resolved GIF auto-convert config; conversion is on by default. */
+    gifAutoConvert?: GifAutoConvertConfig;
+    /** Forced document delivery preserves original GIF bytes and file name. */
+    skipGifAutoConvert?: boolean;
+  },
 ): Promise<CanonicalWhatsAppLoadedMedia> {
   const normalized = normalizeWhatsAppLoadedMedia(media, mediaUrl);
+  // Document-kind media never converts: "send me the actual .gif file" must
+  // deliver original bytes and file name.
+  if (
+    !options?.skipGifAutoConvert &&
+    normalized.kind !== "audio" &&
+    normalized.kind !== "document"
+  ) {
+    const sourceLabel = mediaUrl ?? normalized.fileName ?? media.fileName ?? "media buffer";
+    // Conversion failures throw GifTranscodeError and fail the send: WhatsApp
+    // renders raw GIFs as documents, so falling back would ship the original bug.
+    const convertedGif = await maybeTranscodeGifToMp4({
+      buffer: normalized.buffer,
+      contentType: normalized.mimetype,
+      fileName: normalized.fileName ?? media.fileName ?? sourceLabel,
+      sourceLabel,
+      config: options?.gifAutoConvert,
+    });
+    if (convertedGif.converted) {
+      return {
+        buffer: convertedGif.buffer,
+        kind: "video",
+        mimetype: "video/mp4",
+        gifPlayback: true,
+      };
+    }
+  }
   if (normalized.kind !== "audio") {
     return normalized;
   }

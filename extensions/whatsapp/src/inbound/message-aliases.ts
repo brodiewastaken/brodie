@@ -1,5 +1,4 @@
 import { buildDeprecatedFlatWhatsAppInboundAdmission } from "./admission.js";
-import { resolveWhatsAppGroupConversationId } from "./group-conversation.js";
 import type {
   DeprecatedWebInboundAdmissionTopLevelFields,
   DeprecatedWebInboundMessageFlatAliases,
@@ -91,21 +90,30 @@ function ensureGroupMentions(msg: WebInboundCallbackMessage): { jids?: string[];
   return (group.mentions ??= {});
 }
 
-function ensureMedia(
-  msg: WebInboundCallbackMessage,
-): NonNullable<WebInboundCallbackMessage["payload"]["media"]> {
-  return (msg.payload.media ??= {});
+type MediaItem = NonNullable<WebInboundCallbackMessage["payload"]["media"]>[number];
+
+// The deprecated scalar aliases view the FIRST media item; batched messages
+// carry the full list on payload.media.
+function ensurePrimaryMediaItem(msg: WebInboundCallbackMessage): MediaItem {
+  const media = (msg.payload.media ??= []);
+  const first = media[0];
+  if (first) {
+    return first;
+  }
+  const created: MediaItem = {};
+  media.push(created);
+  return created;
 }
 
-function setMediaField<K extends keyof NonNullable<WebInboundCallbackMessage["payload"]["media"]>>(
+function setMediaField<K extends keyof MediaItem>(
   msg: WebInboundCallbackMessage,
   key: K,
-  value: NonNullable<WebInboundCallbackMessage["payload"]["media"]>[K] | undefined,
+  value: MediaItem[K] | undefined,
 ) {
-  if (value === undefined && !msg.payload.media) {
+  if (value === undefined && !msg.payload.media?.length) {
     return;
   }
-  ensureMedia(msg)[key] = value;
+  ensurePrimaryMediaItem(msg)[key] = value;
 }
 
 function defineDeprecatedAccessors<T extends object>(
@@ -146,13 +154,10 @@ function defineDeprecatedAdmissionTopLevelAccessors<T extends WebInboundCallback
   let fallbackChatType = msg.chatType;
 
   const conversationId = () => msg.admission?.conversation.id ?? fallbackConversationId;
+  // Admission facts are access-control output: alias writes must never mutate
+  // them post-admission. Writes only preserve no-admission legacy inputs.
   const setConversationId = (value: unknown) => {
-    const next = value as string;
-    fallbackConversationId = next;
-    if (msg.admission) {
-      msg.admission.conversation.id = next;
-      msg.admission.conversation.groupSessionId = resolveWhatsAppGroupConversationId(next);
-    }
+    fallbackConversationId = value as string;
   };
 
   const descriptors: Record<keyof DeprecatedWebInboundAdmissionTopLevelFields, AliasDescriptor> = {
@@ -167,31 +172,20 @@ function defineDeprecatedAdmissionTopLevelAccessors<T extends WebInboundCallback
     accountId: {
       get: () => msg.admission?.accountId ?? fallbackAccountId,
       set: (value) => {
-        const next = value as string;
-        fallbackAccountId = next;
-        if (msg.admission) {
-          msg.admission.accountId = next;
-          msg.admission.account.accountId = next;
-        }
+        fallbackAccountId = value as string;
       },
     },
     accessControlPassed: {
       get: () =>
         msg.admission ? msg.admission.ingress.decision === "allow" : fallbackAccessControlPassed,
       set: (value) => {
-        // The legacy boolean is derived from the ingress graph; writes only preserve
-        // no-admission legacy inputs instead of fabricating a partial graph update.
         fallbackAccessControlPassed = value as boolean | undefined;
       },
     },
     chatType: {
       get: () => msg.admission?.conversation.kind ?? fallbackChatType,
       set: (value) => {
-        const next = value as "direct" | "group";
-        fallbackChatType = next;
-        if (msg.admission) {
-          msg.admission.conversation.kind = next;
-        }
+        fallbackChatType = value as "direct" | "group";
       },
     },
   };
@@ -199,9 +193,19 @@ function defineDeprecatedAdmissionTopLevelAccessors<T extends WebInboundCallback
   return defineDeprecatedAccessors(msg, descriptors);
 }
 
+// Messages are normalized ONCE at enqueue and the fact carried forward: the
+// wrapper/callback layers all funnel through normalizeWebInboundMessage, which
+// must be O(1) for an already-normalized message instead of re-defining ~40
+// accessors per hop.
+const normalizedWebInboundMessages = new WeakSet<object>();
+
 export function withDeprecatedWebInboundMessageFlatAliases<T extends WebInboundCallbackMessage>(
   msg: T,
 ): T & WebInboundMessage {
+  if (normalizedWebInboundMessages.has(msg)) {
+    return msg as T & WebInboundMessage;
+  }
+  normalizedWebInboundMessages.add(msg);
   // Keep the shipped callback shape alive while nested/admission contexts remain canonical.
   const withAdmissionAliases = defineDeprecatedAdmissionTopLevelAccessors(msg);
   return defineDeprecatedAliasAccessors(withAdmissionAliases, {
@@ -334,19 +338,19 @@ export function withDeprecatedWebInboundMessageFlatAliases<T extends WebInboundC
       set: (value) => (msg.platform.sendMedia = value as typeof msg.platform.sendMedia),
     },
     mediaPath: {
-      get: () => msg.payload.media?.path,
+      get: () => msg.payload.media?.[0]?.path,
       set: (value) => setMediaField(msg, "path", value as string | undefined),
     },
     mediaType: {
-      get: () => msg.payload.media?.type,
+      get: () => msg.payload.media?.[0]?.type,
       set: (value) => setMediaField(msg, "type", value as string | undefined),
     },
     mediaFileName: {
-      get: () => msg.payload.media?.fileName,
+      get: () => msg.payload.media?.[0]?.fileName,
       set: (value) => setMediaField(msg, "fileName", value as string | undefined),
     },
     mediaUrl: {
-      get: () => msg.payload.media?.url,
+      get: () => msg.payload.media?.[0]?.url,
       set: (value) => setMediaField(msg, "url", value as string | undefined),
     },
     untrustedStructuredContext: {
@@ -365,12 +369,14 @@ export function withDeprecatedWebInboundMessageFlatAliases<T extends WebInboundC
 function normalizeLegacyFlatWebInboundMessage(msg: LegacyFlatWebInboundMessage): WebInboundMessage {
   const media =
     msg.mediaPath || msg.mediaType || msg.mediaFileName || msg.mediaUrl
-      ? {
-          path: msg.mediaPath,
-          type: msg.mediaType,
-          fileName: msg.mediaFileName,
-          url: msg.mediaUrl,
-        }
+      ? [
+          {
+            path: msg.mediaPath,
+            type: msg.mediaType,
+            fileName: msg.mediaFileName,
+            url: msg.mediaUrl,
+          },
+        ]
       : undefined;
   return withDeprecatedWebInboundMessageFlatAliases({
     ...msg,

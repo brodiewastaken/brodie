@@ -220,6 +220,10 @@
       "types": "./dist/plugin-sdk/routing.d.ts",
       "default": "./dist/plugin-sdk/routing.js"
     },
+    "./plugin-sdk/conversation-scheduler": {
+      "types": "./dist/plugin-sdk/conversation-scheduler.d.ts",
+      "default": "./dist/plugin-sdk/conversation-scheduler.js"
+    },
     "./plugin-sdk/runtime": {
       "types": "./dist/plugin-sdk/runtime.d.ts",
       "default": "./dist/plugin-sdk/runtime.js"

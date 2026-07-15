@@ -225,4 +225,20 @@ describe("applyGroupGating allowlist drop warning", () => {
 
     expect(warn).not.toHaveBeenCalled();
   });
+
+  it("bypasses the unregistered-group drop for trusted groups", async () => {
+    const warn = vi.fn<WarnLogger>();
+    const msg = makeUnregisteredGroupMsg("unregistered@g.us");
+    if (msg.admission) {
+      msg.admission.trustedGroup = true;
+    }
+    const params = makeParams(msg, warn);
+
+    const result = await applyGroupGating(params);
+
+    expect(warn).not.toHaveBeenCalled();
+    // The message proceeds into mention gating instead of being dropped as
+    // unregistered ("@openclaw" body counts as a mention here).
+    expect(result).toEqual({ shouldProcess: true, commandBody: "@ hello" });
+  });
 });

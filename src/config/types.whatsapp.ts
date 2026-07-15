@@ -24,6 +24,7 @@ export type WhatsAppActionConfig = {
 };
 
 export type WhatsAppReactionLevel = ReactionLevel;
+export type WhatsAppGroupPolicy = GroupPolicy | "duo";
 
 export type WhatsAppGroupConfig = {
   requireMention?: boolean;
@@ -53,6 +54,51 @@ export type WhatsAppAckReactionConfig = {
   group?: "always" | "mentions" | "never";
 };
 
+export type WhatsAppGifAutoConvertConfig = {
+  enabled?: boolean;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+};
+
+export type WhatsAppAutoGroupWhitelistProfileConfig = {
+  provider?: string;
+  model?: string;
+  thinkingLevel?: string;
+  groupActivation?: "mention" | "always";
+  setOnce?: boolean;
+};
+
+export type WhatsAppAutoGroupWhitelistConfig = {
+  enabled?: boolean;
+  ownerE164?: string;
+  profile?: WhatsAppAutoGroupWhitelistProfileConfig;
+};
+
+export type WhatsAppGroupRosterConfig = {
+  workspaceContacts?: {
+    enabled?: boolean;
+    peopleDir?: string;
+    contactsFile?: string;
+  };
+  selfNote?: string;
+  missingPersonFileNote?: string;
+  owner?: {
+    name?: string;
+    personFile?: string;
+  };
+};
+
+export type WhatsAppMediaConfig = {
+  livePhotoPairWindowMs?: number;
+  livePhotoFilter?: boolean;
+  failedMediaWarning?: string;
+};
+
+export type WhatsAppDiagnosticsConfig = {
+  unrecognizedPayloadCapture?: boolean;
+  captureRetentionHours?: number;
+};
+
 type WhatsAppSharedConfig = {
   /** Whether the WhatsApp channel is enabled. */
   enabled?: boolean;
@@ -72,7 +118,7 @@ type WhatsAppSharedConfig = {
    * - "disabled": block all group messages entirely
    * - "allowlist": only allow group messages from senders in groupAllowFrom/allowFrom
    */
-  groupPolicy?: GroupPolicy;
+  groupPolicy?: WhatsAppGroupPolicy;
   /** Scope configured groupChat mentionPatterns to selected WhatsApp conversation IDs. */
   mentionPatterns?: MentionPatternsPolicyConfig;
   /** Supplemental context visibility policy (all|allowlist|allowlist_quote). */
@@ -93,6 +139,8 @@ type WhatsAppSharedConfig = {
   blockStreaming?: boolean;
   /** Merge streamed block replies before sending. */
   blockStreamingCoalesce?: BlockStreamingCoalesceConfig;
+  /** GIF to MP4 conversion settings for WhatsApp playback. */
+  gifAutoConvert?: WhatsAppGifAutoConvertConfig;
   groups?: Record<string, WhatsAppGroupConfig>;
   /** Per-direct-chat prompt overrides keyed by user ID or `*` wildcard. */
   direct?: Record<string, WhatsAppDirectConfig>;
@@ -108,6 +156,16 @@ type WhatsAppSharedConfig = {
   reactionLevel?: WhatsAppReactionLevel;
   /** Debounce window (ms) for batching rapid consecutive messages from the same sender (0 to disable). */
   debounceMs?: number;
+  /** Owner-driven trusted-group automation. */
+  autoGroupWhitelist?: WhatsAppAutoGroupWhitelistConfig;
+  /** Rich group roster and workspace contact enrichment. */
+  groupRoster?: WhatsAppGroupRosterConfig;
+  /** Inbound and outbound media behavior. */
+  media?: WhatsAppMediaConfig;
+  /** Max wait for an outbound listener during socket handoff. */
+  sendListenerWaitMs?: number;
+  /** Private bounded diagnostic capture settings. */
+  diagnostics?: WhatsAppDiagnosticsConfig;
   /** Reply threading mode for auto-replies (off|first|all|batched). */
   replyToMode?: ReplyToMode;
   /** Heartbeat visibility settings. */

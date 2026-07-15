@@ -7,6 +7,7 @@
   "sandbox",
   "self-hosted-provider-setup",
   "routing",
+  "conversation-scheduler",
   "runtime",
   "health",
   "runtime-doctor",

@@ -65,6 +65,10 @@ export async function checkInboundAccessControl(params: {
     sendMessage: (jid: string, content: { text: string }) => Promise<unknown>;
   };
   remoteJid: string;
+  /** Prepared trust facts from inbound normalize; never re-derived here. */
+  trustedGroup?: boolean;
+  autoGroupWhitelistEnabled?: boolean;
+  duoRoom?: boolean;
 }): Promise<InboundAccessControlResult> {
   const policy = resolveWhatsAppInboundPolicy({
     cfg: params.cfg,
@@ -90,6 +94,21 @@ export async function checkInboundAccessControl(params: {
     accountId: policy.account.accountId,
     log: (message) => logWhatsAppVerbose(params.verbose, message),
   });
+  // Trusted-group enforcement (duo policy / auto whitelist): fail-closed drop
+  // for untrusted groups before any other group processing; trusted groups are
+  // then evaluated with groupPolicy "open" (trust of the room, not the sender).
+  const trustedGroupEnforcementEnabled =
+    params.group && (params.autoGroupWhitelistEnabled === true || policy.groupPolicy === "duo");
+  if (trustedGroupEnforcementEnabled && params.trustedGroup !== true) {
+    logWhatsAppVerbose(
+      params.verbose,
+      `Blocked group message from ${params.senderE164 ?? "unknown sender"} (trusted WhatsApp group required)`,
+    );
+    return blockedInboundAccess(policy);
+  }
+  const ingressPolicy = trustedGroupEnforcementEnabled
+    ? { ...policy, groupPolicy: "open" as const }
+    : policy;
   const conversationId = params.group ? params.remoteJid : params.from;
   const accessSenderId = params.group ? params.senderE164 : params.from;
   const admissionSenderId = params.group
@@ -97,7 +116,7 @@ export async function checkInboundAccessControl(params: {
     : params.from;
   const access = await resolveWhatsAppIngressAccess({
     cfg: params.cfg,
-    policy,
+    policy: ingressPolicy,
     isGroup: params.group,
     conversationId,
     senderId: accessSenderId,
@@ -192,6 +211,9 @@ export async function checkInboundAccessControl(params: {
       isGroup: params.group,
       conversationId,
       senderId: admissionSenderId,
+      trustedGroup: params.group ? params.trustedGroup === true : false,
+      autoGroupWhitelistEnabled: params.autoGroupWhitelistEnabled === true,
+      duoRoom: params.group ? params.duoRoom === true : false,
     }),
   };
 }

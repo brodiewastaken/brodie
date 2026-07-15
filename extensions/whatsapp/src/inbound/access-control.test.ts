@@ -94,6 +94,7 @@ async function checkCommandAuthorizedForGroup(params: {
   from?: string;
   senderE164?: string;
   selfE164?: string;
+  trustedGroup?: boolean;
 }) {
   return await resolveWhatsAppCommandAuthorized({
     cfg: params.cfg as never,
@@ -108,6 +109,7 @@ async function checkCommandAuthorizedForGroup(params: {
       },
       admission: {
         accountId: params.accountId ?? "work",
+        trustedGroup: params.trustedGroup ?? false,
         conversation: {
           kind: "group",
           id: params.from ?? "120363401234567890@g.us",
@@ -679,5 +681,133 @@ describe("WhatsApp dmPolicy precedence", () => {
 
     expect(result.allowed).toBe(true);
     expect(result.isSelfChat).toBe(true);
+  });
+});
+
+describe("checkInboundAccessControl duo trusted groups", () => {
+  it("blocks untrusted duo groups before pairing or queueing", async () => {
+    const cfg = {
+      channels: {
+        whatsapp: {
+          groupPolicy: "duo",
+          allowFrom: ["+15550009999"],
+        },
+      },
+    };
+    setAccessControlTestConfig(cfg);
+
+    const result = await checkInboundAccessControl({
+      cfg: getAccessControlTestConfig() as never,
+      accountId: "default",
+      from: "120363401234567890@g.us",
+      selfE164: "+15550009999",
+      senderE164: "+15550001111",
+      group: true,
+      pushName: "Sam",
+      isFromMe: false,
+      sock: { sendMessage: sendMessageMock },
+      remoteJid: "120363401234567890@g.us",
+      trustedGroup: false,
+    });
+    const commandAuthorized = await checkCommandAuthorizedForGroup({
+      cfg,
+      accountId: "default",
+    });
+
+    expectSilentlyBlocked(result);
+    expect(commandAuthorized).toBe(false);
+  });
+
+  it("allows trusted duo groups without requiring sender allowlist membership", async () => {
+    const cfg = {
+      channels: {
+        whatsapp: {
+          groupPolicy: "duo",
+          allowFrom: ["+15550009999"],
+        },
+      },
+    };
+    setAccessControlTestConfig(cfg);
+
+    const result = await checkInboundAccessControl({
+      cfg: getAccessControlTestConfig() as never,
+      accountId: "default",
+      from: "120363401234567890@g.us",
+      selfE164: "+15550009999",
+      senderE164: "+15550001111",
+      group: true,
+      pushName: "Sam",
+      isFromMe: false,
+      sock: { sendMessage: sendMessageMock },
+      remoteJid: "120363401234567890@g.us",
+      trustedGroup: true,
+    });
+    // Duo gates commands on room trust first; sender-based command access
+    // still applies afterwards (the owner passes, a stranger does not).
+    const ownerCommandAuthorized = await checkCommandAuthorizedForGroup({
+      cfg,
+      accountId: "default",
+      senderE164: "+15550009999",
+      trustedGroup: true,
+    });
+    const strangerCommandAuthorized = await checkCommandAuthorizedForGroup({
+      cfg,
+      accountId: "default",
+      trustedGroup: true,
+    });
+
+    expectAccepted(result);
+    expect(result.admission.trustedGroup).toBe(true);
+    expect(ownerCommandAuthorized).toBe(true);
+    expect(strangerCommandAuthorized).toBe(false);
+    expect(upsertPairingRequestMock).not.toHaveBeenCalled();
+    expect(sendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("enforces trust when autoGroupWhitelist is enabled without duo policy", async () => {
+    const cfg = {
+      channels: {
+        whatsapp: {
+          groupPolicy: "open",
+          autoGroupWhitelist: {
+            enabled: true,
+            ownerE164: "+15550009999",
+          },
+        },
+      },
+    };
+    setAccessControlTestConfig(cfg);
+
+    const blocked = await checkInboundAccessControl({
+      cfg: getAccessControlTestConfig() as never,
+      accountId: "default",
+      from: "120363401234567890@g.us",
+      selfE164: "+15550009999",
+      senderE164: "+15550001111",
+      group: true,
+      pushName: "Sam",
+      isFromMe: false,
+      sock: { sendMessage: sendMessageMock },
+      remoteJid: "120363401234567890@g.us",
+      trustedGroup: false,
+      autoGroupWhitelistEnabled: true,
+    });
+    expectSilentlyBlocked(blocked);
+
+    const allowed = await checkInboundAccessControl({
+      cfg: getAccessControlTestConfig() as never,
+      accountId: "default",
+      from: "120363401234567890@g.us",
+      selfE164: "+15550009999",
+      senderE164: "+15550001111",
+      group: true,
+      pushName: "Sam",
+      isFromMe: false,
+      sock: { sendMessage: sendMessageMock },
+      remoteJid: "120363401234567890@g.us",
+      trustedGroup: true,
+      autoGroupWhitelistEnabled: true,
+    });
+    expectAccepted(allowed);
   });
 });

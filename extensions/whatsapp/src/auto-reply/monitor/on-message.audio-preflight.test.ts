@@ -72,10 +72,6 @@ vi.mock("../config.runtime.js", () => ({
   }),
 }));
 
-vi.mock("../../group-session-key.js", () => ({
-  resolveWhatsAppGroupSessionRoute: (route: unknown) => route,
-}));
-
 vi.mock("../../identity.js", () => ({
   getPrimaryIdentityId: () => undefined,
   getSenderIdentity: () => ({ e164: "+15550000002", name: "Alice" }),

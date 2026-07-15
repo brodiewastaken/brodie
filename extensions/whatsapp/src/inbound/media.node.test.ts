@@ -24,6 +24,9 @@ vi.mock("openclaw/plugin-sdk/media-store", () => ({
 }));
 
 let downloadInboundMedia: typeof import("./media.js").downloadInboundMedia;
+let inspectWhatsAppMediaMessage: typeof import("./media.js").inspectWhatsAppMediaMessage;
+let isWhatsAppLivePhotoVideoComponent: typeof import("./media.js").isWhatsAppLivePhotoVideoComponent;
+let isWhatsAppVideoMessage: typeof import("./media.js").isWhatsAppVideoMessage;
 
 const mockSock = {
   updateMediaMessage: vi.fn(),
@@ -46,7 +49,12 @@ async function expectMimetype(message: Record<string, unknown>, expected: string
 
 describe("downloadInboundMedia", () => {
   beforeAll(async () => {
-    ({ downloadInboundMedia } = await import("./media.js"));
+    ({
+      downloadInboundMedia,
+      inspectWhatsAppMediaMessage,
+      isWhatsAppLivePhotoVideoComponent,
+      isWhatsAppVideoMessage,
+    } = await import("./media.js"));
   });
 
   beforeEach(() => {
@@ -146,5 +154,46 @@ describe("downloadInboundMedia", () => {
         mockSock as never,
       ),
     ).rejects.toThrow("expired media reference");
+  });
+
+  it("detects explicit WhatsApp Live Photo motion-video markers", () => {
+    expect(
+      isWhatsAppLivePhotoVideoComponent({
+        videoMessage: { mimetype: "video/mp4", motionPhotoPresentationOffsetMs: 42 },
+      } as never),
+    ).toBe(true);
+    expect(
+      isWhatsAppLivePhotoVideoComponent({
+        videoMessage: { mimetype: "video/mp4", motionPhotoPresentationOffsetMs: 0 },
+      } as never),
+    ).toBe(false);
+    expect(
+      isWhatsAppLivePhotoVideoComponent({
+        videoMessage: {
+          mimetype: "video/mp4",
+          _motionPhotoPresentationOffsetMs: "motionPhotoPresentationOffsetMs",
+        },
+      } as never),
+    ).toBe(true);
+  });
+
+  it("inspects wrapped media message chains", () => {
+    const wrapped = {
+      viewOnceMessageV2Extension: {
+        message: {
+          videoMessage: {
+            mimetype: "video/mp4",
+            motionPhotoPresentationOffsetMs: { low: 3, high: 0 },
+          },
+        },
+      },
+    };
+
+    const inspection = inspectWhatsAppMediaMessage(wrapped as never);
+    expect(isWhatsAppVideoMessage(wrapped as never)).toBe(true);
+    expect(inspection.hasVideo).toBe(true);
+    expect(inspection.livePhotoVideo).toBe(true);
+    expect(inspection.finalContentKeys).toContain("videoMessage");
+    expect(inspection.chainContentKeys.at(-1)).toContain("videoMessage");
   });
 });

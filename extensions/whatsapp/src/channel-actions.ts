@@ -1,4 +1,5 @@
 // Whatsapp plugin module implements channel actions behavior.
+import { Type } from "typebox";
 import {
   listWhatsAppAccountIds,
   resolveWhatsAppAccount,
@@ -62,7 +63,7 @@ export function resolveWhatsAppAgentReactionGuidance(params: {
 export function describeWhatsAppMessageActions(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
-}): { actions: ChannelMessageActionName[] } | null {
+}) {
   if (!params.cfg.channels?.whatsapp) {
     return null;
   }
@@ -82,5 +83,16 @@ export function describeWhatsAppMessageActions(params: {
     actions.add("poll");
   }
   actions.add("upload-file");
-  return { actions: Array.from(actions) };
+  return {
+    actions: Array.from(actions),
+    ...(canReact
+      ? {
+          schema: {
+            properties: { participant: Type.Optional(Type.String({ minLength: 1 })) },
+            actions: ["react"] as const,
+            visibility: "current-channel" as const,
+          },
+        }
+      : {}),
+  };
 }

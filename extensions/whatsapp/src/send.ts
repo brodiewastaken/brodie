@@ -1,5 +1,4 @@
 // Whatsapp plugin module implements send behavior.
-import { formatCliCommand } from "openclaw/plugin-sdk/cli-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { generateSecureUuid } from "openclaw/plugin-sdk/core";
 import { redactIdentifier } from "openclaw/plugin-sdk/logging-core";
@@ -15,8 +14,11 @@ import {
   resolveWhatsAppAccount,
   resolveWhatsAppMediaMaxBytes,
 } from "./accounts.js";
+import {
+  acquireActiveWebListener,
+  DEFAULT_ACTIVE_WEB_LISTENER_WAIT_MS,
+} from "./active-listener.js";
 import { registerWhatsAppApprovalReactionTargetForOutboundMessage } from "./approval-reactions.js";
-import { getRegisteredWhatsAppConnectionController } from "./connection-controller-registry.js";
 import { resolveWhatsAppDocumentFileName } from "./document-filename.js";
 import type { ActiveWebListener, ActiveWebSendOptions } from "./inbound/types.js";
 import { isWhatsAppNewsletterJid } from "./normalize.js";
@@ -41,6 +43,7 @@ type WhatsAppMediaSendState = {
   mediaType: string;
   text: string;
   forceDocumentDelivery: boolean;
+  gifPlayback: boolean;
   documentFileName?: string;
   visibleTextAfterVoice?: string;
 };
@@ -72,6 +75,7 @@ function buildWhatsAppMediaSendState(params: {
     mediaType: media.mimetype,
     text,
     forceDocumentDelivery,
+    gifPlayback: media.gifPlayback === true,
     ...(documentFileName ? { documentFileName } : {}),
     ...(visibleTextAfterVoice ? { visibleTextAfterVoice } : {}),
   };
@@ -88,20 +92,26 @@ function resolveOutboundWhatsAppAccountId(params: {
   return resolveDefaultWhatsAppAccountId(params.cfg);
 }
 
-function requireOutboundActiveWebListener(params: { cfg: OpenClawConfig; accountId?: string }): {
+async function requireOutboundActiveWebListener(params: {
+  cfg: OpenClawConfig;
+  accountId?: string;
+}): Promise<{
   accountId: string;
   listener: ActiveWebListener;
-} {
+}> {
   const accountId = resolveOutboundWhatsAppAccountId(params);
   const resolvedAccountId = accountId ?? resolveDefaultWhatsAppAccountId(params.cfg);
-  const listener =
-    getRegisteredWhatsAppConnectionController(resolvedAccountId)?.getActiveListener() ?? null;
-  if (!listener) {
-    throw new Error(
-      `No active WhatsApp Web listener (account: ${resolvedAccountId}). Start the gateway, then link WhatsApp with: ${formatCliCommand(`openclaw channels login --channel whatsapp --account ${resolvedAccountId}`)}.`,
-    );
-  }
-  return { accountId: resolvedAccountId, listener };
+  const account = resolveWhatsAppAccount({ cfg: params.cfg, accountId: resolvedAccountId });
+  // The acquire itself parks only when recovery is plausible (reconnecting
+  // phase or a registered controller); unrecoverable states fail immediately.
+  const waitMs =
+    typeof account.sendListenerWaitMs === "number" && account.sendListenerWaitMs >= 0
+      ? Math.trunc(account.sendListenerWaitMs)
+      : DEFAULT_ACTIVE_WEB_LISTENER_WAIT_MS;
+  return await acquireActiveWebListener(
+    { cfg: params.cfg, accountId: resolvedAccountId },
+    { waitMs },
+  );
 }
 
 function resolveActualSentRemoteJid(result: unknown, fallbackJid: string): string {
@@ -166,10 +176,12 @@ export async function sendMessageWhatsApp(
   const correlationId = generateSecureUuid();
   const startedAt = Date.now();
   const cfg = requireRuntimeConfig(options.cfg, "WhatsApp send");
-  const { listener: active, accountId: resolvedAccountId } = requireOutboundActiveWebListener({
-    cfg,
-    accountId: options.accountId,
-  });
+  const { listener: active, accountId: resolvedAccountId } = await requireOutboundActiveWebListener(
+    {
+      cfg,
+      accountId: options.accountId,
+    },
+  );
   const account = resolveWhatsAppAccount({
     cfg,
     accountId: resolvedAccountId ?? options.accountId,
@@ -194,9 +206,14 @@ export async function sendMessageWhatsApp(
     let documentFileName: string | undefined;
     let visibleTextAfterVoice: string | undefined;
     let forceDocumentDelivery = false;
+    let forcedGifPlayback = false;
     let media: PreparedWhatsAppOutboundMedia | undefined;
+    const prepareOptions = {
+      gifAutoConvert: account.gifAutoConvert,
+      skipGifAutoConvert: options.forceDocument === true,
+    };
     if (mediaPayload) {
-      media = await prepareWhatsAppOutboundMedia(mediaPayload, primaryMediaUrl);
+      media = await prepareWhatsAppOutboundMedia(mediaPayload, primaryMediaUrl, prepareOptions);
     } else if (primaryMediaUrl) {
       media = await prepareWhatsAppOutboundMedia(
         await loadOutboundMediaFromUrl(primaryMediaUrl, {
@@ -207,6 +224,7 @@ export async function sendMessageWhatsApp(
           mediaReadFile: options.mediaReadFile,
         }),
         primaryMediaUrl,
+        prepareOptions,
       );
     }
     if (media) {
@@ -220,6 +238,7 @@ export async function sendMessageWhatsApp(
       documentFileName = mediaSendState.documentFileName;
       visibleTextAfterVoice = mediaSendState.visibleTextAfterVoice;
       forceDocumentDelivery = mediaSendState.forceDocumentDelivery;
+      forcedGifPlayback = mediaSendState.gifPlayback;
       text = mediaSendState.text;
     }
     outboundLog.info(`Sending message -> ${redactedJid}${hasMedia ? " (media)" : ""}`);
@@ -232,12 +251,13 @@ export async function sendMessageWhatsApp(
     const accountId = hasExplicitAccountId ? resolvedAccountId : undefined;
     const sendOptions: ActiveWebSendOptions | undefined =
       options.gifPlayback ||
+      forcedGifPlayback ||
       forceDocumentDelivery ||
       accountId ||
       documentFileName ||
       options.quotedMessageKey
         ? {
-            ...(options.gifPlayback ? { gifPlayback: true } : {}),
+            ...(options.gifPlayback || forcedGifPlayback ? { gifPlayback: true } : {}),
             ...(forceDocumentDelivery ? { asDocument: true } : {}),
             ...(documentFileName ? { fileName: documentFileName } : {}),
             ...(options.quotedMessageKey ? { quotedMessageKey: options.quotedMessageKey } : {}),
@@ -289,13 +309,31 @@ export async function sendTypingWhatsApp(
   },
 ): Promise<void> {
   const cfg = requireRuntimeConfig(options.cfg, "WhatsApp typing send");
-  const { listener: active } = requireOutboundActiveWebListener({
+  const { listener: active } = await requireOutboundActiveWebListener({
     cfg,
     accountId: options.accountId,
   });
   if (!isWhatsAppNewsletterJid(toWhatsappJid(to))) {
     await active.assertSendReady?.(to);
     await active.sendComposingTo(to);
+  }
+}
+
+export async function clearTypingWhatsApp(
+  to: string,
+  options: {
+    cfg: OpenClawConfig;
+    accountId?: string;
+  },
+): Promise<void> {
+  const cfg = requireRuntimeConfig(options.cfg, "WhatsApp typing clear");
+  const { listener: active } = await requireOutboundActiveWebListener({
+    cfg,
+    accountId: options.accountId,
+  });
+  if (!isWhatsAppNewsletterJid(toWhatsappJid(to))) {
+    await active.assertSendReady?.(to);
+    await active.sendPausedTo?.(to);
   }
 }
 
@@ -313,7 +351,7 @@ export async function sendReactionWhatsApp(
 ): Promise<void> {
   const correlationId = generateSecureUuid();
   const cfg = requireRuntimeConfig(options.cfg, "WhatsApp reaction");
-  const { listener: active } = requireOutboundActiveWebListener({
+  const { listener: active } = await requireOutboundActiveWebListener({
     cfg,
     accountId: options.accountId,
   });
@@ -355,7 +393,7 @@ export async function sendPollWhatsApp(
   const correlationId = generateSecureUuid();
   const startedAt = Date.now();
   const cfg = requireRuntimeConfig(options.cfg, "WhatsApp poll");
-  const { listener: active } = requireOutboundActiveWebListener({
+  const { listener: active } = await requireOutboundActiveWebListener({
     cfg,
     accountId: options.accountId,
   });

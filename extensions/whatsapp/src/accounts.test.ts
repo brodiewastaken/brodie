@@ -202,4 +202,72 @@ describe("resolveWhatsAppAuthDir", () => {
 
     expect(resolved.selfChatMode).toBeUndefined();
   });
+
+  it("merges root and account autoGroupWhitelist profile config", () => {
+    const resolved = resolveWhatsAppAccount({
+      cfg: {
+        channels: {
+          whatsapp: {
+            autoGroupWhitelist: {
+              enabled: true,
+              ownerE164: "+15550001111",
+              profile: {
+                provider: "anthropic",
+                model: "claude-fable-5",
+                thinkingLevel: "high",
+                groupActivation: "always",
+                setOnce: true,
+              },
+            },
+            accounts: {
+              work: {
+                authDir: "/tmp/work",
+                autoGroupWhitelist: {
+                  ownerE164: "+15550002222",
+                  profile: {
+                    model: "claude-sonnet-5",
+                    setOnce: false,
+                  },
+                },
+              },
+            },
+          },
+        },
+      } as Parameters<typeof resolveWhatsAppAccount>[0]["cfg"],
+      accountId: "work",
+    });
+
+    expect(resolved.autoGroupWhitelist).toEqual({
+      enabled: true,
+      ownerE164: "+15550002222",
+      profile: {
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+        thinkingLevel: "high",
+        groupActivation: "always",
+        setOnce: false,
+      },
+    });
+  });
+
+  it("resolves gifAutoConvert account-first", () => {
+    const resolved = resolveWhatsAppAccount({
+      cfg: {
+        channels: {
+          whatsapp: {
+            gifAutoConvert: { timeoutMs: 4000 },
+            accounts: {
+              work: {
+                authDir: "/tmp/work",
+                gifAutoConvert: { enabled: false },
+              },
+            },
+          },
+        },
+      } as Parameters<typeof resolveWhatsAppAccount>[0]["cfg"],
+      accountId: "work",
+    });
+
+    expect(resolved.gifAutoConvert).toEqual({ enabled: false });
+  });
 });
