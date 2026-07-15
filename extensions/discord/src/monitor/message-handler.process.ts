@@ -55,7 +55,10 @@ import {
   createDiscordAckReactionContext,
   queueInitialDiscordAckReaction,
 } from "./ack-reactions.js";
-import { buildDiscordMessageProcessContext } from "./message-handler.context.js";
+import {
+  buildDiscordMessageProcessContext,
+  type DiscordMessageProcessContext,
+} from "./message-handler.context.js";
 import { createDiscordDraftPreviewController } from "./message-handler.draft-preview.js";
 import type { DiscordMessagePreflightContext } from "./message-handler.preflight.js";
 import { deliverDiscordReply } from "./reply-delivery.js";
@@ -135,9 +138,10 @@ function readToolBooleanArg(args: Record<string, unknown>, key: string): boolean
 export async function processDiscordMessage(
   ctx: DiscordMessagePreflightContext,
   observer?: DiscordMessageProcessObserver,
+  preparedProcessContext?: DiscordMessageProcessContext,
 ) {
   try {
-    await processDiscordMessageInner(ctx, observer);
+    await processDiscordMessageInner(ctx, observer, preparedProcessContext);
   } finally {
     ctx.replyTypingFeedback?.onCleanup?.();
   }
@@ -146,6 +150,7 @@ export async function processDiscordMessage(
 async function processDiscordMessageInner(
   ctx: DiscordMessagePreflightContext,
   observer?: DiscordMessageProcessObserver,
+  preparedProcessContext?: DiscordMessageProcessContext,
 ) {
   const dispatchStartedAt = Date.now();
   const {
@@ -389,11 +394,13 @@ async function processDiscordMessageInner(
       target: `${messageChannelId}/${message.id}`,
     });
   };
-  const processContext = await buildDiscordMessageProcessContext({
-    ctx,
-    text,
-    mediaList,
-  });
+  const processContext =
+    preparedProcessContext ??
+    (await buildDiscordMessageProcessContext({
+      ctx,
+      text,
+      mediaList,
+    }));
   if (!processContext) {
     return;
   }

@@ -8,6 +8,7 @@ import { finiteSecondsToTimerSafeMilliseconds } from "openclaw/plugin-sdk/number
 import { danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
 import type { Client } from "../internal/discord.js";
+import { admitDiscordScheduledInbound } from "../scheduler-admission.js";
 import {
   buildDiscordInboundReplayKey,
   claimDiscordInboundReplay,
@@ -19,6 +20,7 @@ import {
 import { buildDiscordInboundJob, resolveDiscordInboundJobQueueKey } from "./inbound-job.js";
 import type { DiscordMessageEvent, DiscordMessageHandler } from "./listeners.js";
 import { applyImplicitReplyBatchGate } from "./message-handler.batch-gate.js";
+import { buildDiscordMessageProcessContext } from "./message-handler.context.js";
 import type {
   DiscordMessagePreflightContext,
   DiscordMessagePreflightParams,
@@ -41,6 +43,8 @@ import type { DiscordMonitorStatusSink } from "./status.js";
 
 type PreflightDiscordMessage =
   typeof import("./message-handler.preflight.js").preflightDiscordMessage;
+type BuildDiscordMessageProcessContext = typeof buildDiscordMessageProcessContext;
+type AdmitDiscordScheduledInbound = typeof admitDiscordScheduledInbound;
 type CreateDiscordReplyTypingFeedback = typeof createDiscordReplyTypingFeedback;
 
 type DiscordMessageHandlerParams = Omit<
@@ -55,6 +59,8 @@ type DiscordMessageHandlerParams = Omit<
 type DiscordMessageHandlerTestingHooks = DiscordMessageRunQueueTestingHooks & {
   preflightDiscordMessage?: PreflightDiscordMessage;
   createReplyTypingFeedback?: CreateDiscordReplyTypingFeedback;
+  buildMessageProcessContext?: BuildDiscordMessageProcessContext;
+  admitScheduledInbound?: AdmitDiscordScheduledInbound;
 };
 
 type PrestartedTypingFeedbackEntry = {
@@ -65,7 +71,6 @@ type PrestartedTypingFeedbackEntry = {
 const loadMessagePreflightRuntime = createLazyRuntimeModule(
   () => import("./message-handler.preflight.js"),
 );
-
 type DiscordMessageHandlerWithLifecycle = DiscordMessageHandler & {
   deactivate: () => void;
 };
@@ -145,6 +150,58 @@ export function createDiscordMessageHandler(
     testing: params.testing,
   });
 
+  const admitPreparedMessage = async (options: {
+    ctx: DiscordMessagePreflightContext;
+    replayKeys: string[];
+    nativeBatch: boolean;
+  }) => {
+    const { ctx, replayKeys, nativeBatch } = options;
+    const queueKey = resolveDiscordInboundJobQueueKey(ctx);
+    startAcceptedTypingFeedback({
+      ctx,
+      createFeedback: params.testing?.createReplyTypingFeedback,
+      dedupeKey: queueKey,
+      activeFeedback: prestartedTypingFeedback,
+    });
+    applyImplicitReplyBatchGate(ctx, params.replyToMode, nativeBatch);
+    if (params.testing && !params.testing.admitScheduledInbound) {
+      messageRunQueue.enqueue(buildDiscordInboundJob(ctx, { replayKeys }));
+      return;
+    }
+    if (ctx.hasControlCommand) {
+      messageRunQueue.enqueue(buildDiscordInboundJob(ctx, { replayKeys }));
+      return;
+    }
+    const preparedProcessContext = await (
+      params.testing?.buildMessageProcessContext ?? buildDiscordMessageProcessContext
+    )({
+      ctx,
+      text: ctx.messageText,
+      mediaList: ctx.preparedMedia,
+    });
+    if (!preparedProcessContext) {
+      await commitDiscordInboundReplay({ replayKeys, replayGuard });
+      ctx.replyTypingFeedback?.onCleanup?.();
+      return;
+    }
+    const admission = await (params.testing?.admitScheduledInbound ?? admitDiscordScheduledInbound)(
+      {
+        ctx,
+        prepared: preparedProcessContext,
+        onError: (error) => {
+          logVerbose(`discord: scheduler admission failed open (${String(error)})`);
+        },
+      },
+    );
+    if (!admission.result.accepted) {
+      messageRunQueue.enqueue(buildDiscordInboundJob(ctx, { replayKeys, preparedProcessContext }));
+      return;
+    }
+
+    await commitDiscordInboundReplay({ replayKeys, replayGuard });
+    ctx.replyTypingFeedback?.onCleanup?.();
+  };
+
   const { debouncer } = createChannelInboundDebouncer<{
     data: DiscordMessageEvent;
     client: Client;
@@ -197,106 +254,39 @@ export function createDiscordMessageHandler(
         });
         return;
       }
+      const completedReplayKeys = new Set<string>();
       try {
-        if (entries.length === 1) {
-          const preflight =
-            preflightDiscordMessageImpl ??
-            (await loadMessagePreflightRuntime()).preflightDiscordMessage;
+        const preflight =
+          preflightDiscordMessageImpl ??
+          (await loadMessagePreflightRuntime()).preflightDiscordMessage;
+        for (const entry of entries) {
+          const entryReplayKeys = entry.replayKey ? [entry.replayKey] : [];
           const ctx = await preflight({
             ...params,
             ackReactionScope,
             groupPolicy,
             abortSignal,
-            data: last.data,
-            client: last.client,
+            data: entry.data,
+            client: entry.client,
           });
           if (!ctx) {
-            await commitDiscordInboundReplay({ replayKeys, replayGuard });
-            return;
+            await commitDiscordInboundReplay({ replayKeys: entryReplayKeys, replayGuard });
+            entryReplayKeys.forEach((key) => completedReplayKeys.add(key));
+            continue;
           }
-          const queueKey = resolveDiscordInboundJobQueueKey(ctx);
-          startAcceptedTypingFeedback({
+          await admitPreparedMessage({
             ctx,
-            createFeedback: params.testing?.createReplyTypingFeedback,
-            dedupeKey: queueKey,
-            activeFeedback: prestartedTypingFeedback,
+            replayKeys: entryReplayKeys,
+            nativeBatch: entries.length > 1,
           });
-          applyImplicitReplyBatchGate(ctx, params.replyToMode, false);
-          messageRunQueue.enqueue(buildDiscordInboundJob(ctx, { replayKeys }));
-          return;
+          entryReplayKeys.forEach((key) => completedReplayKeys.add(key));
         }
-        const combinedBaseText = entries
-          .map((entry) =>
-            resolveDiscordMessageText(entry.data.message, { includeForwarded: false }),
-          )
-          .filter(Boolean)
-          .join("\n");
-        const syntheticMessage = Object.create(Object.getPrototypeOf(last.data.message), {
-          ...Object.getOwnPropertyDescriptors(last.data.message),
-          content: { value: combinedBaseText, enumerable: true, configurable: true },
-          attachments: { value: [], enumerable: true, configurable: true },
-          message_snapshots: {
-            value: (last.data.message as { message_snapshots?: unknown }).message_snapshots,
-            enumerable: true,
-            configurable: true,
-          },
-          messageSnapshots: {
-            value: (last.data.message as { messageSnapshots?: unknown }).messageSnapshots,
-            enumerable: true,
-            configurable: true,
-          },
-          rawData: {
-            value: { ...(last.data.message as { rawData?: Record<string, unknown> }).rawData },
-            enumerable: true,
-            configurable: true,
-          },
-        }) as DiscordMessageEvent["message"];
-        const syntheticData: DiscordMessageEvent = {
-          ...last.data,
-          message: syntheticMessage,
-        };
-        const preflight =
-          preflightDiscordMessageImpl ??
-          (await loadMessagePreflightRuntime()).preflightDiscordMessage;
-        const ctx = await preflight({
-          ...params,
-          ackReactionScope,
-          groupPolicy,
-          abortSignal,
-          data: syntheticData,
-          client: last.client,
-        });
-        if (!ctx) {
-          await commitDiscordInboundReplay({ replayKeys, replayGuard });
-          return;
-        }
-        const queueKey = resolveDiscordInboundJobQueueKey(ctx);
-        startAcceptedTypingFeedback({
-          ctx,
-          createFeedback: params.testing?.createReplyTypingFeedback,
-          dedupeKey: queueKey,
-          activeFeedback: prestartedTypingFeedback,
-        });
-        applyImplicitReplyBatchGate(ctx, params.replyToMode, true);
-        if (entries.length > 1) {
-          const ids = entries.map((entry) => entry.data.message?.id).filter(isNonEmptyString);
-          if (ids.length > 0) {
-            const ctxBatch = ctx as typeof ctx & {
-              MessageSids?: string[];
-              MessageSidFirst?: string;
-              MessageSidLast?: string;
-            };
-            ctxBatch.MessageSids = ids;
-            ctxBatch.MessageSidFirst = ids[0];
-            ctxBatch.MessageSidLast = ids[ids.length - 1];
-          }
-        }
-        messageRunQueue.enqueue(buildDiscordInboundJob(ctx, { replayKeys }));
       } catch (error) {
+        const unsettledReplayKeys = replayKeys.filter((key) => !completedReplayKeys.has(key));
         if (error instanceof DiscordRetryableInboundError) {
-          releaseDiscordInboundReplay({ replayKeys, error, replayGuard });
+          releaseDiscordInboundReplay({ replayKeys: unsettledReplayKeys, error, replayGuard });
         } else {
-          await commitDiscordInboundReplay({ replayKeys, replayGuard });
+          await commitDiscordInboundReplay({ replayKeys: unsettledReplayKeys, replayGuard });
         }
         throw error;
       }

@@ -393,6 +393,41 @@ describe("preflightDiscordMessage", () => {
     expect(result).toBeNull();
   });
 
+  it("fills blank gateway guild names from the Discord guild fetch", async () => {
+    const channelId = "channel-blank-guild";
+    const guildId = "guild-blank-name";
+    const message = createDiscordMessage({
+      id: "m-blank-guild",
+      channelId,
+      content: "hello <@openclaw-bot>",
+      mentionedUsers: [{ id: "openclaw-bot" }],
+      author: { id: "user-1", bot: false, username: "alice" },
+    });
+    const fetchGuild = vi.fn(async () => ({ id: guildId, name: "Nerdz" }));
+    const client = Object.assign(createGuildTextClient(channelId), { fetchGuild }) as DiscordClient;
+    const data = {
+      ...createGuildEvent({
+        channelId,
+        guildId,
+        author: message.author,
+        message,
+      }),
+      guild: { id: guildId, name: "" },
+    } as DiscordMessageEvent;
+
+    const result = await preflightDiscordMessage(
+      createPreflightArgs({
+        cfg: DEFAULT_PREFLIGHT_CFG,
+        discordConfig: { requireMention: false } as DiscordConfig,
+        data,
+        client,
+      }),
+    );
+
+    expect(fetchGuild).toHaveBeenCalledWith(guildId);
+    expect(expectPreflightResult(result).guildName).toBe("Nerdz");
+  });
+
   it("restores direct-message bindings by user target instead of DM channel id", async () => {
     registerSessionBindingAdapter({
       channel: "discord",
@@ -523,7 +558,7 @@ describe("preflightDiscordMessage", () => {
 
     const preflight = expectPreflightResult(result);
     expect(preflight.route.agentId).toBe("newagent");
-    expect(preflight.route.sessionKey).toBe(`agent:newagent:discord:channel:${channelId}`);
+    expect(preflight.route.sessionKey).toContain("agent:newagent:conversation:discord:");
     expect(preflight.boundSessionKey).toBeUndefined();
     expect(preflight.threadBinding).toBeUndefined();
   });
@@ -638,7 +673,7 @@ describe("preflightDiscordMessage", () => {
     expect(preflight.channelInfo).toBeNull();
     expect(preflight.isDirectMessage).toBe(true);
     expect(preflight.isGroupDm).toBe(false);
-    expect(preflight.route.sessionKey).toBe("agent:main:discord:direct:user-1");
+    expect(preflight.route.sessionKey).toContain("agent:main:conversation:discord:");
   });
 
   it("falls back to the default discord account for omitted-account dm authorization", async () => {
@@ -1242,6 +1277,95 @@ describe("preflightDiscordMessage", () => {
     });
 
     expect(expectPreflightResult(result).message.id).toBe("m-bot-mentions-hydrated");
+  });
+
+  it("projects native user and channel tags with target identities, including brodie", async () => {
+    const channelId = "channel-native-tags";
+    const taggedChannelId = "1477428282428358798";
+    const taggedUserId = "111222333444555666";
+    const botId = "999888777666555444";
+    const message = createDiscordMessage({
+      id: "m-native-tags",
+      channelId,
+      content: `ask <@${taggedUserId}> and <@${botId}> in <#${taggedChannelId}>`,
+      mentionedUsers: [
+        {
+          id: taggedUserId,
+          username: "tagged_user",
+          globalName: "Tagged Display Name",
+        },
+        { id: botId, username: "brodie", bot: true },
+      ],
+      author: { id: "human-1", bot: false, username: "sender" },
+    });
+    const client = createGuildTextClient(channelId);
+    client.fetchChannel = vi.fn(async (id: string) => {
+      if (id === channelId) {
+        return { id, type: ChannelType.GuildText, name: "general" };
+      }
+      if (id === taggedChannelId) {
+        return { id, type: ChannelType.GuildText, name: "botpostin" };
+      }
+      return null;
+    });
+
+    const result = await preflightDiscordMessage({
+      ...createPreflightArgs({
+        cfg: DEFAULT_PREFLIGHT_CFG,
+        discordConfig: {} as DiscordConfig,
+        data: createGuildEvent({
+          channelId,
+          guildId: "guild-native-tags",
+          author: message.author,
+          message,
+        }),
+        client,
+      }),
+      botUserId: botId,
+      historyLimit: 1,
+    });
+
+    const preflight = expectPreflightResult(result);
+    expect(preflight.baseText).toBe(
+      "ask @tagged_user [111222333444555666] and @brodie [999888777666555444] in #botpostin [<#1477428282428358798>]",
+    );
+    expect(preflight.historyEntry?.body).toBe(preflight.baseText);
+    expect(preflight.messageText).toBe(preflight.baseText);
+  });
+
+  it("does not resolve channel tags for a rejected bot-authored message", async () => {
+    const channelId = "channel-rejected-bot";
+    const taggedChannelId = "1477428282428358798";
+    const message = createDiscordMessage({
+      id: "m-rejected-bot-channel-tag",
+      channelId,
+      content: `check <#${taggedChannelId}>`,
+      author: { id: "other-bot", bot: true, username: "otherbot" },
+    });
+    const client = createGuildTextClient(channelId);
+    const fetchChannel = vi.fn(async (id: string) => ({
+      id,
+      type: ChannelType.GuildText,
+      name: id === channelId ? "general" : "botpostin",
+    }));
+    client.fetchChannel = fetchChannel;
+
+    const result = await preflightDiscordMessage(
+      createPreflightArgs({
+        cfg: DEFAULT_PREFLIGHT_CFG,
+        discordConfig: {} as DiscordConfig,
+        data: createGuildEvent({
+          channelId,
+          guildId: "guild-rejected-bot",
+          author: message.author,
+          message,
+        }),
+        client,
+      }),
+    );
+
+    expect(result).toBeNull();
+    expect(fetchChannel).not.toHaveBeenCalledWith(taggedChannelId);
   });
 
   it("still drops bot control commands without a real mention when allowBots=mentions", async () => {

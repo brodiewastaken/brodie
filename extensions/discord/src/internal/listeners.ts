@@ -70,6 +70,20 @@ export abstract class MessageReactionRemoveListener extends BaseListener {
   abstract override handle(data: DiscordReactionDispatchData, client: Client): Promise<void> | void;
 }
 
+export type DiscordTypingStartDispatchData = {
+  channel_id: string;
+  user_id: string;
+  guild_id?: string;
+};
+
+export abstract class TypingStartListener extends BaseListener {
+  readonly type = GatewayDispatchEvents.TypingStart;
+  abstract override handle(
+    data: DiscordTypingStartDispatchData,
+    client: Client,
+  ): Promise<void> | void;
+}
+
 export abstract class PresenceUpdateListener extends BaseListener {
   readonly type = GatewayDispatchEvents.PresenceUpdate;
   abstract override handle(

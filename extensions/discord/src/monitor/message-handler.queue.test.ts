@@ -436,6 +436,94 @@ describe("createDiscordMessageHandler queue behavior", () => {
     expect(processedContexts[1]?.replyTypingFeedback).toBeUndefined();
   });
 
+  it("hands accepted same-session arrivals to the scheduler without native dispatch", async () => {
+    preflightDiscordMessageMock.mockReset();
+    processDiscordMessageMock.mockReset();
+    const admitted: string[] = [];
+    const prepared = {
+      persistedSessionKey: "agent:main:conversation:discord:default:channel:test",
+    } as never;
+    preflightDiscordMessageMock.mockImplementation(
+      async (params: { data: ReturnType<typeof createMessageData> }) => ({
+        ...createAcceptedDmPreflightContext(),
+        message: params.data.message,
+      }),
+    );
+    processDiscordMessageMock.mockResolvedValue(undefined);
+    const handler = createDiscordMessageHandler({
+      ...createDiscordHandlerParams(),
+      testing: {
+        buildMessageProcessContext: vi.fn(async () => prepared),
+        admitScheduledInbound: vi.fn(async ({ ctx }) => {
+          admitted.push(ctx.message.id);
+          return {
+            result: {
+              accepted: true as const,
+              receiptId: `receipt-${ctx.message.id}`,
+              durableAt: Date.now(),
+            },
+          };
+        }),
+        processDiscordMessage: processDiscordMessageMock,
+      },
+    });
+
+    await handler(createMessageData("m-1", "dm-1") as never, {} as never);
+    await flushQueueWork();
+    expect(processDiscordMessageMock).not.toHaveBeenCalled();
+
+    await handler(createMessageData("m-2", "dm-1") as never, {} as never);
+    await flushQueueWork();
+    expect(admitted).toEqual(["m-1", "m-2"]);
+    expect(processDiscordMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps control commands on the native dispatch path", async () => {
+    const admitted = vi.fn();
+    preflightDiscordMessageMock.mockResolvedValueOnce(
+      createAcceptedDmPreflightContext({ hasControlCommand: true, messageText: "/new" }) as never,
+    );
+    processDiscordMessageMock.mockResolvedValueOnce(undefined);
+    const handler = createDiscordMessageHandler({
+      ...createDiscordHandlerParams(),
+      testing: {
+        admitScheduledInbound: admitted,
+        processDiscordMessage: processDiscordMessageMock,
+      },
+    });
+
+    await handler(createMessageData("m-command", "dm-1") as never, {} as never);
+    await flushQueueWork();
+
+    expect(admitted).not.toHaveBeenCalled();
+    expect(processDiscordMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the same prepared context into native fallback when admission declines", async () => {
+    preflightDiscordMessageMock.mockReset();
+    processDiscordMessageMock.mockReset();
+    const prepared = {
+      persistedSessionKey: "agent:main:conversation:discord:default:channel:fallback",
+    } as never;
+    preflightDiscordMessageMock.mockResolvedValue(createAcceptedDmPreflightContext());
+    processDiscordMessageMock.mockResolvedValue(undefined);
+    const handler = createDiscordMessageHandler({
+      ...createDiscordHandlerParams(),
+      testing: {
+        buildMessageProcessContext: vi.fn(async () => prepared),
+        admitScheduledInbound: vi.fn(async () => ({
+          result: { accepted: false as const, reason: "storage_failed" as const },
+        })),
+        processDiscordMessage: processDiscordMessageMock,
+      },
+    });
+
+    await handler(createMessageData("m-fallback", "dm-1") as never, {} as never);
+    await flushQueueWork();
+
+    expect(processDiscordMessageMock).toHaveBeenCalledWith(expect.anything(), undefined, prepared);
+  });
+
   it("resets busy counters when the handler is created", () => {
     preflightDiscordMessageMock.mockReset();
     processDiscordMessageMock.mockReset();
@@ -788,6 +876,41 @@ describe("createDiscordMessageHandler queue behavior", () => {
     await flushQueueWork();
     expect(processDiscordMessageMock).toHaveBeenCalledTimes(2);
     expect(processedMessageIds).toEqual(["m-1", "m-2"]);
+  });
+
+  it("preserves every debounced source message instead of synthesizing one combined turn", async () => {
+    preflightDiscordMessageMock.mockReset();
+    processDiscordMessageMock.mockReset();
+    preflightDiscordMessageMock.mockImplementation(
+      async (params: { data: { channel_id: string; message?: { id?: string } } }) => ({
+        ...createPreflightContext(params.data.channel_id),
+        messageId: params.data.message?.id,
+      }),
+    );
+    const params = createDiscordHandlerParams();
+    params.cfg.messages = { inbound: { debounceMs: 10 } };
+    const handler = createDiscordMessageHandler(params);
+    const first = createMessageData("m-1") as ReturnType<typeof createMessageData>;
+    const second = createMessageData("m-2") as ReturnType<typeof createMessageData>;
+    first.message.attachments = [];
+    second.message.attachments = [];
+
+    vi.useFakeTimers();
+    try {
+      await handler(first as never, {} as never);
+      await handler(second as never, {} as never);
+      await vi.advanceTimersByTimeAsync(10);
+      await flushQueueWork();
+
+      expect(preflightDiscordMessageMock).toHaveBeenCalledTimes(2);
+      expect(
+        preflightDiscordMessageMock.mock.calls.map(
+          ([call]) => (call as { data: { message: { id: string } } }).data.message.id,
+        ),
+      ).toEqual(["m-1", "m-2"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recovers queue progress after a run failure without leaving busy state stuck", async () => {

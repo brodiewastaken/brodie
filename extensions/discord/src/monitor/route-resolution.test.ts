@@ -116,7 +116,7 @@ describe("discord route resolution helpers", () => {
       channel: "discord",
       accountId: "default",
       dmScope: "main",
-      sessionKey: "agent:worker:discord:channel:c1",
+      sessionKey: "agent:worker:conversation:discord:default:channel:c1",
       mainSessionKey: "agent:worker:main",
       lastRoutePolicy: "session",
       matchedBy: "binding.peer",

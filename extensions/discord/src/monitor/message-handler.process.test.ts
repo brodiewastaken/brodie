@@ -1351,11 +1351,44 @@ describe("processDiscordMessage session routing", () => {
     });
   });
 
-  it("does not attach referenced reply media when reply context is hidden", async () => {
-    const fetchImpl = vi.fn(async () => {
-      throw new Error("hidden reply media should not be fetched");
-    });
+  it.each([
+    {
+      label: "brodie",
+      botUserId: "bot-1",
+      author: {
+        id: "bot-1",
+        username: "Spartacus",
+        discriminator: "0",
+        globalName: "Spartacus",
+        bot: true,
+      },
+    },
+    {
+      label: "another bot outside the allowlist",
+      botUserId: "bot-1",
+      author: {
+        id: "bot-2",
+        username: "helperbot",
+        discriminator: "0",
+        globalName: "Helper Bot",
+        bot: true,
+      },
+    },
+    {
+      label: "a human outside the allowlist",
+      botUserId: "bot-1",
+      author: {
+        id: "U2",
+        username: "mallory",
+        discriminator: "0",
+        globalName: "Mallory",
+        bot: false,
+      },
+    },
+  ])("preserves quoted body and native identity from $label", async (testCase) => {
+    const quotedTimestamp = "2026-07-19T03:23:00.000Z";
     const ctx = await createBaseContext({
+      botUserId: testCase.botUserId,
       cfg: {
         channels: { discord: { contextVisibility: "allowlist" } },
         messages: { ackReaction: "👀" },
@@ -1371,37 +1404,24 @@ describe("processDiscordMessage session routing", () => {
         allowed: true,
         users: ["U1"],
       },
-      discordRestFetch: fetchImpl,
       message: {
-        id: "m-reply-hidden-media",
+        id: `m-reply-${testCase.author.id}`,
         channelId: "c1",
         content: "<@bot> what is this?",
         timestamp: new Date().toISOString(),
         attachments: [],
         messageReference: {
           type: 0,
-          message_id: "m-hidden",
+          message_id: `m-quoted-${testCase.author.id}`,
           channel_id: "c1",
         },
         referencedMessage: {
-          id: "m-hidden",
+          id: `m-quoted-${testCase.author.id}`,
           channelId: "c1",
-          content: "hidden image",
-          timestamp: new Date().toISOString(),
-          attachments: [
-            {
-              id: "att-hidden",
-              url: "https://cdn.discordapp.com/attachments/hidden.png",
-              content_type: "image/png",
-              filename: "hidden.png",
-            },
-          ],
-          author: {
-            id: "U2",
-            username: "mallory",
-            discriminator: "0",
-            globalName: "Mallory",
-          },
+          content: "quoted message",
+          timestamp: quotedTimestamp,
+          attachments: [],
+          author: testCase.author,
         },
       },
       baseText: "<@bot> what is this?",
@@ -1411,68 +1431,10 @@ describe("processDiscordMessage session routing", () => {
     await runProcessDiscordMessage(ctx);
 
     const dispatchCtx = requireRecord(getLastDispatchCtx(), "dispatch context");
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(dispatchCtx.ReplyToBody).toBeUndefined();
-    expect(dispatchCtx.MediaPath).toBeUndefined();
-    expect(dispatchCtx.MediaPaths).toBeUndefined();
-  });
-
-  it("does not inject the bot's previous message body when users reply to it", async () => {
-    const fetchImpl = vi.fn(async () => {
-      throw new Error("self-reply media should not be fetched");
-    });
-    const ctx = await createBaseContext({
-      botUserId: "bot-1",
-      cfg: {
-        channels: { discord: { contextVisibility: "all" } },
-        messages: { ackReaction: "👀" },
-        session: { store: "/tmp/openclaw-discord-process-test-sessions.json" },
-      },
-      discordRestFetch: fetchImpl,
-      message: {
-        id: "m-self-reply",
-        channelId: "c1",
-        content: "<@bot> hit that again",
-        timestamp: new Date().toISOString(),
-        attachments: [],
-        messageReference: {
-          type: 0,
-          message_id: "m-bot-previous",
-          channel_id: "c1",
-        },
-        referencedMessage: {
-          id: "m-bot-previous",
-          channelId: "c1",
-          content: "The same stale bot response keeps looping.",
-          timestamp: new Date().toISOString(),
-          attachments: [
-            {
-              id: "att-bot-previous",
-              url: "https://cdn.discordapp.com/attachments/previous.png",
-              content_type: "image/png",
-              filename: "previous.png",
-            },
-          ],
-          author: {
-            id: "bot-1",
-            username: "Spartacus",
-            discriminator: "0",
-            globalName: "Spartacus",
-          },
-        },
-      },
-      baseText: "<@bot> hit that again",
-      messageText: "<@bot> hit that again",
-    });
-
-    await runProcessDiscordMessage(ctx);
-
-    const dispatchCtx = requireRecord(getLastDispatchCtx(), "dispatch context");
-    expect(fetchImpl).not.toHaveBeenCalled();
-    expect(dispatchCtx.ReplyToId).toBe("m-bot-previous");
-    expect(dispatchCtx.ReplyToSender).toBe("Spartacus");
-    expect(dispatchCtx.ReplyToBody).toBeUndefined();
-    expect(JSON.stringify(dispatchCtx)).not.toContain("The same stale bot response keeps looping.");
+    expect(dispatchCtx.ReplyToId).toBe(`m-quoted-${testCase.author.id}`);
+    expect(dispatchCtx.ReplyToSenderId).toBe(testCase.author.id);
+    expect(dispatchCtx.ReplyToTimestamp).toBe(Date.parse(quotedTimestamp));
+    expect(dispatchCtx.ReplyToBody).toContain("quoted message");
   });
 
   it("stores DM lastRoute with user target for direct-session continuity", async () => {
@@ -1984,7 +1946,7 @@ describe("processDiscordMessage session routing", () => {
       SessionKey: "agent:main:discord:channel:thread-1",
       MessageThreadId: "thread-1",
       ThreadParentId: "parent-1",
-      ModelParentSessionKey: "agent:main:discord:channel:parent-1",
+      ModelParentSessionKey: "agent:main:conversation:discord:default:channel:parent-1",
     });
     expect(getLastDispatchCtx()?.ParentSessionKey).toBeUndefined();
   });

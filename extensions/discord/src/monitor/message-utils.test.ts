@@ -49,6 +49,7 @@ vi.mock("openclaw/plugin-sdk/runtime-env", async () => {
 let resetDiscordChannelInfoCacheForTest: typeof import("./message-utils.js").resetDiscordChannelInfoCacheForTest;
 let resolveDiscordChannelInfo: typeof import("./message-utils.js").resolveDiscordChannelInfo;
 let resolveDiscordMessageChannelId: typeof import("./message-utils.js").resolveDiscordMessageChannelId;
+let resolveDiscordInboundMessageText: typeof import("./message-utils.js").resolveDiscordInboundMessageText;
 let resolveDiscordMessageText: typeof import("./message-utils.js").resolveDiscordMessageText;
 let resolveForwardedMediaList: typeof import("./message-utils.js").resolveForwardedMediaList;
 let resolveMediaList: typeof import("./message-utils.js").resolveMediaList;
@@ -58,6 +59,7 @@ beforeAll(async () => {
   ({
     resetDiscordChannelInfoCacheForTest,
     resolveDiscordChannelInfo,
+    resolveDiscordInboundMessageText,
     resolveDiscordMessageChannelId,
     resolveDiscordMessageText,
     resolveForwardedMediaList,
@@ -1028,14 +1030,100 @@ describe("resolveDiscordMessageText", () => {
   it("resolves user mentions in content", () => {
     const text = resolveDiscordMessageText(
       asMessage({
-        content: "Hello <@123> and <@456>!",
+        content: "Hello <@123>, <@456>, and <@123> again!",
         mentionedUsers: [
           { id: "123", username: "alice", globalName: "Alice Wonderland", discriminator: "0" },
           { id: "456", username: "bob", discriminator: "0" },
         ],
       }),
     );
-    expect(text).toBe("Hello @Alice Wonderland and @bob!");
+    expect(text).toBe("Hello @alice [123], @bob [456], and @alice [123] again!");
+  });
+
+  it("resolves native channel tags once and preserves their native ids", async () => {
+    const resolveChannelName = vi.fn(async (channelId: string) =>
+      channelId === "789" ? "botpostin" : undefined,
+    );
+    const message = asMessage({
+      content: "See <#789>, then <#789>, and keep <#404>",
+      mentionedUsers: [],
+    });
+
+    await expect(resolveDiscordInboundMessageText(message, { resolveChannelName })).resolves.toBe(
+      "See #botpostin [<#789>], then #botpostin [<#789>], and keep <#404>",
+    );
+    expect(resolveChannelName).toHaveBeenCalledTimes(2);
+    expect(resolveChannelName).toHaveBeenCalledWith("789");
+    expect(resolveChannelName).toHaveBeenCalledWith("404");
+
+    await expect(
+      resolveDiscordInboundMessageText(
+        asMessage({
+          content: "See #botpostin [<#789>]",
+          mentionedUsers: [],
+        }),
+        { resolveChannelName },
+      ),
+    ).resolves.toBe("See #botpostin [<#789>]");
+
+    await expect(
+      resolveDiscordInboundMessageText(
+        asMessage({
+          content: "See #wrong [<#789>]",
+          mentionedUsers: [],
+        }),
+        { resolveChannelName },
+      ),
+    ).resolves.toBe("See #botpostin [<#789>]");
+
+    await expect(
+      resolveDiscordInboundMessageText(
+        asMessage({
+          content: "See [<#789>]",
+          mentionedUsers: [],
+        }),
+        { resolveChannelName },
+      ),
+    ).resolves.toBe("See [#botpostin [<#789>]]");
+  });
+
+  it("bounds concurrent native channel-name lookups", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const resolveChannelName = vi.fn(async (channelId: string) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return `channel-${channelId}`;
+    });
+    const ids = ["101", "102", "103", "104", "105", "106", "107", "108"];
+
+    const result = await resolveDiscordInboundMessageText(
+      asMessage({
+        content: ids.map((id) => `<#${id}>`).join(" "),
+        mentionedUsers: [],
+      }),
+      { resolveChannelName },
+    );
+
+    expect(result).toContain("#channel-101 [<#101>]");
+    expect(resolveChannelName).toHaveBeenCalledTimes(ids.length);
+    expect(maxActive).toBeLessThanOrEqual(4);
+  });
+
+  it("canonicalizes spaced or false channel labels and drops false unresolved labels", async () => {
+    const resolveChannelName = vi.fn(async (channelId: string) =>
+      channelId === "789" ? "Project Room" : undefined,
+    );
+    const message = asMessage({
+      content: "See #wrong room [<#789>], #Project Room [<#789>], and #unknown room [<#404>]",
+      mentionedUsers: [],
+    });
+
+    await expect(resolveDiscordInboundMessageText(message, { resolveChannelName })).resolves.toBe(
+      "See #Project Room [<#789>], #Project Room [<#789>], and <#404>",
+    );
   });
 
   it("leaves content unchanged if no mentions present", () => {

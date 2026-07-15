@@ -301,11 +301,14 @@ Now create channels and start chatting. The agent sees the channel name, and eac
 - Gateway owns the Discord connection.
 - Reply routing is deterministic: Discord inbound replies back to Discord.
 - Discord guild/channel metadata is added to the model prompt as untrusted context, not as a user-visible reply prefix. If a model copies that envelope back, OpenClaw strips the copied metadata from outbound replies and from future replay context.
-- By default (`session.dmScope=main`), direct chats share the agent main session (`agent:main:main`).
-- Guild channels are isolated session keys (`agent:<agentId>:discord:channel:<channelId>`).
+- Direct chats, group DMs, guild channels, forums, and threads resolve through the canonical conversation route. Channel, account, conversation kind, native conversation id, and thread identity each occur once in the opaque session key.
+- Finalized inbound context enters the shared durable conversation scheduler before Discord's native per-session run queue. A storage decline transfers the same prepared context to native dispatch without repeating media, metadata, quote, PluralKit, or thread preparation.
+- Scheduled Discord turns reach the model as one user-role item beginning with `[📋 QUEUE ENGINE]:`. Debounced bursts retain one typed source per original Discord message, and media appears once inside the envelope instead of in a legacy `[media attached: ...]` prelude.
+- Human typing can reset only an unopened text batch's route timer. It cannot create work, extend a media batch, or affect admitted work.
 - Group DMs are ignored by default (`channels.discord.dm.groupEnabled=false`).
 - Native slash commands run in isolated command sessions (`agent:<agentId>:discord:slash:<userId>`), while still carrying `CommandTargetSessionKey` to the routed conversation session.
 - Text-only cron/heartbeat announce delivery to Discord collapses to the final assistant-visible answer, sent once. Media and structured component payloads remain multi-message when the agent emits multiple deliverable payloads.
+- Accepted inbound native user tags are model-visible as `@<username> [<user id>]`, and native channel tags as `#<channel name> [<#channel id>]`. User tags describe the tagged target, including self and other bots, never the author. Unresolved channel tags retain their native `<#id>` token.
 
 ## Forum channels
 
@@ -578,6 +581,8 @@ Example:
     - implicit reply-to-bot behavior in supported cases
 
     When writing outbound Discord messages, use canonical mention syntax: `<@USER_ID>` for users, `<#CHANNEL_ID>` for channels, and `<@&ROLE_ID>` for roles. Do not use the legacy `<@!USER_ID>` nickname mention form.
+
+    Inbound native user tags render as `@<username> [<user id>]`; inbound channel tags render as `#<channel name> [<#channel id>]`. Repeated tags remain repeated, and the same projection applies inside explicit quoted-message context.
 
     `requireMention` is configured per guild/channel (`channels.discord.guilds...`).
     `ignoreOtherMentions` optionally drops messages that mention another user/role but not the bot (excluding @everyone/@here).
@@ -1693,6 +1698,7 @@ Primary reference: [Configuration reference - Discord](/gateway/config-channels#
 - gateway: `proxy`, `gatewayInfoTimeoutMs`, `gatewayReadyTimeoutMs`, `gatewayRuntimeReadyTimeoutMs`
 - reply/history: `replyToMode`, `historyLimit`, `dmHistoryLimit`, `dms.*.historyLimit`
 - delivery: `textChunkLimit` (default `2000`), `maxLinesPerMessage` (default `17`)
+- ordered delivery: authored chunks, media, voice, components, polls, stickers, webhooks, and thread creation serialize per account and native destination while each caller retains its own receipt or rejection
 - streaming: `streaming.mode`, `streaming.chunkMode`, `streaming.preview.*`, `streaming.progress.*`, `streaming.block.*` (legacy flat `streamMode`, `draftChunk`, `blockStreaming`, `blockStreamingCoalesce`, `chunkMode` keys are migrated into `streaming.*` by `openclaw doctor --fix`)
 - media/retry: `mediaMaxMb` (caps outbound Discord uploads, default `100`), `retry`
 - actions: `actions.*`
@@ -1707,6 +1713,10 @@ Primary reference: [Configuration reference - Discord](/gateway/config-channels#
 - Treat bot tokens as secrets (`DISCORD_BOT_TOKEN` preferred in supervised environments).
 - Grant least-privilege Discord permissions.
 - If command deploy/state is stale, restart the gateway and re-check with `openclaw channels status --probe`.
+
+## v2026.7.1 absorption
+
+The v2026.7.1 channel already owns immediate gateway handoff, replay protection, receipt-time attachment staging, auto-thread planning, rich guild and member context, PluralKit resolution, native references, delivery receipts, bounded provider reads, and non-idempotent retry safety. The residual implementation moves the fully prepared event through the shared canonical scheduler before `messageRunQueue`, adds text-only typing timer resets, preserves guild and quote identity in the typed payload, and serializes every message-producing REST sequence per destination. The former Discord queue envelope, formatter registration, and queue-specific typing bridge are obsolete on the shared scheduler and were not restored.
 
 ## Related
 

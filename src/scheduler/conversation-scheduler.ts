@@ -779,6 +779,55 @@ class SqliteConversationScheduler implements ConversationScheduler {
     return true;
   }
 
+  async noteTyping(route: ConversationRoute): Promise<boolean> {
+    const changed = await this.coordinator.run(route.queueLaneKey, () => {
+      try {
+        return runOpenClawStateWriteTransaction(({ db }) => {
+          const kysely = schedulerDatabase(db);
+          const latest = executeSqliteQueryTakeFirstSync(
+            db,
+            kysely
+              .selectFrom("conversation_scheduler_events")
+              .selectAll()
+              .where("lane_key", "=", route.queueLaneKey)
+              .where("state", "=", "pending")
+              .where("human", "=", 1)
+              .where("media", "=", 0)
+              .orderBy("sequence", "desc")
+              .limit(1),
+          ) as EventRow | undefined;
+          if (!latest) {
+            return false;
+          }
+          const event = rowToEvent(latest);
+          const debounce = Math.max(
+            0,
+            this.options.resolveDebounceMs?.(event) ?? defaultDebounceMs(event),
+          );
+          const now = this.options.now?.() ?? Date.now();
+          const update = executeSqliteQuerySync(
+            db,
+            kysely
+              .updateTable("conversation_scheduler_events")
+              .set({ ready_at: now + debounce, revision: sql`revision + 1`, updated_at: now })
+              .where("lane_key", "=", route.queueLaneKey)
+              .where("state", "=", "pending")
+              .where("human", "=", 1)
+              .where("media", "=", 0),
+          );
+          return affectedRows(update) > 0;
+        }, this.options.database);
+      } catch (error) {
+        this.noteStorageError(error, route);
+        return false;
+      }
+    });
+    if (changed && this.options.dispatch) {
+      this.signalLane(route.queueLaneKey);
+    }
+    return changed;
+  }
+
   async cancelReceipt(receiptId: string): Promise<boolean> {
     const normalizedReceiptId = receiptId.trim();
     if (!normalizedReceiptId) {

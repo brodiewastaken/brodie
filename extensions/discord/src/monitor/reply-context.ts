@@ -15,15 +15,18 @@ type DiscordReplyContext = {
   timestamp?: number;
 };
 
-export function resolveReplyContext(
+export async function resolveReplyContext(
   message: Message,
-  resolveDiscordMessageText: (message: Message, options?: { includeForwarded?: boolean }) => string,
-): DiscordReplyContext | null {
+  resolveDiscordMessageText: (
+    message: Message,
+    options?: { includeForwarded?: boolean },
+  ) => Promise<string>,
+): Promise<DiscordReplyContext | null> {
   const referenced = message.referencedMessage;
   if (!referenced?.author) {
     return null;
   }
-  const referencedText = resolveDiscordMessageText(referenced, {
+  const referencedText = await resolveDiscordMessageText(referenced, {
     includeForwarded: true,
   });
   if (!referencedText) {

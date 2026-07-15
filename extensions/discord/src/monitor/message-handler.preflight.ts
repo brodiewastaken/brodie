@@ -63,6 +63,7 @@ import type {
 import { resolveDiscordPreflightRoute } from "./message-handler.routing-preflight.js";
 import {
   resolveDiscordChannelInfo,
+  resolveDiscordInboundMessageText,
   resolveDiscordMessageChannelId,
   resolveDiscordMessageText,
   resolveForwardedMediaList,
@@ -83,6 +84,15 @@ export {
   resolvePreflightMentionRequirement,
   shouldIgnoreBoundThreadWebhookMessage,
 } from "./message-handler.preflight-helpers.js";
+
+// Carbon sometimes delivers `guild: { name: "" }`; blank names must read as absent
+// so guild-name resolution falls through to the fetch/slug fallbacks.
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return value.trim() ? value : undefined;
+}
 
 const DISCORD_HISTORY_MEDIA_MAX_ATTACHMENTS = 4;
 const DISCORD_HISTORY_MEDIA_MAX_BYTES = 10 * 1024 * 1024;
@@ -260,9 +270,7 @@ export async function preflightDiscordMessage(
     isGuildMessage,
     channelType: channelInfo?.type,
   });
-  const messageText = resolveDiscordMessageText(message, {
-    includeForwarded: true,
-  });
+  let messageText = resolveDiscordMessageText(message, { includeForwarded: true });
   const injectedBoundThreadBinding =
     !isDirectMessage && !isGroupDm
       ? resolveInjectedBoundThreadLookupRecord({
@@ -354,9 +362,6 @@ export async function preflightDiscordMessage(
   }
 
   const botId = params.botUserId;
-  const baseText = resolveDiscordMessageText(message, {
-    includeForwarded: false,
-  });
 
   recordChannelActivity({
     channel: "discord",
@@ -458,15 +463,32 @@ export async function preflightDiscordMessage(
     return null;
   }
 
+  // Widened raw-id resolution: guild-object-only payloads must still match
+  // configured discord.guilds entries (and still be blocked when none match).
+  const rawGuildId = isGuildMessage ? (params.data.guild_id ?? params.data.guild?.id) : undefined;
+  const dataGuildName = nonEmptyString(params.data.guild?.name);
+  const fetchedGuildName =
+    isGuildMessage && rawGuildId && !dataGuildName && typeof params.client.fetchGuild === "function"
+      ? await params.client
+          .fetchGuild(rawGuildId)
+          .then((guild) => guild.name)
+          .catch((error: unknown) => {
+            logDebug(
+              `[discord-preflight] guild name fetch failed: guild_id=${rawGuildId} error=${String(error)}`,
+            );
+            return undefined;
+          })
+      : undefined;
+  const guildName = isGuildMessage ? (dataGuildName ?? fetchedGuildName) : undefined;
   const guildInfo = isGuildMessage
     ? resolveDiscordGuildEntry({
         guild: params.data.guild ?? undefined,
-        guildId: params.data.guild_id ?? undefined,
+        guildId: rawGuildId,
         guildEntries: params.guildEntries,
       })
     : null;
   logDebug(
-    `[discord-preflight] guild_id=${params.data.guild_id} guild_obj=${Boolean(params.data.guild)} guild_obj_id=${params.data.guild?.id} guildInfo=${Boolean(guildInfo)} guildEntries=${params.guildEntries ? Object.keys(params.guildEntries).join(",") : "none"}`,
+    `[discord-preflight] guild_id=${rawGuildId} guild_name=${guildName ?? "<unknown>"} guild_obj=${Boolean(params.data.guild)} guild_obj_id=${params.data.guild?.id} guildInfo=${Boolean(guildInfo)} guildEntries=${params.guildEntries ? Object.keys(params.guildEntries).join(",") : "none"}`,
   );
   if (
     isGuildMessage &&
@@ -500,7 +522,7 @@ export async function preflightDiscordMessage(
     isGuildMessage,
     messageChannelId,
     channelName,
-    guildName: params.data.guild?.name,
+    guildName,
     guildInfo,
     threadChannel,
     threadParentId,
@@ -528,13 +550,6 @@ export async function preflightDiscordMessage(
     return null;
   }
   const { channelAllowlistConfigured, channelAllowed } = channelAccess;
-
-  const historyEntry = buildDiscordPreflightHistoryEntry({
-    isGuildMessage,
-    historyLimit: params.historyLimit,
-    message,
-    senderLabel: sender.label,
-  });
 
   const threadOwnerId = threadChannel
     ? (resolveDiscordChannelInfoSafe(threadChannel).ownerId ?? channelInfo?.ownerId)
@@ -565,6 +580,28 @@ export async function preflightDiscordMessage(
     logVerbose("Blocked discord guild sender (not in users/roles allowlist)");
     return null;
   }
+
+  const resolveChannelName = async (channelId: string) =>
+    (await resolveDiscordChannelInfo(params.client, channelId))?.name;
+  messageText = await resolveDiscordInboundMessageText(message, {
+    includeForwarded: true,
+    resolveChannelName,
+  });
+  const baseText = await resolveDiscordInboundMessageText(message, {
+    includeForwarded: false,
+    resolveChannelName,
+  });
+  if (isPreflightAborted(params.abortSignal)) {
+    return null;
+  }
+
+  const historyEntry = buildDiscordPreflightHistoryEntry({
+    isGuildMessage,
+    historyLimit: params.historyLimit,
+    message,
+    messageText,
+    senderLabel: sender.label,
+  });
 
   // Only authorized guild senders should reach the expensive transcription path.
   const { resolveDiscordPreflightAudioMentionContext } = await loadPreflightAudioRuntime();
@@ -837,6 +874,7 @@ export async function preflightDiscordMessage(
     boundAgentId,
     guildInfo,
     guildSlug,
+    guildName,
     threadChannel,
     threadParentId,
     threadParentName,

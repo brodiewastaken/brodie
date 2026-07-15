@@ -25,8 +25,9 @@ import {
 } from "./inbound-context.js";
 import type { DiscordMessagePreflightContext } from "./message-handler.preflight.js";
 import {
+  resolveDiscordChannelInfo,
+  resolveDiscordInboundMessageText,
   resolveReferencedReplyMediaList,
-  resolveDiscordMessageText,
   type DiscordMediaInfo,
 } from "./message-utils.js";
 import { buildDirectLabel, buildGuildLabel, resolveReplyContext } from "./reply-context.js";
@@ -85,6 +86,7 @@ export async function buildDiscordMessageProcessContext(params: {
     displayChannelSlug,
     guildInfo,
     guildSlug,
+    guildName: preflightGuildName,
     memberRoleIds,
     channelConfig,
     baseSessionKey,
@@ -118,6 +120,23 @@ export async function buildDiscordMessageProcessContext(params: {
   const senderUsername = sender.isPluralKit
     ? (sender.tag ?? sender.name ?? author.username)
     : author.username;
+  const rawGuildId = isGuildMessage
+    ? (data.guild_id ?? data.guild?.id ?? guildInfo?.id)
+    : undefined;
+  const fetchedGuildName =
+    isGuildMessage && rawGuildId && !preflightGuildName && typeof client.fetchGuild === "function"
+      ? await client
+          .fetchGuild(rawGuildId)
+          .then((guild) => guild.name)
+          .catch(() => undefined)
+      : undefined;
+  const guildId = isGuildMessage ? rawGuildId : undefined;
+  const spaceId = isGuildMessage
+    ? (rawGuildId ?? guildInfo?.slug ?? guildSlug) || undefined
+    : undefined;
+  const guildName = isGuildMessage
+    ? (preflightGuildName ?? fetchedGuildName ?? guildInfo?.slug ?? guildSlug) || undefined
+    : undefined;
   const { groupSystemPrompt, ownerAllowFrom, untrustedContext } = buildDiscordInboundAccessContext({
     channelConfig,
     guildInfo,
@@ -185,7 +204,13 @@ export async function buildDiscordMessageProcessContext(params: {
         }),
     });
   }
-  const replyContext = resolveReplyContext(message, resolveDiscordMessageText);
+  const replyContext = await resolveReplyContext(message, (referenced, options) =>
+    resolveDiscordInboundMessageText(referenced, {
+      ...options,
+      resolveChannelName: async (channelId) =>
+        (await resolveDiscordChannelInfo(ctx.client, channelId))?.name,
+    }),
+  );
   const replySenderAllowed = replyContext
     ? isSupplementalContextSenderAllowed({
         id: replyContext.senderId,
@@ -345,7 +370,7 @@ export async function buildDiscordMessageProcessContext(params: {
       kind: isDirectMessage ? "direct" : ctx.isGroupDm ? "group" : "channel",
       id: messageChannelId,
       label: fromLabel,
-      spaceId: isGuildMessage ? (guildInfo?.id ?? guildSlug) || undefined : undefined,
+      spaceId,
       parentId: threadChannel ? threadParentId : undefined,
       threadId: threadChannel?.id ?? autoThreadContext?.createdThreadId ?? undefined,
     },
@@ -398,8 +423,9 @@ export async function buildDiscordMessageProcessContext(params: {
               id: replyContext.id,
               body: replyContext.body,
               sender: replyContext.sender,
+              senderId: replyContext.senderId,
+              timestamp: replyContext.timestamp,
               senderAllowed: replySenderAllowed,
-              isSelf: Boolean(botUserId && replyContext.senderId === botUserId),
               media: async () => {
                 const referencedReplyMediaList = await resolveReferencedReplyMediaList(
                   message,
@@ -430,6 +456,10 @@ export async function buildDiscordMessageProcessContext(params: {
       GroupSubject: groupSubject,
       GroupChannel: groupChannel,
       ...(isGuildMessage ? { GroupRequireMention: ctx.groupRequireMention } : {}),
+      GuildName: guildName,
+      GuildId: guildId,
+      ChannelId: messageChannelId,
+      BotUserId: botUserId,
       UntrustedStructuredContext: untrustedContext,
       OwnerAllowFrom: ownerAllowFrom,
     },
@@ -498,3 +528,7 @@ export async function buildDiscordMessageProcessContext(params: {
     replyReference,
   };
 }
+
+export type DiscordMessageProcessContext = NonNullable<
+  Awaited<ReturnType<typeof buildDiscordMessageProcessContext>>
+>;

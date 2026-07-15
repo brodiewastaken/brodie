@@ -71,6 +71,7 @@ export type DiscordMessagePreflightContext = DiscordMessagePreflightSharedFields
 
   guildInfo: DiscordGuildEntryResolved | null;
   guildSlug: string;
+  guildName?: string;
 
   threadChannel: DiscordThreadChannel | null;
   threadParentId?: string;
