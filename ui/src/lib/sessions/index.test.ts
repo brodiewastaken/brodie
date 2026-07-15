@@ -23,6 +23,119 @@ function deferred<T>() {
 }
 
 describe("createSessionCapability", () => {
+  it("loads every unarchived session from one authoritative gateway snapshot", async () => {
+    const rows = [
+      {
+        key: "agent:main:conversation:test:default:direct:one",
+        kind: "direct" as const,
+        updatedAt: 5,
+      },
+      {
+        key: "agent:main:conversation:test:default:group:two",
+        kind: "group" as const,
+        updatedAt: 4,
+      },
+      {
+        key: "agent:main:conversation:test:default:direct:three",
+        kind: "direct" as const,
+        updatedAt: 3,
+      },
+      {
+        key: "agent:main:conversation:test:default:group:four",
+        kind: "group" as const,
+        updatedAt: 2,
+      },
+      {
+        key: "agent:main:conversation:test:default:direct:five",
+        kind: "direct" as const,
+        updatedAt: 1,
+      },
+    ];
+    const request = vi.fn(async (method: string) => {
+      if (method !== "sessions.list") {
+        throw new Error(`Unexpected request: ${method}`);
+      }
+      return {
+        ...sessionsResult(rows, 1),
+        totalCount: rows.length,
+        hasMore: false,
+        nextOffset: null,
+      };
+    });
+    const client = { request } as unknown as GatewayBrowserClient;
+    const sessions = createSessionCapability({
+      snapshot: { client, connected: true, hello: null },
+      subscribe: () => () => undefined,
+      subscribeEvents: () => () => undefined,
+    });
+
+    await expect(sessions.listAllUnarchived()).resolves.toMatchObject({
+      count: 5,
+      totalCount: 5,
+      hasMore: false,
+      nextOffset: null,
+      sessions: rows,
+    });
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith("sessions.list", {
+      includeGlobal: true,
+      includeUnknown: true,
+      configuredAgentsOnly: false,
+      allUnarchived: true,
+    });
+    sessions.dispose();
+  });
+
+  it("archives 1000 targets in one RPC while preserving protected and error rows", async () => {
+    const request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method !== "sessions.archive") {
+        throw new Error(`Unexpected request: ${method}`);
+      }
+      const targets = params.targets as Array<{ key: string }>;
+      return {
+        rows: targets.map(({ key }, index) =>
+          index === 998
+            ? { key, status: "protected", reason: "Cannot archive a session with an active run." }
+            : index === 999
+              ? { key, status: "error", reason: "state store failed" }
+              : { key, status: "archived" },
+        ),
+      };
+    });
+    const client = { request } as unknown as GatewayBrowserClient;
+    const sessions = createSessionCapability({
+      snapshot: { client, connected: true, hello: null },
+      subscribe: () => () => undefined,
+      subscribeEvents: () => () => undefined,
+    });
+    const roster: SessionsListResult["sessions"] = Array.from({ length: 1000 }, (_, index) => ({
+      key: `agent:main:conversation:test:default:direct:${index}`,
+      kind: "direct" as const,
+      updatedAt: 1000 - index,
+    }));
+
+    await expect(sessions.archiveRoster(roster)).resolves.toEqual({
+      archived: roster.slice(0, 998).map((row) => row.key),
+      skipped: [
+        {
+          key: "agent:main:conversation:test:default:direct:998",
+          kind: "protected",
+          reason: "Cannot archive a session with an active run.",
+        },
+        {
+          key: "agent:main:conversation:test:default:direct:999",
+          kind: "error",
+          reason: "state store failed",
+        },
+      ],
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("sessions.archive", {
+      targets: roster.map((row) => ({ key: row.key, agentId: "main" })),
+    });
+    sessions.dispose();
+  });
+
   it("passes transcript fork parameters to sessions.create", async () => {
     const request = vi.fn(async (method: string) => {
       if (method === "sessions.create") {

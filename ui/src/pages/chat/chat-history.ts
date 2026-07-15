@@ -408,6 +408,9 @@ export type ChatState = {
   reconnectResumeSessionId?: string | null;
   chatLoading: boolean;
   chatMessages: unknown[];
+  chatHistoryOldestSeq?: number | null;
+  chatHistoryHasMore?: boolean;
+  chatHistoryLoadingOlder?: boolean;
   chatMessagesBySession?: ChatMessageCache;
   chatThinkingLevel: string | null;
   chatVerboseLevel: string | null;
@@ -448,6 +451,9 @@ type ChatSessionMessageSubscriptionState = ChatState & {
 
 export type ChatHistoryResult = {
   messages?: Array<unknown>;
+  oldestSeq?: number;
+  newestSeq?: number;
+  hasMore?: boolean;
   sessionId?: string;
   thinkingLevel?: string;
   verboseLevel?: string;
@@ -817,6 +823,83 @@ export async function loadChatHistory(
   return promise;
 }
 
+function transcriptRowKey(message: unknown, index: number): string | undefined {
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return `primitive:${index}:${String(message)}`;
+  }
+  const metadata = (message as Record<string, unknown>)["__openclaw"];
+  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+    const record = metadata as Record<string, unknown>;
+    const seq = typeof record.seq === "number" ? record.seq : undefined;
+    const id = typeof record.id === "string" ? record.id : undefined;
+    const mirror = record.mirror === true ? "mirror" : "row";
+    if (seq !== undefined || id !== undefined) {
+      return `${seq ?? ""}:${id ?? ""}:${mirror}`;
+    }
+  }
+  return undefined;
+}
+
+function prependUniqueHistoryRows(older: unknown[], current: unknown[]): unknown[] {
+  const seen = new Set(
+    current
+      .map((message, index) => transcriptRowKey(message, index))
+      .filter((key): key is string => key !== undefined),
+  );
+  const prefix = older.filter((message, index) => {
+    const key = transcriptRowKey(message, index);
+    if (key === undefined) {
+      return true;
+    }
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+  return [...prefix, ...current];
+}
+
+export async function loadOlderChatHistory(state: ChatState): Promise<void> {
+  if (
+    !state.client ||
+    !state.connected ||
+    state.chatHistoryLoadingOlder ||
+    state.chatHistoryHasMore !== true ||
+    typeof state.chatHistoryOldestSeq !== "number"
+  ) {
+    return;
+  }
+  const client = state.client;
+  const sessionKey = state.sessionKey;
+  const requestAgentId = isUiSelectedGlobalSessionKey(sessionKey)
+    ? resolveUiSelectedSessionAgentId(state)
+    : undefined;
+  const beforeSeq = state.chatHistoryOldestSeq;
+  state.chatHistoryLoadingOlder = true;
+  try {
+    const res = await client.request<ChatHistoryResult>("chat.history", {
+      sessionKey,
+      ...(requestAgentId ? { agentId: requestAgentId } : {}),
+      limit: CHAT_HISTORY_REQUEST_LIMIT,
+      beforeSeq,
+    });
+    if (state.client !== client || state.sessionKey !== sessionKey) {
+      return;
+    }
+    const messages = Array.isArray(res.messages) ? res.messages : [];
+    state.chatMessages = prependUniqueHistoryRows(messages, state.chatMessages);
+    state.chatHistoryOldestSeq =
+      typeof res.oldestSeq === "number" ? res.oldestSeq : state.chatHistoryOldestSeq;
+    state.chatHistoryHasMore = res.hasMore === true;
+    replaceCachedChatMessages(state, sessionKey, state.chatMessages, requestAgentId);
+  } catch (error) {
+    setChatError(state, String(error));
+  } finally {
+    state.chatHistoryLoadingOlder = false;
+  }
+}
+
 export function applyChatAgentsList(
   state: ChatState,
   agentsList: AgentsListResult | undefined,
@@ -913,8 +996,10 @@ async function loadChatHistoryUncached(
       return undefined;
     }
     const messages = Array.isArray(res.messages) ? res.messages : [];
+    state.chatHistoryOldestSeq = typeof res.oldestSeq === "number" ? res.oldestSeq : null;
+    state.chatHistoryHasMore = res.hasMore === true;
     applyChatAgentsList(state, res.agentsList, client);
-    const visibleMessages = messages.filter((message) => !shouldHideHistoryMessage(message));
+    const visibleMessages = messages;
     const lateOptimisticTail = collectLateOptimisticTailMessages(
       previousMessages,
       state.chatMessages,

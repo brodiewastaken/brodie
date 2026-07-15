@@ -54,6 +54,8 @@ function buildProps(result: SessionsListResult): SessionsProps {
     checkpointLoadingKey: null,
     checkpointBusyKey: null,
     checkpointErrorByKey: {},
+    archiveAllPending: false,
+    archiveAllSummary: null,
     onFiltersChange: () => undefined,
     onClearFilters: () => undefined,
     onSearchChange: () => undefined,
@@ -64,6 +66,7 @@ function buildProps(result: SessionsListResult): SessionsProps {
     onPageChange: () => undefined,
     onPageSizeChange: () => undefined,
     onRefresh: () => undefined,
+    onArchiveAll: () => undefined,
     onPatch: () => undefined,
     onToggleSelect: () => undefined,
     onSelectPage: () => undefined,
@@ -102,7 +105,7 @@ const SESSION_TABLE_HEADERS = [
 ];
 
 describe("sessions view", () => {
-  it("renders an explicit archived-session toggle", async () => {
+  it("does not expose an archive browser in the active session list", async () => {
     const container = document.createElement("div");
     const onFiltersChange = vi.fn();
     render(
@@ -114,21 +117,9 @@ describe("sessions view", () => {
     );
     await Promise.resolve();
 
-    const archivedToggle = container.querySelector(
-      ".session-archive-toggle input",
-    ) as HTMLInputElement | null;
-    expect(archivedToggle?.checked).toBe(false);
-
-    archivedToggle!.checked = true;
-    archivedToggle!.dispatchEvent(new Event("change", { bubbles: true }));
-
-    expect(onFiltersChange).toHaveBeenCalledWith({
-      activeMinutes: "",
-      limit: "120",
-      includeGlobal: false,
-      includeUnknown: false,
-      showArchived: true,
-    });
+    expect(container.querySelector(".session-archive-toggle")).toBeNull();
+    expect(container.querySelector('input[name="showArchived"]')).toBeNull();
+    expect(onFiltersChange).not.toHaveBeenCalled();
   });
 
   it("groups sessions by channel with section headers and no pagination", async () => {
@@ -349,7 +340,7 @@ describe("sessions view", () => {
     expect(container.querySelector('button[aria-label="Open Workboard card"]')).not.toBeNull();
   });
 
-  it("uses the shared tooltip component for session filters", async () => {
+  it("keeps source filters while removing updated-within and limit controls", async () => {
     const container = document.createElement("div");
     render(
       renderSessions({
@@ -361,22 +352,16 @@ describe("sessions view", () => {
     await Promise.resolve();
 
     const filters = container.querySelector(".sessions-filter-bar");
-    const activeField = filters?.querySelector(".session-filter-input--minutes")?.closest("label");
     const tooltips = Array.from(
       filters?.querySelectorAll<HTMLElement>("openclaw-tooltip") ?? [],
     ).map((tooltip) => (tooltip as HTMLElement & { content: string }).content);
 
-    expect(activeField?.querySelector(".session-filter-label")?.textContent).toBe("Updated within");
-    expect(tooltips).toEqual([
-      "Loads sessions updated in the last 120 minutes.",
-      "Max sessions to load.",
-      "Include global sessions.",
-      "Include unknown sessions.",
-      "Show only archived sessions.",
-    ]);
+    expect(filters?.querySelector(".session-filter-input--minutes")).toBeNull();
+    expect(filters?.querySelector(".session-filter-input--limit")).toBeNull();
+    expect(tooltips).toEqual(["Include global sessions.", "Include unknown sessions."]);
   });
 
-  it("keeps active and limit together and renders streamlined source toggles", async () => {
+  it("renders streamlined source toggles", async () => {
     const container = document.createElement("div");
     render(
       renderSessions({
@@ -389,18 +374,12 @@ describe("sessions view", () => {
     );
     await Promise.resolve();
 
-    const primaryRow = container.querySelector(".session-filter-primary-row");
-    expect(primaryRow?.querySelector(".session-filter-input--minutes")?.closest("label")).toBe(
-      primaryRow?.firstElementChild?.querySelector("label"),
-    );
-    expect(primaryRow?.querySelector(".session-filter-input--limit")?.closest("label")).toBe(
-      primaryRow?.lastElementChild?.querySelector("label"),
-    );
+    expect(container.querySelector(".session-filter-primary-row")).toBeNull();
 
     const toggleGroup = container.querySelector(".session-filter-toggle-group");
     expect(toggleGroup?.getAttribute("role")).toBe("group");
     expect(toggleGroup?.getAttribute("aria-label")).toBe("Session source filters");
-    expect(toggleGroup?.querySelectorAll(".session-filter-check")).toHaveLength(3);
+    expect(toggleGroup?.querySelectorAll(".session-filter-check")).toHaveLength(2);
     expect(
       Array.from(toggleGroup?.querySelectorAll(".session-filter-check") ?? []).map((toggle) => [
         toggle.querySelector("input")?.getAttribute("name"),
@@ -412,7 +391,6 @@ describe("sessions view", () => {
         ["session-filter-check", "session-filter-toggle", "session-filter-check--active"],
       ],
       ["includeUnknown", ["session-filter-check", "session-filter-toggle"]],
-      ["showArchived", ["session-filter-check", "session-filter-toggle", "session-archive-toggle"]],
     ]);
     expect(toggleGroup?.querySelector(".session-filter-check__box")).toBeNull();
   });
@@ -565,7 +543,7 @@ describe("sessions view", () => {
     expect(onPatch).toHaveBeenCalledWith("agent:main:main", { thinkingLevel: "low" });
   });
 
-  it("shows agent identity name and emoji for matching session keys", async () => {
+  it("shows the exact session key before agent identity metadata", async () => {
     const container = document.createElement("div");
     render(
       renderSessions({
@@ -590,9 +568,46 @@ describe("sessions view", () => {
     await Promise.resolve();
 
     const keyCell = container.querySelector(".session-key-cell");
-    expect(keyCell?.textContent?.trim()).toBe("📊 Data Expert (dingtalk)");
-    expect((keyCell?.parentElement as (HTMLElement & { content: string }) | null)?.content).toBe(
+    expect(keyCell?.querySelector(".session-link")?.textContent?.trim()).toBe(
+      "agent:data-expert:dingtalk:cidzg6sF43NZMy52Rnk8EN",
+    );
+    expect(keyCell?.querySelector(".session-key-display-name")?.textContent?.trim()).toBe(
       "📊 Data Expert (dingtalk)",
+    );
+    expect((keyCell?.parentElement as (HTMLElement & { content: string }) | null)?.content).toBe(
+      "agent:data-expert:dingtalk:cidzg6sF43NZMy52Rnk8EN",
+    );
+  });
+
+  it("renders canonical conversation session keys as opaque values", async () => {
+    const container = document.createElement("div");
+    const key = "agent:main:conversation:whatsapp:brodie:direct:+15551234567";
+    render(
+      renderSessions({
+        ...buildProps(
+          buildResult({
+            key,
+            kind: "direct",
+            updatedAt: Date.now(),
+          }),
+        ),
+        agentIdentityById: {
+          main: {
+            agentId: "main",
+            name: "Assistant",
+            avatar: "",
+            emoji: "",
+          },
+        },
+      }),
+      container,
+    );
+    await Promise.resolve();
+
+    const keyCell = container.querySelector(".session-key-cell");
+    expect(keyCell?.textContent?.trim()).toBe(key);
+    expect((keyCell?.parentElement as (HTMLElement & { content: string }) | null)?.content).toBe(
+      key,
     );
   });
 
@@ -1110,12 +1125,15 @@ describe("sessions view", () => {
 
     const rows = container.querySelectorAll("tbody tr.session-data-row");
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.querySelector(".session-key-cell")?.textContent?.trim()).toBe(
+    expect(rows[0]?.querySelector(".session-link")?.textContent?.trim()).toBe(
+      "agent:data-expert:dingtalk:cidzg6sF43NZMy52Rnk8EN",
+    );
+    expect(rows[0]?.querySelector(".session-key-display-name")?.textContent?.trim()).toBe(
       "Data Expert (dingtalk)",
     );
   });
 
-  it("keeps session selects stable and deselects only the current page", async () => {
+  it("keeps session selects stable and selects the full unpaginated roster", async () => {
     const container = document.createElement("div");
     render(
       renderSessions({
@@ -1177,7 +1195,7 @@ describe("sessions view", () => {
           ]),
         ),
         pageSize: 1,
-        selectedKeys: new Set(["page-0", "off-page"]),
+        selectedKeys: new Set(["page-0", "page-1", "off-page"]),
         onSelectPage,
         onDeselectPage,
         onDeselectAll,
@@ -1190,9 +1208,41 @@ describe("sessions view", () => {
     expect(headerCheckbox).toBeInstanceOf(HTMLInputElement);
     headerCheckbox!.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(onDeselectPage).toHaveBeenCalledWith(["page-0"]);
+    expect(container.querySelectorAll("tbody tr.session-data-row")).toHaveLength(2);
+    expect(container.querySelector(".data-table-pagination")).toBeNull();
+    expect(onDeselectPage).toHaveBeenCalledWith(["page-0", "page-1"]);
     expect(onDeselectAll).not.toHaveBeenCalled();
     expect(onSelectPage).not.toHaveBeenCalled();
+  });
+
+  it("offers Archive All and renders its safe-skip report", async () => {
+    const container = document.createElement("div");
+    const onArchiveAll = vi.fn();
+    render(
+      renderSessions({
+        ...buildProps(
+          buildResult({
+            key: "agent:main:conversation:test:default:direct:ready",
+            kind: "direct",
+            updatedAt: Date.now(),
+          }),
+        ),
+        archiveAllSummary: "Archived 1 session. Skipped protected: global.",
+        onArchiveAll,
+      }),
+      container,
+    );
+    await Promise.resolve();
+
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (candidate) => candidate.textContent?.trim() === "Archive All",
+    );
+    expect(button).toBeInstanceOf(HTMLButtonElement);
+    button!.click();
+    expect(onArchiveAll).toHaveBeenCalledOnce();
+    expect(container.querySelector(".sessions-archive-all-summary")?.textContent).toContain(
+      "Skipped protected: global",
+    );
   });
 
   it("shows a reset action when filters hide every session", async () => {

@@ -1726,9 +1726,12 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
           '.sidebar-recent-session[data-session-key="agent:main:session-b"] a.sidebar-recent-session__link',
         )
         .click();
-      await page.locator(".sidebar-recent-session--active").getByText("Session B").waitFor({
-        timeout: 10_000,
-      });
+      await page
+        .locator(".sidebar-recent-session--active")
+        .getByText("agent:main:session-b")
+        .waitFor({
+          timeout: 10_000,
+        });
       modelSelect = await openModelSelect();
       expect(await modelSelect.getAttribute("data-chat-select-value")).toBe("");
 
@@ -1737,9 +1740,12 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
           '.sidebar-recent-session[data-session-key="agent:main:session-a"] a.sidebar-recent-session__link',
         )
         .click();
-      await page.locator(".sidebar-recent-session--active").getByText("Session A").waitFor({
-        timeout: 10_000,
-      });
+      await page
+        .locator(".sidebar-recent-session--active")
+        .getByText("agent:main:session-a")
+        .waitFor({
+          timeout: 10_000,
+        });
 
       modelSelect = await openModelSelect();
       expect(await modelSelect.getAttribute("data-chat-select-value")).toBe(
@@ -1909,9 +1915,12 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
           '.sidebar-recent-session[data-session-key="agent:main:session-b"] a.sidebar-recent-session__link',
         )
         .click();
-      await page.locator(".sidebar-recent-session--active").getByText("Session B").waitFor({
-        timeout: 10_000,
-      });
+      await page
+        .locator(".sidebar-recent-session--active")
+        .getByText("agent:main:session-b")
+        .waitFor({
+          timeout: 10_000,
+        });
       await expect
         .poll(() => sidebarSessionOrder(page))
         .toEqual(["agent:main:session-pinned", ...createdSessionKeys.slice(0, 9)]);
@@ -1950,7 +1959,7 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
     }
   });
 
-  it("keeps long sidebar labels clipped after a session switch", async () => {
+  it("shows the complete session key in a content-sized sidebar after a session switch", async () => {
     const context = await newBrowserContext({
       locale: "en-US",
       serviceWorkers: "block",
@@ -1959,10 +1968,9 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
     const page = await context.newPage();
     const sessions = chatSessionListResponse();
     sessions.sessions[0].label = "Short";
-    sessions.sessions[1].label =
-      "Review and repair the intentionally overlong sidebar session title before navigation ".repeat(
-        4,
-      );
+    sessions.sessions[1].label = "Friendly label that must not replace the key";
+    sessions.sessions[1].key =
+      "agent:main:conversation:discord:default:channel:1482543306050109552";
     await installMockGateway(page, {
       methodResponses: { "sessions.list": sessions },
       sessionKey: "agent:main:session-a",
@@ -1971,7 +1979,7 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
     try {
       await page.goto(`${server.baseUrl}chat`);
       const recentRow = page.locator(
-        '.sidebar-recent-session[data-session-key="agent:main:session-b"]',
+        `.sidebar-recent-session[data-session-key="${sessions.sessions[1].key}"]`,
       );
       const recentLabel = recentRow.locator(".sidebar-recent-session__name");
       await recentLabel.waitFor({ state: "visible", timeout: 10_000 });
@@ -1982,27 +1990,30 @@ describeControlUiE2e("Control UI mocked Gateway E2E", () => {
         scrollWidth: label.scrollWidth,
         text: label.textContent,
       }));
-      expect(layout.scrollWidth, JSON.stringify(layout)).toBeGreaterThan(layout.clientWidth);
+      expect(layout.text).toBe(sessions.sessions[1].key);
+      expect(layout.scrollWidth, JSON.stringify(layout)).toBe(layout.clientWidth);
+      expect(layout.rowWidth, JSON.stringify(layout)).toBeLessThanOrEqual(640);
 
       await recentRow.locator("a.sidebar-recent-session__link").dispatchEvent("click", {
         button: 0,
       });
       await page
         .locator(".sidebar-recent-session--active")
-        .getByText(sessions.sessions[1].label)
+        .getByText(sessions.sessions[1].key)
         .waitFor({
           timeout: 10_000,
         });
 
       const activeRow = page.locator(
-        '.sidebar-recent-session[data-session-key="agent:main:session-b"]',
+        `.sidebar-recent-session[data-session-key="${sessions.sessions[1].key}"]`,
       );
       expect(
         await activeRow.locator(".sidebar-recent-session__name").evaluate((label) => ({
-          textIndent: getComputedStyle(label).textIndent,
+          overflow: getComputedStyle(label).overflow,
           textOverflow: getComputedStyle(label).textOverflow,
+          whiteSpace: getComputedStyle(label).whiteSpace,
         })),
-      ).toEqual({ textIndent: "0px", textOverflow: "ellipsis" });
+      ).toEqual({ overflow: "visible", textOverflow: "clip", whiteSpace: "nowrap" });
     } finally {
       await closeBrowserContext(context);
     }

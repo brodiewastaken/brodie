@@ -1,13 +1,15 @@
 [
   {
-    "description": "Send/delete/manage channel messages. Supports actions: send.",
+    "description": "Send/delete/manage channel messages. Supports actions: react, reply, send, silence.\n\nevery message tool call i make separates what i'm thinking from what i actually say.\n\ninvisibleThinking is where i think out loud to myself. what the person means, what the room feels like, whether i should reply, react, or stay silent, where the message belongs, what is safe to share, how much i should say, and whether i am done after this. none of it reaches the chat.\n\nvisibleMessages is the actual reply. the words that land in the chat, wherever i am. each item is a separate authored bubble and they land in order.\n\nvisibleReaction is the reaction that lands on a message. it is a native reaction, not a text bubble.\n\nevery message tool call MUST have invisibleThinking. my internal process stays there. nothing private leaks into visibleMessages or visibleReaction. normal assistant text stays private in my session and never reaches the chat.\n\nwhat goes in invisibleThinking:\n- what i understand the person to be asking or saying\n- what is happening in the conversation and whether the moment needs me\n- why a reply, reaction, or silence is the right move\n- who should receive the message and where it belongs\n- what context is private, sensitive, or unnecessary to expose\n- how much to say and whether one bubble or several feels natural\n- whether this message finishes my turn or i still have work to do\n- anything i would NOT say out loud to a friend sitting next to me\n\nwhat goes in visibleMessages:\n- the actual conversational reply\n- progress updates someone needs to hear (\"on it, spawning the sub-agent now\")\n- results, answers, findings\n- questions back to the person\n- anything i WOULD say out loud to a friend sitting next to me\n\nthe test: if it sounds like me thinking out loud to myself, it is invisibleThinking. if it sounds like me talking to a person, it belongs in visibleMessages.\n\nexamples:\n\nGOOD:\n{\n  \"action\": \"reply\",\n  \"invisibleThinking\": \"Abhay wants me to investigate the codebase. i should acknowledge him before i disappear into the work.\",\n  \"visibleMessages\": [\"on it, lemme dig through the codebase real quick\"],\n  \"endTurn\": false\n}\n\nGOOD, no progress update needed:\n{\n  \"action\": \"reply\",\n  \"invisibleThinking\": \"i found the answer in the provider configuration. i can give Abhay the result directly.\",\n  \"visibleMessages\": [\"the config lives in src/utils/provider-utils.ts. only google-generative-ai is hardcoded to tagged mode, everything else uses native reasoning.\"],\n  \"endTurn\": true\n}\n\nGOOD, multi-step and Abhay needs a status update:\n{\n  \"action\": \"reply\",\n  \"invisibleThinking\": \"the sub-agent is still running. Abhay has been waiting long enough that a quick update is useful.\",\n  \"visibleMessages\": [\"still waiting on the discrawl investigation sub-agent. i'll relay the findings as soon as it comes back.\"],\n  \"endTurn\": false\n}\n\nGOOD, a reaction says enough:\n{\n  \"action\": \"react\",\n  \"invisibleThinking\": \"Abhay is talking about me rather than asking me something. a reaction shows i'm here without interrupting.\",\n  \"visibleReaction\": \"🤙🏽\",\n  \"endTurn\": true\n}\n\nGOOD, nothing needs to leave me:\n{\n  \"action\": \"silence\",\n  \"invisibleThinking\": \"Abhay is talking to Aanish and there is nothing useful for me to add.\"\n}\n\nBAD, internal process leaked into visibleMessages:\n{\n  \"action\": \"reply\",\n  \"invisibleThinking\": \"Abhay wants the provider configuration. i know where it lives and can answer directly.\",\n  \"visibleMessages\": [\"i'm thinking the provider configuration is probably in src/utils, so i should check there\"],\n  \"endTurn\": false\n}\n\nthat line is me thinking out loud to myself, not talking to Abhay. it belongs in invisibleThinking.\n\nBAD, no invisibleThinking:\n{\n  \"action\": \"reply\",\n  \"visibleMessages\": [\"on it, lemme check the logs\"],\n  \"endTurn\": false\n}\n\nevery message tool call needs invisibleThinking, even when it is brief.\n\nBAD, visible text outside the message tool:\non it, lemme check the logs\n\nif i want words to reach the chat, they go in visibleMessages. if i want a reaction to reach the chat, it goes in visibleReaction. everything else stays with me.",
     "inputSchema": {
+      "additionalProperties": true,
       "properties": {
         "accountId": {
+          "minLength": 1,
           "type": "string"
         },
         "action": {
-          "enum": ["send"],
+          "enum": ["reply", "send", "react", "silence"],
           "type": "string"
         },
         "asDocument": {
@@ -47,13 +49,12 @@
           "type": "string"
         },
         "channel": {
+          "minLength": 1,
           "type": "string"
         },
+        "channelData": {},
         "contentType": {
           "type": "string"
-        },
-        "dryRun": {
-          "type": "boolean"
         },
         "effect": {
           "description": "Alias for effectId.",
@@ -63,6 +64,9 @@
           "description": "Effect id/name for sendWithEffect.",
           "type": "string"
         },
+        "endTurn": {
+          "type": "boolean"
+        },
         "filename": {
           "type": "string"
         },
@@ -70,31 +74,184 @@
           "description": "Send image/GIF/video as document; avoids compression.",
           "type": "boolean"
         },
-        "gatewayToken": {
-          "type": "string"
-        },
-        "gatewayUrl": {
-          "type": "string"
-        },
         "gifPlayback": {
           "type": "boolean"
+        },
+        "interactive": {
+          "description": "Rich message payload: text/buttons/selects/context. Unsupported blocks degrade to text.",
+          "properties": {
+            "blocks": {
+              "items": {
+                "properties": {
+                  "buttons": {
+                    "items": {
+                      "properties": {
+                        "action": {
+                          "anyOf": [
+                            {
+                              "properties": {
+                                "command": {
+                                  "type": "string"
+                                },
+                                "type": {
+                                  "const": "command",
+                                  "type": "string"
+                                }
+                              },
+                              "required": ["type", "command"],
+                              "type": "object"
+                            },
+                            {
+                              "properties": {
+                                "type": {
+                                  "const": "callback",
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": ["type", "value"],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "disabled": {
+                          "type": "boolean"
+                        },
+                        "label": {
+                          "type": "string"
+                        },
+                        "reusable": {
+                          "type": "boolean"
+                        },
+                        "style": {
+                          "enum": ["primary", "secondary", "success", "danger"],
+                          "type": "string"
+                        },
+                        "url": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        },
+                        "web_app": {
+                          "properties": {
+                            "url": {
+                              "type": "string"
+                            }
+                          },
+                          "required": ["url"],
+                          "type": "object"
+                        },
+                        "webApp": {
+                          "properties": {
+                            "url": {
+                              "type": "string"
+                            }
+                          },
+                          "required": ["url"],
+                          "type": "object"
+                        }
+                      },
+                      "required": ["label"],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "options": {
+                    "items": {
+                      "properties": {
+                        "action": {
+                          "anyOf": [
+                            {
+                              "properties": {
+                                "command": {
+                                  "type": "string"
+                                },
+                                "type": {
+                                  "const": "command",
+                                  "type": "string"
+                                }
+                              },
+                              "required": ["type", "command"],
+                              "type": "object"
+                            },
+                            {
+                              "properties": {
+                                "type": {
+                                  "const": "callback",
+                                  "type": "string"
+                                },
+                                "value": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": ["type", "value"],
+                              "type": "object"
+                            }
+                          ]
+                        },
+                        "label": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "required": ["label"],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "placeholder": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "enum": ["text", "context", "divider", "buttons", "select"],
+                    "type": "string"
+                  }
+                },
+                "required": ["type"],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "title": {
+              "type": "string"
+            },
+            "tone": {
+              "enum": ["info", "success", "warning", "danger", "neutral"],
+              "type": "string"
+            }
+          },
+          "required": ["blocks"],
+          "type": "object"
+        },
+        "invisibleThinking": {
+          "minLength": 1,
+          "type": "string"
         },
         "media": {
           "description": "Media URL/path. data: use buffer.",
           "type": "string"
         },
-        "message": {
+        "messageId": {
+          "minLength": 1,
           "type": "string"
         },
         "mimeType": {
           "type": "string"
         },
-        "quoteText": {
-          "description": "Telegram reply quote text.",
+        "quoteReply": {
+          "minLength": 1,
           "type": "string"
         },
-        "replyTo": {
-          "type": "string"
+        "remove": {
+          "type": "boolean"
         },
         "silent": {
           "type": "boolean"
@@ -103,22 +260,24 @@
           "description": "Recipient/channel: E.164 for WhatsApp/Signal, Telegram chat id/@username, Discord/Slack/Mattermost <channelId|user:ID|channel:ID>, or iMessage handle/chat_id",
           "type": "string"
         },
-        "targets": {
-          "items": {
-            "description": "Recipient/channel targets (same format as --target); accepts ids or names when the directory is available.",
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "threadId": {
-          "type": "string"
-        },
         "timeoutMs": {
           "minimum": 1,
           "type": "integer"
+        },
+        "visibleMessages": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 9,
+          "type": "array"
+        },
+        "visibleReaction": {
+          "minLength": 1,
+          "type": "string"
         }
       },
-      "required": ["action"],
+      "required": ["action", "invisibleThinking"],
       "type": "object"
     },
     "name": "message",
@@ -183,6 +342,9 @@
         "cwd": {
           "type": "string"
         },
+        "fastMode": {
+          "type": "boolean"
+        },
         "label": {
           "type": "string"
         },
@@ -220,19 +382,6 @@
       "type": "object"
     },
     "name": "sessions_spawn",
-    "type": "function"
-  },
-  {
-    "description": "End current turn. Use after spawning subagents; results arrive as next message.",
-    "inputSchema": {
-      "properties": {
-        "message": {
-          "type": "string"
-        }
-      },
-      "type": "object"
-    },
-    "name": "sessions_yield",
     "type": "function"
   },
   {
@@ -1326,7 +1475,7 @@
       },
       {
         "deferLoading": true,
-        "description": "List active and recent subagents for the requester session. If sessions_yield exists, use it for completion; do not poll wait loops.",
+        "description": "List active and recent subagents for on-demand status and debugging. Completion is push-based; do not poll wait loops.",
         "inputSchema": {
           "properties": {
             "action": {

@@ -183,6 +183,18 @@ export async function appendInjectedAssistantMessageToTranscript(params: {
       : {}),
   };
 
+  // Raw replay must preserve the exact injected text when this independent
+  // single-operator escape hatch is explicitly enabled. The override is
+  // scoped to transcript persistence, so logs and tool summaries keep their
+  // normal redaction policy.
+  const persistConfig =
+    params.config?.gateway?.controlUi?.security?.redactInjectedMessages === false
+      ? {
+          ...params.config,
+          logging: { ...params.config.logging, redactSensitive: "off" as const },
+        }
+      : params.config;
+
   try {
     if (!params.transcriptPath && (!params.storePath || !params.sessionId || !params.sessionKey)) {
       return { ok: false, error: "transcript identity not resolved" };
@@ -210,7 +222,7 @@ export async function appendInjectedAssistantMessageToTranscript(params: {
       {
         updateMode: "inline",
         touchSessionEntry: Boolean(params.storePath && params.sessionId && params.sessionKey),
-        ...(params.config ? { config: params.config } : {}),
+        ...(persistConfig ? { config: persistConfig } : {}),
         messages: [
           {
             message: messageBody,

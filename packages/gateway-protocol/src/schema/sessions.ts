@@ -164,6 +164,8 @@ export const SessionsListParamsSchema = Type.Object(
      */
     limit: Type.Optional(Type.Integer({ minimum: 1 })),
     offset: Type.Optional(Type.Integer({ minimum: 0 })),
+    /** Return one snapshot containing every unarchived row, without offset pagination. */
+    allUnarchived: Type.Optional(Type.Literal(true)),
     activeMinutes: Type.Optional(Type.Integer({ minimum: 1 })),
     includeGlobal: Type.Optional(Type.Boolean()),
     includeUnknown: Type.Optional(Type.Boolean()),
@@ -376,6 +378,70 @@ export const SessionsPatchParamsSchema = Type.Object(
     groupActivation: Type.Optional(
       Type.Union([Type.Literal("mention"), Type.Literal("always"), Type.Null()]),
     ),
+  },
+  { additionalProperties: false },
+);
+
+/** Archives a complete roster through the server-owned session lifecycle fence. */
+export const SessionsArchiveParamsSchema = Type.Object(
+  {
+    targets: Type.Array(
+      Type.Object(
+        {
+          key: NonEmptyString,
+          agentId: Type.Optional(NonEmptyString),
+        },
+        { additionalProperties: false },
+      ),
+      { minItems: 1 },
+    ),
+  },
+  { additionalProperties: false },
+);
+
+/** Successful archive outcome for one target. */
+export const SessionArchiveArchivedResultRowSchema = Type.Object(
+  {
+    key: NonEmptyString,
+    status: Type.Literal("archived"),
+    archivedKey: Type.Optional(NonEmptyString),
+    sessionId: Type.Optional(NonEmptyString),
+    relocated: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+/** Protected archive outcome for one target. */
+export const SessionArchiveProtectedResultRowSchema = Type.Object(
+  {
+    key: NonEmptyString,
+    status: Type.Literal("protected"),
+    reason: NonEmptyString,
+  },
+  { additionalProperties: false },
+);
+
+/** Failed archive outcome for one target. */
+export const SessionArchiveErrorResultRowSchema = Type.Object(
+  {
+    key: NonEmptyString,
+    status: Type.Literal("error"),
+    reason: NonEmptyString,
+  },
+  { additionalProperties: false },
+);
+
+/** Ordered outcome for one target in a sessions.archive request. */
+export const SessionArchiveResultRowSchema = Type.Union([
+  SessionArchiveArchivedResultRowSchema,
+  SessionArchiveProtectedResultRowSchema,
+  SessionArchiveErrorResultRowSchema,
+]);
+
+/** Complete ordered result for a server-owned archive batch. */
+export const SessionsArchiveResultSchema = Type.Object(
+  {
+    rows: Type.Array(SessionArchiveResultRowSchema),
   },
   { additionalProperties: false },
 );

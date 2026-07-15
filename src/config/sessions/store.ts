@@ -1118,6 +1118,7 @@ export async function applySessionEntryPatchProjection<
   TFailure extends SessionEntryPatchProjectionFailure,
 >(params: {
   storePath: string;
+  skipMaintenance?: boolean;
   resolveTarget: (
     snapshot: SessionEntryPatchProjectionSnapshot,
   ) => SessionEntryPatchProjectionTarget;
@@ -1143,6 +1144,7 @@ export async function applySessionEntryPatchProjection<
     }
     await saveSessionStoreUnlocked(params.storePath, store, {
       activeSessionKey: target.primaryKey,
+      skipMaintenance: params.skipMaintenance,
     });
     return projected.ok ? { ...projected, entry: cloneSessionEntry(projected.entry) } : projected;
   });

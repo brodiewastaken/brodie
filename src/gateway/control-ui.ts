@@ -561,10 +561,13 @@ function classifyAssistantMediaError(err: unknown): AssistantMediaAvailability {
 async function resolveAssistantMediaAvailability(
   source: string,
   localRoots: readonly string[],
+  options?: { allowAnyLocalPath?: boolean },
 ): Promise<AssistantMediaAvailability> {
   try {
     const localPath = await resolveMediaReferenceLocalPath(source);
-    await assertLocalMediaAllowed(localPath, localRoots);
+    if (options?.allowAnyLocalPath !== true) {
+      await assertLocalMediaAllowed(localPath, localRoots);
+    }
     const opened = await openLocalFileSafely({ filePath: localPath });
     await opened.handle.close();
     return { available: true };
@@ -619,9 +622,13 @@ export async function handleControlUiAssistantMediaRequest(
   const localRoots = opts?.config
     ? getAgentScopedMediaLocalRoots(opts.config, opts.agentId)
     : getDefaultLocalRoots();
+  const allowAnyLocalPath =
+    opts?.config?.gateway?.controlUi?.security?.assistantMediaAnyLocalPath === true;
 
   if (isMetaRequest) {
-    const availability = await resolveAssistantMediaAvailability(source, localRoots);
+    const availability = await resolveAssistantMediaAvailability(source, localRoots, {
+      allowAnyLocalPath,
+    });
     sendJson(
       res,
       200,
@@ -645,7 +652,9 @@ export async function handleControlUiAssistantMediaRequest(
   try {
     const resolvedReference = await resolveMediaReferenceLocalPathInfo(source);
     localPath = resolvedReference.path;
-    await assertLocalMediaAllowed(localPath, localRoots);
+    if (!allowAnyLocalPath) {
+      await assertLocalMediaAllowed(localPath, localRoots);
+    }
     opened = await openLocalFileSafely({ filePath: localPath });
     const sniffLength = Math.min(opened.stat.size, 8192);
     const sniffBuffer = sniffLength > 0 ? Buffer.allocUnsafe(sniffLength) : undefined;

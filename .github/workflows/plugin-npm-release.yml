@@ -2,20 +2,6 @@ name: Plugin NPM Release
 run-name: ${{ github.event_name == 'workflow_dispatch' && format('Plugin NPM Release [{0}] {1}', inputs.npm_dist_tag, inputs.ref) || format('Plugin NPM Release [default] {0}', github.sha) }}
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/plugin-npm-release.yml"
-      - "extensions/**"
-      - "package.json"
-      - "scripts/lib/npm-publish-plan.mjs"
-      - "scripts/lib/plugin-npm-package-manifest.mjs"
-      - "scripts/lib/plugin-npm-release.ts"
-      - "scripts/plugin-npm-publish.sh"
-      - "scripts/plugin-npm-release-check.ts"
-      - "scripts/plugin-npm-release-plan.ts"
-      - "scripts/verify-plugin-npm-published-runtime.mjs"
   workflow_dispatch:
     inputs:
       publish_scope:

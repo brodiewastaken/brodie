@@ -1,6 +1,5 @@
 // Control UI view renders chat screen composition.
 import { html, nothing, type TemplateResult } from "lit";
-import { ref } from "lit/directives/ref.js";
 import { styleMap } from "lit/directives/style-map.js";
 import type { SessionsListResult } from "../../api/types.ts";
 import type { ChatSendShortcut } from "../../app/settings.ts";
@@ -15,26 +14,27 @@ import type {
 } from "../../lib/chat/chat-types.ts";
 import type { ChatSideResult } from "../../lib/chat/side-result.ts";
 import type { EmbedSandboxMode } from "../../lib/chat/tool-display.ts";
+import { type LoadRawTranscriptFullMessage, renderRawTranscript } from "./chat-raw-transcript.ts";
 import {
   handleChatAttachmentDrop,
   renderChatComposer,
   resetChatComposerState,
 } from "./components/chat-composer.ts";
+import "./components/chat-sidebar.ts";
 import {
   renderSessionWorkspaceRail,
   type SessionWorkspaceProps,
 } from "./components/chat-session-workspace.ts";
-import "./components/chat-sidebar.ts";
 import type {
   DetailFullMessageResult,
   SidebarContent,
   SidebarFullMessageRequest,
 } from "./components/chat-sidebar.ts";
 import {
+  handleChatContextMenu,
   isChatThreadSearchOpen,
   renderChatPinnedMessages,
   renderChatSearchBar,
-  renderChatThread,
   resetChatThreadPresentationState,
   toggleChatThreadSearch,
 } from "./components/chat-thread.ts";
@@ -59,6 +59,10 @@ export type ChatProps = {
   compactionStatus?: CompactionStatus | null;
   fallbackStatus?: FallbackStatus | null;
   messages: unknown[];
+  historyHasMore?: boolean;
+  historyLoadingOlder?: boolean;
+  onLoadOlderHistory?: () => void;
+  onLoadRawFullMessage?: LoadRawTranscriptFullMessage;
   sideResult?: ChatSideResult | null;
   toolMessages: unknown[];
   streamSegments: ChatStreamSegment[];
@@ -155,49 +159,25 @@ export function renderChat(props: ChatProps) {
   const splitRatio = props.splitRatio ?? 0.6;
   const sidebarOpen = Boolean(props.sidebarOpen && props.onCloseSidebar);
   const canCompose = props.connected && props.canSend;
-  let chatSection: HTMLElement | null = null;
 
-  const thread = renderChatThread({
-    paneId: props.paneId,
-    sessionKey: props.sessionKey,
+  const thread = renderRawTranscript(props.messages, {
+    loadFullMessage: props.onLoadRawFullMessage,
+    onScroll: props.onChatScroll,
     loading: props.loading,
-    messages: props.messages,
-    toolMessages: props.toolMessages,
-    streamSegments: props.streamSegments,
     stream: props.stream,
-    streamStartedAt: props.streamStartedAt,
-    queue: props.queue,
-    showThinking: props.showThinking,
-    showToolCalls: props.showToolCalls,
-    sessions: props.sessions,
-    assistantName: props.assistantName,
-    assistantAvatar: props.assistantAvatar,
-    assistantAvatarUrl: props.assistantAvatarUrl,
-    userName: props.userName,
-    userAvatar: props.userAvatar,
-    basePath: props.basePath,
-    fullMessageAgentId: props.fullMessageAgentId,
-    localMediaPreviewRoots: props.localMediaPreviewRoots,
-    assistantAttachmentAuthToken: props.assistantAttachmentAuthToken,
-    canvasPluginSurfaceUrl: props.canvasPluginSurfaceUrl,
-    embedSandboxMode: props.embedSandboxMode,
-    allowExternalEmbedUrls: props.allowExternalEmbedUrls,
-    autoExpandToolCalls: props.autoExpandToolCalls,
+    canAbort: props.canAbort,
     realtimeTalkConversation: props.realtimeTalkConversation,
-    onOpenSidebar: props.onOpenSidebar,
-    onOpenWorkspaceFile: props.onOpenWorkspaceFile,
-    onOpenSessionCheckpoints: props.onOpenSessionCheckpoints,
-    onAssistantAttachmentLoaded: props.onAssistantAttachmentLoaded,
-    onRequestUpdate: requestUpdate,
-    onScrollToBottom: props.onScrollToBottom,
-    onChatScroll: props.onChatScroll,
-    onDraftChange: props.onDraftChange,
-    onSend: props.onSend,
-    onSetReply: props.onSetReply,
-    onFocusComposer: () =>
-      chatSection
-        ?.querySelector<HTMLTextAreaElement>(".agent-chat__composer-combobox > textarea")
-        ?.focus({ preventScroll: true }),
+    onContextMenu: (event) => {
+      const chatSection = (event.currentTarget as HTMLElement).closest(".card.chat");
+      handleChatContextMenu(event, {
+        paneId: props.paneId,
+        onSetReply: props.onSetReply,
+        onFocusComposer: () =>
+          chatSection
+            ?.querySelector<HTMLTextAreaElement>(".agent-chat__composer-combobox > textarea")
+            ?.focus({ preventScroll: true }),
+      });
+    },
   });
 
   const chatColumnFooter = renderChatComposer({
@@ -252,9 +232,6 @@ export function renderChat(props: ChatProps) {
 
   return html`
     <section
-      ${ref((element) => {
-        chatSection = element instanceof HTMLElement ? element : null;
-      })}
       class="card chat"
       style=${styleMap(
         props.chatMessageMaxWidth ? { "--chat-message-max-width": props.chatMessageMaxWidth } : {},
@@ -330,6 +307,21 @@ export function renderChat(props: ChatProps) {
         },
         requestUpdate,
       )}
+
+      <div class="chat-transcript-toolbar">
+        ${props.historyHasMore
+          ? html`
+              <button
+                type="button"
+                class="chat-load-older"
+                ?disabled=${props.historyLoadingOlder}
+                @click=${props.onLoadOlderHistory}
+              >
+                ${props.historyLoadingOlder ? "loading older rows…" : "load older rows"}
+              </button>
+            `
+          : nothing}
+      </div>
 
       <div
         class="chat-workbench ${props.sessionWorkspace?.collapsed

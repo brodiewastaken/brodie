@@ -1106,6 +1106,27 @@ describe("browser tool snapshot maxChars", () => {
     expect(opts.timeoutMs).toBe(12_345);
   });
 
+  it("returns a typed error for full-page element clipping", async () => {
+    const tool = createBrowserTool();
+    let caught: unknown;
+    try {
+      await tool.execute?.("call-1", {
+        action: "screenshot",
+        target: "host",
+        targetId: "tab-1",
+        fullPage: true,
+        ref: "e1",
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      code: "BROWSER_SCREENSHOT_INCOMPATIBLE_OPTIONS",
+    });
+    expect(browserActionsMocks.browserScreenshotAction).not.toHaveBeenCalled();
+  });
+
   it("passes configured image sanitization to screenshot image results", async () => {
     configMocks.loadConfig.mockReturnValue({
       browser: {},

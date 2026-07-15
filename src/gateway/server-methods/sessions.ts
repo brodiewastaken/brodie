@@ -11,8 +11,13 @@ import { GATEWAY_CLIENT_IDS } from "../../../packages/gateway-protocol/src/clien
 import {
   ErrorCodes,
   errorShape,
+  type ErrorShape,
+  type SessionArchiveResultRow,
   type SessionOperationEvent,
+  type SessionsArchiveResult,
+  type SessionsPatchParams,
   validateSessionsAbortParams,
+  validateSessionsArchiveParams,
   validateSessionsCleanupParams,
   validateSessionsCompactParams,
   validateSessionsCompactionBranchParams,
@@ -61,7 +66,13 @@ import {
   preflightSessionTranscriptForManualCompact,
   trimSessionTranscriptForManualCompact,
 } from "../../config/sessions/session-accessor.js";
+import { loadSessionStore } from "../../config/sessions/store.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import {
+  archiveCronSessionGeneration,
+  findLatestCronSessionArchiveInStore,
+  isStableCronSessionKey,
+} from "../../cron/session-lifecycle.js";
 import {
   measureDiagnosticsTimelineSpan,
   measureDiagnosticsTimelineSpanSync,
@@ -292,7 +303,7 @@ function emitSessionOperation(
 }
 
 function rejectWebchatSessionMutation(params: {
-  action: "patch" | "delete" | "compact" | "restore";
+  action: "archive" | "patch" | "delete" | "compact" | "restore";
   client: GatewayClient | null;
   isWebchatConnect: (params: GatewayClient["connect"] | null | undefined) => boolean;
   respond: RespondFn;
@@ -320,6 +331,193 @@ function isAgentMainSessionKey(cfg: OpenClawConfig, sessionKey: string): boolean
     return false;
   }
   return sessionKey === resolveAgentMainSessionKey({ cfg, agentId: parsed.agentId });
+}
+
+type AppliedSessionPatch = Extract<
+  Awaited<ReturnType<typeof applySessionPatchProjection>>,
+  { ok: true }
+>;
+
+type GuardedSessionPatchResult =
+  | {
+      ok: true;
+      applied: AppliedSessionPatch;
+      canonicalKey: string;
+      requestedAgentId?: string;
+      storePath: string;
+      targetAgentId: string;
+      patchModelCatalog?: Awaited<ReturnType<GatewayRequestContext["loadGatewayModelCatalog"]>>;
+    }
+  | {
+      ok: false;
+      error: ErrorShape;
+      kind: "protected" | "error";
+    };
+
+function protectedSessionPatchFailure(message: string): GuardedSessionPatchResult {
+  return {
+    ok: false,
+    error: errorShape(ErrorCodes.INVALID_REQUEST, message),
+    kind: "protected",
+  };
+}
+
+async function applyGuardedSessionPatch(params: {
+  cfg: OpenClawConfig;
+  context: GatewayRequestContext;
+  key: string;
+  patch: SessionsPatchParams;
+  requestedAgentId?: string;
+}): Promise<GuardedSessionPatchResult> {
+  const { target, storePath } = resolveGatewaySessionTargetFromKey(params.key, params.cfg, {
+    agentId: params.requestedAgentId,
+  });
+  const canonicalKey = target.canonicalKey ?? params.key;
+  const lifecycleEntry = loadSessionEntry(params.key, {
+    agentId: params.requestedAgentId,
+  }).entry;
+  const lifecycleIdentities = [canonicalKey, params.key, lifecycleEntry?.sessionId];
+  if (
+    params.patch.archived === true &&
+    isSessionLifecycleMutationActive(storePath, lifecycleIdentities)
+  ) {
+    return protectedSessionPatchFailure("Cannot archive a session with an active run.");
+  }
+
+  let patchModelCatalog:
+    | Awaited<ReturnType<GatewayRequestContext["loadGatewayModelCatalog"]>>
+    | undefined;
+  const loadPatchModelCatalog = async () => {
+    const catalog = await params.context.loadGatewayModelCatalog();
+    patchModelCatalog = catalog;
+    return catalog;
+  };
+  const applyPatch = async (): Promise<GuardedSessionPatchResult> => {
+    const currentLifecycleEntry = loadSessionEntry(params.key, {
+      agentId: params.requestedAgentId,
+    }).entry;
+    const lifecycleEntryRemoved =
+      lifecycleEntry !== undefined && currentLifecycleEntry === undefined;
+    const archiveTargetChanged =
+      params.patch.archived === true &&
+      (lifecycleEntry === undefined
+        ? currentLifecycleEntry !== undefined
+        : currentLifecycleEntry !== undefined &&
+          (currentLifecycleEntry.sessionId !== lifecycleEntry.sessionId ||
+            currentLifecycleEntry.lifecycleRevision !== lifecycleEntry.lifecycleRevision));
+    if (lifecycleEntryRemoved || archiveTargetChanged) {
+      return protectedSessionPatchFailure(`Session ${params.key} changed before patch. Retry.`);
+    }
+    if (params.patch.archived === true) {
+      if (canonicalKey === "global" || isAgentMainSessionKey(params.cfg, canonicalKey)) {
+        return protectedSessionPatchFailure("Cannot archive an agent's main session.");
+      }
+      const { entry } = loadSessionEntry(params.key, {
+        agentId: params.requestedAgentId,
+      });
+      const activeIdentities = [canonicalKey, params.key, entry?.sessionId];
+      if (
+        isSessionWorkAdmissionActive(storePath, activeIdentities) ||
+        replyRunRegistry.isActive(canonicalKey) ||
+        replyRunRegistry.isActive(params.key) ||
+        hasVisibleActiveSessionRun({
+          context: params.context,
+          requestedKey: params.key,
+          canonicalKey,
+          sessionId: entry?.sessionId,
+          defaultAgentId: resolveDefaultAgentId(params.cfg),
+        })
+      ) {
+        return protectedSessionPatchFailure("Cannot archive a session with an active run.");
+      }
+    }
+    const applied = await applySessionPatchProjection({
+      storePath,
+      skipMaintenance: params.patch.archived === true,
+      resolveTarget: ({ entries }) => {
+        const store = Object.fromEntries(
+          entries.map(({ sessionKey, entry }) => [sessionKey, entry]),
+        );
+        const { target: migratedTarget, primaryKey } = migrateAndPruneGatewaySessionStoreKey({
+          cfg: params.cfg,
+          key: params.key,
+          store,
+          agentId: params.requestedAgentId,
+        });
+        return { primaryKey, candidateKeys: migratedTarget.storeKeys };
+      },
+      project: async ({ primaryKey, existingEntry, entries }) =>
+        await projectSessionsPatchEntry({
+          cfg: params.cfg,
+          entries,
+          existingEntry,
+          storeKey: primaryKey,
+          agentId: params.requestedAgentId,
+          patch: params.patch,
+          loadGatewayModelCatalog: loadPatchModelCatalog,
+        }),
+    });
+    if (!applied.ok) {
+      return { ok: false, error: applied.error, kind: "error" };
+    }
+    return {
+      ok: true,
+      applied,
+      canonicalKey,
+      requestedAgentId: params.requestedAgentId,
+      storePath,
+      targetAgentId: target.agentId,
+      patchModelCatalog,
+    };
+  };
+  return await runExclusiveSessionLifecycleMutation({
+    scope: storePath,
+    identities: lifecycleIdentities,
+    run: applyPatch,
+  });
+}
+
+function publishAppliedSessionPatch(params: {
+  cfg: OpenClawConfig;
+  context: GatewayRequestContext;
+  patch: SessionsPatchParams;
+  result: Extract<GuardedSessionPatchResult, { ok: true }>;
+}): void {
+  triggerSessionPatchHook({
+    cfg: params.cfg,
+    sessionEntry: params.result.applied.entry,
+    sessionKey: params.result.canonicalKey,
+    patch: params.patch,
+  });
+  emitSessionsChanged(params.context, {
+    sessionKey: params.result.canonicalKey,
+    ...(params.result.canonicalKey === "global" && params.result.requestedAgentId
+      ? { agentId: params.result.requestedAgentId }
+      : {}),
+    reason: "patch",
+  });
+}
+
+async function mapWithConcurrency<Input, Output>(params: {
+  inputs: readonly Input[];
+  concurrency: number;
+  map: (input: Input, index: number) => Promise<Output>;
+}): Promise<Output[]> {
+  const outputs: Output[] = [];
+  let nextIndex = 0;
+  const worker = async () => {
+    while (nextIndex < params.inputs.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const input = params.inputs[index];
+      if (input !== undefined) {
+        outputs[index] = await params.map(input, index);
+      }
+    }
+  };
+  const workerCount = Math.min(params.concurrency, params.inputs.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return outputs;
 }
 
 async function createAgentMainSessionForSend(params: {
@@ -1952,6 +2150,98 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       });
     }
   },
+  "sessions.archive": async ({ params, respond, context, client, isWebchatConnect }) => {
+    if (!assertValidParams(params, validateSessionsArchiveParams, "sessions.archive", respond)) {
+      return;
+    }
+    if (rejectWebchatSessionMutation({ action: "archive", client, isWebchatConnect, respond })) {
+      return;
+    }
+    const cfg = context.getRuntimeConfig();
+    const rows = await mapWithConcurrency({
+      inputs: params.targets,
+      concurrency: 8,
+      map: async (target): Promise<SessionArchiveResultRow> => {
+        const key = normalizeOptionalString(target.key);
+        if (!key) {
+          return { key: target.key, status: "error", reason: "key required" };
+        }
+        if (key === "unknown") {
+          return { key, status: "protected", reason: "Unknown sessions are protected." };
+        }
+        const requestedAgent = resolveRequestedGlobalAgentId(cfg, key, target.agentId);
+        if (!requestedAgent.ok) {
+          return { key, status: "error", reason: requestedAgent.error.message };
+        }
+        try {
+          const resolvedTarget = resolveGatewaySessionTargetFromKey(key, cfg, {
+            agentId: requestedAgent.agentId,
+          });
+          const canonicalKey = resolvedTarget.target.canonicalKey ?? key;
+          if (isStableCronSessionKey(canonicalKey)) {
+            const store = loadSessionStore(resolvedTarget.storePath, { skipCache: true });
+            if (!store[canonicalKey]) {
+              const prior = findLatestCronSessionArchiveInStore({
+                store,
+                stableKey: canonicalKey,
+                idempotencyPrefix: "operator:",
+              });
+              if (prior) {
+                return {
+                  key,
+                  status: "archived",
+                  archivedKey: prior.archivedKey,
+                  sessionId: prior.entry.sessionId,
+                  relocated: false,
+                };
+              }
+            }
+          }
+          const guarded = await applyGuardedSessionPatch({
+            cfg,
+            context,
+            key,
+            patch: { key, agentId: target.agentId, archived: true },
+            requestedAgentId: requestedAgent.agentId,
+          });
+          if (!guarded.ok) {
+            return { key, status: guarded.kind, reason: guarded.error.message };
+          }
+          publishAppliedSessionPatch({
+            cfg,
+            context,
+            patch: { key, agentId: target.agentId, archived: true },
+            result: guarded,
+          });
+          if (isStableCronSessionKey(guarded.canonicalKey)) {
+            const relocated = await archiveCronSessionGeneration({
+              storePath: guarded.storePath,
+              stableKey: guarded.canonicalKey,
+              expectedSessionId: guarded.applied.entry.sessionId,
+              expectedLifecycleRevision: guarded.applied.entry.lifecycleRevision,
+              idempotencyId: `operator:${guarded.applied.entry.sessionId}`,
+            });
+            emitSessionsChanged(context, {
+              sessionKey: relocated.archivedKey,
+              reason: "archive",
+            });
+            return {
+              key,
+              status: "archived",
+              archivedKey: relocated.archivedKey,
+              sessionId: relocated.entry.sessionId,
+              relocated: true,
+            };
+          }
+          return { key, status: "archived" };
+        } catch (error) {
+          return { key, status: "error", reason: formatErrorMessage(error) };
+        }
+      },
+    });
+    const result: SessionsArchiveResult = { rows };
+    respond(true, result, undefined);
+  },
   "sessions.patch": async ({ params, respond, context, client, isWebchatConnect }) => {
     if (!assertValidParams(params, validateSessionsPatchParams, "sessions.patch", respond)) {
       return;
@@ -1971,132 +2261,31 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       respond(false, undefined, requestedAgent.error);
       return;
     }
-    const requestedAgentId = requestedAgent.agentId;
-    const { target, storePath } = resolveGatewaySessionTargetFromKey(key, cfg, {
-      agentId: requestedAgentId,
-    });
-    const canonicalKey = target.canonicalKey ?? key;
-    const lifecycleEntry = loadSessionEntry(key, { agentId: requestedAgentId }).entry;
-    const lifecycleIdentities = [canonicalKey, key, lifecycleEntry?.sessionId];
-    if (p.archived === true && isSessionLifecycleMutationActive(storePath, lifecycleIdentities)) {
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "Cannot archive a session with an active run."),
-      );
-      return;
-    }
-    let patchModelCatalog: Awaited<ReturnType<typeof context.loadGatewayModelCatalog>> | undefined;
-    const loadPatchModelCatalog = async () => {
-      const catalog = await context.loadGatewayModelCatalog();
-      patchModelCatalog = catalog;
-      return catalog;
-    };
-    const applyPatch = async () => {
-      const currentLifecycleEntry = loadSessionEntry(key, { agentId: requestedAgentId }).entry;
-      // A reset queued ahead of archive can rotate the row before this mutation starts.
-      // Never apply stale destructive intent to the replacement session identity.
-      const lifecycleEntryRemoved =
-        lifecycleEntry !== undefined && currentLifecycleEntry === undefined;
-      const archiveTargetChanged =
-        p.archived === true &&
-        (lifecycleEntry === undefined
-          ? currentLifecycleEntry !== undefined
-          : currentLifecycleEntry !== undefined &&
-            (currentLifecycleEntry.sessionId !== lifecycleEntry.sessionId ||
-              currentLifecycleEntry.lifecycleRevision !== lifecycleEntry.lifecycleRevision));
-      if (lifecycleEntryRemoved || archiveTargetChanged) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, `Session ${key} changed before patch. Retry.`),
-        );
-        return null;
-      }
-      if (p.archived === true) {
-        if (canonicalKey === "global" || isAgentMainSessionKey(cfg, canonicalKey)) {
-          respond(
-            false,
-            undefined,
-            errorShape(ErrorCodes.INVALID_REQUEST, "Cannot archive an agent's main session."),
-          );
-          return null;
-        }
-        const { entry } = loadSessionEntry(key, { agentId: requestedAgentId });
-        const activeIdentities = [canonicalKey, key, entry?.sessionId];
-        if (
-          isSessionWorkAdmissionActive(storePath, activeIdentities) ||
-          replyRunRegistry.isActive(canonicalKey) ||
-          replyRunRegistry.isActive(key) ||
-          hasVisibleActiveSessionRun({
-            context,
-            requestedKey: key,
-            canonicalKey,
-            sessionId: entry?.sessionId,
-            defaultAgentId: resolveDefaultAgentId(cfg),
-          })
-        ) {
-          respond(
-            false,
-            undefined,
-            errorShape(ErrorCodes.INVALID_REQUEST, "Cannot archive a session with an active run."),
-          );
-          return null;
-        }
-      }
-      return await applySessionPatchProjection({
-        storePath,
-        resolveTarget: ({ entries }) => {
-          const store = Object.fromEntries(
-            entries.map(({ sessionKey, entry }) => [sessionKey, entry]),
-          );
-          const { target: migratedTarget, primaryKey } = migrateAndPruneGatewaySessionStoreKey({
-            cfg,
-            key,
-            store,
-            agentId: requestedAgentId,
-          });
-          return { primaryKey, candidateKeys: migratedTarget.storeKeys };
-        },
-        project: async ({ primaryKey, existingEntry, entries }) =>
-          await projectSessionsPatchEntry({
-            cfg,
-            entries,
-            existingEntry,
-            storeKey: primaryKey,
-            agentId: requestedAgentId,
-            patch: p,
-            loadGatewayModelCatalog: loadPatchModelCatalog,
-          }),
-      });
-    };
-    const applied = await runExclusiveSessionLifecycleMutation({
-      scope: storePath,
-      identities: lifecycleIdentities,
-      run: applyPatch,
-    });
-    if (!applied) {
-      return;
-    }
-    if (!applied.ok) {
-      respond(false, undefined, applied.error);
-      return;
-    }
-
-    triggerSessionPatchHook({
+    const guarded = await applyGuardedSessionPatch({
       cfg,
-      sessionEntry: applied.entry,
-      sessionKey: target.canonicalKey ?? key,
+      context,
+      key,
       patch: p,
+      requestedAgentId: requestedAgent.agentId,
+    });
+    if (!guarded.ok) {
+      respond(false, undefined, guarded.error);
+      return;
+    }
+    publishAppliedSessionPatch({
+      cfg,
+      context,
+      patch: p,
+      result: guarded,
     });
 
-    const parsed = parseAgentSessionKey(target.canonicalKey ?? key);
+    const parsed = parseAgentSessionKey(guarded.canonicalKey);
     const agentId = normalizeAgentId(
-      target.canonicalKey === "global"
-        ? target.agentId
+      guarded.canonicalKey === "global"
+        ? guarded.targetAgentId
         : (parsed?.agentId ?? resolveDefaultAgentId(cfg)),
     );
-    const resolved = resolveSessionModelRef(cfg, applied.entry, agentId);
+    const resolved = resolveSessionModelRef(cfg, guarded.applied.entry, agentId);
     const resolvedDisplayModel = resolveSessionDisplayModelIdentityRef({
       cfg,
       agentId,
@@ -2108,12 +2297,12 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       agentId,
       provider: resolvedDisplayModel.provider ?? resolved.provider,
       model: resolvedDisplayModel.model ?? resolved.model,
-      sessionKey: target.canonicalKey ?? key,
-      entry: applied.entry,
-      modelCatalog: patchModelCatalog,
+      sessionKey: guarded.canonicalKey,
+      entry: guarded.applied.entry,
+      modelCatalog: guarded.patchModelCatalog,
     });
     const resolvedThinkingMetadata =
-      patchModelCatalog === undefined
+      guarded.patchModelCatalog === undefined
         ? {}
         : {
             thinkingLevel: thinkingProjection.effectiveThinkingLevel,
@@ -2121,9 +2310,9 @@ export const sessionsHandlers: GatewayRequestHandlers = {
           };
     const result: SessionsPatchResult = {
       ok: true,
-      path: storePath,
-      key: target.canonicalKey,
-      entry: applied.entry,
+      path: guarded.storePath,
+      key: guarded.canonicalKey,
+      entry: guarded.applied.entry,
       resolved: {
         modelProvider: resolvedDisplayModel.provider,
         model: resolvedDisplayModel.model,
@@ -2132,13 +2321,6 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       },
     };
     respond(true, result, undefined);
-    emitSessionsChanged(context, {
-      sessionKey: target.canonicalKey,
-      ...(target.canonicalKey === "global" && requestedAgentId
-        ? { agentId: requestedAgentId }
-        : {}),
-      reason: "patch",
-    });
   },
   "sessions.pluginPatch": async ({ params, respond, context, client, isWebchatConnect }) => {
     if (
@@ -2268,11 +2450,26 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       agentId: requestedAgentId,
     });
     const mainKey = resolveMainSessionKey(cfg);
+    const allowMainSessionDelete =
+      cfg.gateway?.controlUi?.security?.allowMainSessionDelete === true;
+    // Keep the bare alias as deliberate friction even when canonical-main
+    // deletion is enabled.
+    if (allowMainSessionDelete && key.trim().toLowerCase() === "main") {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `Cannot delete via the "main" alias; use the canonical session key instead (${mainKey}).`,
+        ),
+      );
+      return;
+    }
     const isSelectedNonDefaultGlobal =
       target.canonicalKey === "global" &&
       requestedAgentId !== undefined &&
       requestedAgentId !== resolveDefaultAgentId(cfg);
-    if (target.canonicalKey === mainKey && !isSelectedNonDefaultGlobal) {
+    if (!allowMainSessionDelete && target.canonicalKey === mainKey && !isSelectedNonDefaultGlobal) {
       respond(
         false,
         undefined,

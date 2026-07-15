@@ -2246,6 +2246,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H1: Canonical conversation sessions
   - H2: operator commands
   - H2: reset context
+  - H2: v2026.7.1 absorption
 
 ## concepts/channel-docking.md
 
@@ -2348,8 +2349,10 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Headings:
   - H1: Conversation scheduler
   - H2: Ordering and concurrency
+  - H2: Human inbound envelope
   - H2: Debounce
   - H2: Durability and recovery
+  - H2: v2026.7.1 absorption
 
 ## concepts/delegate-architecture.md
 
@@ -2403,6 +2406,17 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Controller ownership
   - H2: Completion and waiting
   - H2: Restart recovery
+  - H2: v2026.7.1 absorption
+
+## concepts/exact-operator-state.md
+
+- Route: /concepts/exact-operator-state
+- Headings:
+  - H1: Exact operator state
+  - H2: Transcript timeline
+  - H2: Fixed status ownership
+  - H2: Independent single-operator flags
+  - H2: Browser and session behavior
   - H2: v2026.7.1 absorption
 
 ## concepts/experimental-features.md
@@ -7545,7 +7559,8 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Headings:
   - H2: Getting started
   - H2: Non-interactive setup
-  - H2: Built-in catalog
+  - H2: Serverless catalog
+  - H2: Reasoning levels
   - H2: Custom Fireworks model ids
   - H2: Related
 

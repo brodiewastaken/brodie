@@ -2,6 +2,7 @@ import type { SessionTranscriptReadScope } from "../config/sessions/session-acce
 import { resolveSessionTranscriptReadTarget } from "../config/sessions/session-accessor.js";
 import type {
   ReadRecentSessionMessagesOptions,
+  ReadIndexedSessionWindowOptions,
   ReadSessionMessagesAsyncOptions,
   SessionTranscriptUsageSnapshot,
 } from "./session-utils.fs.js";
@@ -19,6 +20,10 @@ import {
   readRecentSessionUsageFromTranscript as readRecentSessionUsageFromTranscriptFile,
   readRecentSessionUsageFromTranscriptAsync as readRecentSessionUsageFromTranscriptAsyncFile,
   readSessionMessageByIdAsync as readSessionMessageByIdAsyncFile,
+  readSessionMessageChunkBySeqAsync as readSessionMessageChunkBySeqAsyncFile,
+  readSessionMessageBySeqAsync as readSessionMessageBySeqAsyncFile,
+  readSessionMessagesBeforeSeqAsync as readSessionMessagesBeforeSeqAsyncFile,
+  readSessionMessagesTailAsync as readSessionMessagesTailAsyncFile,
   readSessionMessageCount as readSessionMessageCountFile,
   readSessionMessageCountAsync as readSessionMessageCountAsyncFile,
   readSessionMessages as readSessionMessagesFile,
@@ -31,7 +36,11 @@ import {
   visitSessionMessagesAsync as visitSessionMessagesAsyncFile,
 } from "./session-utils.fs.js";
 
-export type { ReadRecentSessionMessagesOptions, ReadSessionMessagesAsyncOptions };
+export type {
+  ReadIndexedSessionWindowOptions,
+  ReadRecentSessionMessagesOptions,
+  ReadSessionMessagesAsyncOptions,
+};
 export { attachOpenClawTranscriptMeta, capArrayByJsonBytes } from "./session-utils.fs.js";
 
 export type { SessionTranscriptReadScope };
@@ -57,6 +66,15 @@ type ReadSessionMessageByIdResult = {
   seq?: number;
   oversized: boolean;
   found: boolean;
+};
+
+type ReadSessionMessageChunkBySeqResult = {
+  found: boolean;
+  seq?: number;
+  offset?: number;
+  totalBytes?: number;
+  bytes?: Uint8Array;
+  done?: boolean;
 };
 
 type FileBackedReadScope = {
@@ -194,6 +212,74 @@ export async function readSessionMessageByIdAsync(
     target.storePath,
     target.sessionFile,
     messageId,
+    { ...opts, agentId: target.agentId },
+  );
+}
+
+/** Reads an absolute-sequence transcript tail through the reader seam. */
+export async function readSessionMessagesTailAsync(
+  scope: SessionTranscriptReadScope,
+  opts?: ReadIndexedSessionWindowOptions,
+): Promise<unknown[]> {
+  const target = resolveFileBackedReadScope(scope);
+  return await readSessionMessagesTailAsyncFile(
+    target.sessionId,
+    target.storePath,
+    target.sessionFile,
+    opts,
+    target.agentId,
+  );
+}
+
+/** Reads transcript rows below an absolute sequence cursor through the reader seam. */
+export async function readSessionMessagesBeforeSeqAsync(
+  scope: SessionTranscriptReadScope,
+  beforeSeq: number,
+  opts?: ReadIndexedSessionWindowOptions,
+): Promise<unknown[]> {
+  const target = resolveFileBackedReadScope(scope);
+  return await readSessionMessagesBeforeSeqAsyncFile(
+    target.sessionId,
+    target.storePath,
+    target.sessionFile,
+    beforeSeq,
+    opts,
+    target.agentId,
+  );
+}
+
+/** Fetches one full transcript row by absolute sequence through the reader seam. */
+export async function readSessionMessageBySeqAsync(
+  scope: SessionTranscriptReadScope,
+  seq: number,
+  opts?: { allowResetArchiveFallback?: boolean },
+): Promise<ReadSessionMessageByIdResult> {
+  const target = resolveFileBackedReadScope(scope);
+  return await readSessionMessageBySeqAsyncFile(
+    target.sessionId,
+    target.storePath,
+    target.sessionFile,
+    seq,
+    { ...opts, agentId: target.agentId },
+  );
+}
+
+/** Reads a bounded byte range from one persisted transcript row. */
+export async function readSessionMessageChunkBySeqAsync(
+  scope: SessionTranscriptReadScope,
+  seq: number,
+  chunkOffset: number,
+  chunkBytes: number,
+  opts?: { allowResetArchiveFallback?: boolean },
+): Promise<ReadSessionMessageChunkBySeqResult> {
+  const target = resolveFileBackedReadScope(scope);
+  return await readSessionMessageChunkBySeqAsyncFile(
+    target.sessionId,
+    target.storePath,
+    target.sessionFile,
+    seq,
+    chunkOffset,
+    chunkBytes,
     { ...opts, agentId: target.agentId },
   );
 }

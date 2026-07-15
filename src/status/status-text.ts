@@ -1,6 +1,9 @@
 import os from "node:os";
 import path from "node:path";
-import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
+import {
+  type FastMode,
+  normalizeOptionalLowercaseString,
+} from "@openclaw/normalization-core/string-coerce";
 import {
   resolveAgentConfig,
   resolveAgentDir,
@@ -20,6 +23,7 @@ import {
 import { resolveDefaultModelForAgent } from "../agents/model-selection.js";
 import { listOpenAIAuthProfileProvidersForAgentRuntime } from "../agents/openai-routing.js";
 import { resolveProviderIdForAuth } from "../agents/provider-auth-aliases.js";
+import { resolveRunPolicyForConfiguredBrain } from "../agents/run-policy.js";
 import { resolveSessionRuntimeOverrideForProvider } from "../agents/session-runtime-compat.js";
 import {
   resolveInternalSessionKey,
@@ -57,7 +61,7 @@ import {
   shouldUseCodexSyntheticUsageForRuntime,
 } from "./codex-synthetic-usage.js";
 import { resolveActiveFallbackState } from "./fallback-notice-state.js";
-import { formatCompactPluginHealthLine } from "./status-plugin-health.js";
+import { collectSchedulerStatusLine, formatRunPolicyStatusLine } from "./status-brodie-operator.js";
 import type { BuildStatusTextParams } from "./status-text.types.js";
 
 // Status text assembly gathers runtime/model/session/task facts, then delegates
@@ -114,10 +118,6 @@ const loadStatusSubagentsRuntime = createLazyRuntimeModule(
 );
 
 const loadStatusQueueRuntime = createLazyRuntimeModule(() => import("./status-queue.runtime.js"));
-
-const loadStatusPluginHealthRuntime = createLazyRuntimeModule(
-  () => import("./status-plugin-health.runtime.js"),
-);
 
 // Context lookup stays synchronous/non-refreshing so status output does not
 // trigger provider/catalog IO while rendering a command response.
@@ -280,12 +280,23 @@ function buildStatusUptimeLine(): string {
   return `⏱️ Uptime: gateway ${formatStatusUptimeDuration(gatewayUptimeMs)} · system ${formatStatusUptimeDuration(systemUptimeMs)}`;
 }
 
-async function resolveRuntimePluginHealthLine(): Promise<string | undefined> {
+function resolveStatusRunPolicyLine(params: {
+  cfg: OpenClawConfig;
+  model: string;
+  fastMode: FastMode;
+  authProfileId?: string;
+}): string {
   try {
-    const { collectRuntimePluginHealthSnapshot } = await loadStatusPluginHealthRuntime();
-    return formatCompactPluginHealthLine(collectRuntimePluginHealthSnapshot());
+    return formatRunPolicyStatusLine(
+      resolveRunPolicyForConfiguredBrain({
+        cfg: params.cfg,
+        explicitModel: params.model,
+        explicitFastMode: params.fastMode === true,
+        authProfileId: params.authProfileId,
+      }),
+    );
   } catch {
-    return "⚠️ Plugins: health unavailable";
+    return "🧭 Run policy: unavailable (invalid configuration)";
   }
 }
 
@@ -555,9 +566,13 @@ export async function buildStatusText(params: BuildStatusTextParams): Promise<st
     allowPluginNormalization: false,
   });
   const configuredDefaultModelLabel = `${configuredDefaultRef.provider}/${configuredDefaultRef.model}`;
-  const pluginHealthLine = Object.hasOwn(params, "pluginHealthLineOverride")
-    ? params.pluginHealthLineOverride
-    : await resolveRuntimePluginHealthLine();
+  const runPolicyLine = resolveStatusRunPolicyLine({
+    cfg,
+    model: modelRefs.selected.label,
+    fastMode: effectiveFastMode,
+    authProfileId: sessionEntry?.authProfileOverride,
+  });
+  const schedulerLine = await collectSchedulerStatusLine();
   const channelFeatureLine = resolveStatusChannelFeatureLine({
     cfg,
     statusChannel,
@@ -658,7 +673,8 @@ export async function buildStatusText(params: BuildStatusTextParams): Promise<st
     },
     subagentsLine,
     taskLine,
-    pluginHealthLine,
+    runPolicyLine,
+    schedulerLine,
     channelFeatureLine,
     mediaDecisions: params.mediaDecisions,
     includeTranscriptUsage: params.includeTranscriptUsage ?? true,

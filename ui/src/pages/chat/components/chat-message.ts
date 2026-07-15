@@ -1899,6 +1899,106 @@ type MessageActionDetails = {
   shouldFetchFullMessage: boolean;
 };
 
+type ConversationalActionProjection = {
+  action: string;
+  outcome: string;
+  visibleMessages: string[];
+  nativeThinking?: string[];
+  invisibleThinking?: string;
+  visibleReaction?: string;
+  channel?: string;
+  target?: string;
+  receipt?: Record<string, unknown>;
+};
+
+function resolveConversationalActionProjection(
+  message: Record<string, unknown>,
+): ConversationalActionProjection | null {
+  const value = message.openclawConversationalAction;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const action = typeof record.action === "string" ? record.action : "unknown";
+  const outcome = typeof record.outcome === "string" ? record.outcome : "unknown";
+  const visibleMessages = Array.isArray(record.visibleMessages)
+    ? record.visibleMessages.filter((item): item is string => typeof item === "string")
+    : [];
+  const receipt =
+    record.receipt && typeof record.receipt === "object" && !Array.isArray(record.receipt)
+      ? (record.receipt as Record<string, unknown>)
+      : undefined;
+  return {
+    action,
+    outcome,
+    visibleMessages,
+    ...(Array.isArray(record.nativeThinking)
+      ? {
+          nativeThinking: record.nativeThinking.filter(
+            (entry): entry is string => typeof entry === "string" && Boolean(entry.trim()),
+          ),
+        }
+      : {}),
+    ...(typeof record.invisibleThinking === "string"
+      ? { invisibleThinking: record.invisibleThinking }
+      : {}),
+    ...(typeof record.visibleReaction === "string"
+      ? { visibleReaction: record.visibleReaction }
+      : {}),
+    ...(typeof record.channel === "string" ? { channel: record.channel } : {}),
+    ...(typeof record.target === "string" ? { target: record.target } : {}),
+    ...(receipt ? { receipt } : {}),
+  };
+}
+
+function renderConversationalAction(action: ConversationalActionProjection) {
+  return html`
+    <section
+      class="chat-conversation-action"
+      data-action=${action.action}
+      data-outcome=${action.outcome}
+    >
+      <header class="chat-conversation-action__header">
+        <span class="chat-conversation-action__kind">${action.action}</span>
+        <span class="chat-conversation-action__outcome">${action.outcome}</span>
+        ${action.channel || action.target
+          ? html`<span class="chat-conversation-action__route">
+              ${[action.channel, action.target].filter(Boolean).join(" · ")}
+            </span>`
+          : nothing}
+      </header>
+      ${action.nativeThinking?.length
+        ? html`<details class="chat-conversation-action__thinking" open>
+            <summary>${t("chat.transcript.nativeThinking")}</summary>
+            ${action.nativeThinking.map(
+              (thinking) => html`<div>${unsafeHTML(toSanitizedMarkdownHtml(thinking))}</div>`,
+            )}
+          </details>`
+        : nothing}
+      ${action.invisibleThinking
+        ? html`<details class="chat-conversation-action__rationale">
+            <summary>${t("chat.transcript.privateThought")}</summary>
+            <div>${unsafeHTML(toSanitizedMarkdownHtml(action.invisibleThinking))}</div>
+          </details>`
+        : nothing}
+      ${action.visibleMessages.map(
+        (message) => html`<div class="chat-conversation-action__bubble">
+          ${unsafeHTML(toSanitizedMarkdownHtml(message))}
+        </div>`,
+      )}
+      ${action.visibleReaction
+        ? html`<div class="chat-conversation-action__reaction">${action.visibleReaction}</div>`
+        : nothing}
+      ${action.receipt
+        ? html`<details class="chat-conversation-action__receipt">
+            <summary>${t("chat.transcript.committedReceipt")}</summary>
+            <pre>${JSON.stringify(action.receipt, null, 2)}</pre>
+          </details>`
+        : nothing}
+    </section>
+  `;
+}
+
 function resolveNormalizedMessageMarkdown(normalizedMessage: NormalizedMessage): string {
   return normalizedMessage.content
     .reduce<string[]>((lines, item) => {
@@ -2000,6 +2100,7 @@ function renderGroupedMessage(
   const sourceRole = normalizeRoleForGrouping(role);
   const normalizedMessage = normalizeMessage(message);
   const normalizedRole = normalizeRoleForGrouping(normalizedMessage.role);
+  const conversationalAction = resolveConversationalActionProjection(m);
   const isToolShell = normalizedRole === "tool";
   const isStandaloneToolMessage = isStandaloneToolMessageForDisplay(message);
 
@@ -2027,7 +2128,7 @@ function renderGroupedMessage(
   );
   const extractedThinking =
     opts.showReasoning && role === "assistant" ? extractThinkingCached(message) : null;
-  const markdownBase = extractedText?.trim() ? extractedText : null;
+  const markdownBase = !conversationalAction && extractedText?.trim() ? extractedText : null;
   const reasoningMarkdown = extractedThinking ? formatReasoningMarkdown(extractedThinking) : null;
   const markdown = markdownBase;
   const markdownRenderOptions: MarkdownRenderOptions = {
@@ -2056,6 +2157,7 @@ function renderGroupedMessage(
     !hasPairingQrExpiryNotices &&
     visibleAttachments.length === 0 &&
     assistantViewBlocks.length === 0 &&
+    !conversationalAction &&
     !normalizedMessage.replyTarget
   ) {
     return nothing;
@@ -2219,33 +2321,38 @@ function renderGroupedMessage(
           `
         : html`
             ${renderPairingQrExpiryNotices(pairingQrExpiryNotices)}
-            ${renderMessageImages(images, imageRenderOptions)}
-            ${renderAssistantAttachments(
-              visibleAttachments,
-              opts.localMediaPreviewRoots ?? [],
-              opts.basePath,
-              opts.assistantAttachmentAuthToken,
-              opts.onRequestUpdate,
-              opts.onAssistantAttachmentLoaded,
-            )}
-            ${reasoningMarkdown
+            ${conversationalAction ? renderConversationalAction(conversationalAction) : nothing}
+            ${conversationalAction ? nothing : renderMessageImages(images, imageRenderOptions)}
+            ${conversationalAction
+              ? nothing
+              : renderAssistantAttachments(
+                  visibleAttachments,
+                  opts.localMediaPreviewRoots ?? [],
+                  opts.basePath,
+                  opts.assistantAttachmentAuthToken,
+                  opts.onRequestUpdate,
+                  opts.onAssistantAttachmentLoaded,
+                )}
+            ${reasoningMarkdown && !conversationalAction
               ? html`<div class="chat-thinking">
                   ${unsafeHTML(toSanitizedMarkdownHtml(reasoningMarkdown))}
                 </div>`
               : nothing}
-            ${assistantViewContent}
-            ${jsonResult
-              ? html`<details class="chat-json-collapse">
-                  <summary class="chat-json-summary">
-                    <span class="chat-json-badge">JSON</span>
-                    <span class="chat-json-label">${jsonSummaryLabel(jsonResult.parsed)}</span>
-                  </summary>
-                  <pre class="chat-json-content"><code>${jsonResult.pretty}</code></pre>
-                </details>`
-              : markdown
-                ? renderMarkdownText(markdown, opts.isStreaming, markdownRenderOptions)
-                : nothing}
-            ${hasToolCards
+            ${conversationalAction ? nothing : assistantViewContent}
+            ${conversationalAction
+              ? nothing
+              : jsonResult
+                ? html`<details class="chat-json-collapse">
+                    <summary class="chat-json-summary">
+                      <span class="chat-json-badge">JSON</span>
+                      <span class="chat-json-label">${jsonSummaryLabel(jsonResult.parsed)}</span>
+                    </summary>
+                    <pre class="chat-json-content"><code>${jsonResult.pretty}</code></pre>
+                  </details>`
+                : markdown
+                  ? renderMarkdownText(markdown, opts.isStreaming, markdownRenderOptions)
+                  : nothing}
+            ${hasToolCards && !conversationalAction
               ? renderInlineToolCards(toolCards, {
                   messageKey,
                   sessionKey: opts.sessionKey,

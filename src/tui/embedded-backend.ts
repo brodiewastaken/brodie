@@ -30,6 +30,11 @@ import {
 } from "../config/sessions.js";
 import { applySessionPatchProjection } from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import {
+  BOUNDED_CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES,
+  enforceBoundedChatHistoryBudget,
+  replaceOversizedBoundedChatHistoryMessages,
+} from "../gateway/bounded-chat-history.js";
 import { isChatStopCommandText } from "../gateway/chat-abort.js";
 import {
   projectRecentChatDisplayMessages,
@@ -44,12 +49,7 @@ import {
   shouldSuppressAssistantEventForLiveChat,
 } from "../gateway/live-chat-projector.js";
 import { getMaxChatHistoryMessagesBytes } from "../gateway/server-constants.js";
-import {
-  augmentChatHistoryWithCanvasBlocks,
-  CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES,
-  enforceChatHistoryFinalBudget,
-  replaceOversizedChatHistoryMessages,
-} from "../gateway/server-methods/chat.js";
+import { augmentChatHistoryWithCanvasBlocks } from "../gateway/server-methods/chat.js";
 import { loadGatewayModelCatalog } from "../gateway/server-model-catalog.js";
 import { createGatewaySession } from "../gateway/session-create-service.js";
 import { performGatewaySessionReset } from "../gateway/session-reset-service.js";
@@ -545,13 +545,19 @@ export class EmbeddedTuiBackend implements TuiBackend {
         maxMessages: max,
       }),
     );
-    const perMessageHardCap = Math.min(CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES, maxHistoryBytes);
-    const replaced = replaceOversizedChatHistoryMessages({
+    const perMessageHardCap = Math.min(
+      BOUNDED_CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES,
+      maxHistoryBytes,
+    );
+    const replaced = replaceOversizedBoundedChatHistoryMessages({
       messages: normalized,
       maxSingleMessageBytes: perMessageHardCap,
     });
     const capped = capArrayByJsonBytes(replaced.messages, maxHistoryBytes).items;
-    const bounded = enforceChatHistoryFinalBudget({ messages: capped, maxBytes: maxHistoryBytes });
+    const bounded = enforceBoundedChatHistoryBudget({
+      messages: capped,
+      maxBytes: maxHistoryBytes,
+    });
     const messages = bounded.messages;
 
     let thinkingLevel = entry?.thinkingLevel;

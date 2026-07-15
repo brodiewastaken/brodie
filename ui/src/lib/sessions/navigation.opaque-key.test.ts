@@ -3,7 +3,7 @@ import { resolveSessionKey, searchForSession } from "./navigation.js";
 
 describe("opaque session navigation", () => {
   it("round trips the complete canonical key as query data", () => {
-    const key = "agent:main:conversation-v1:8:discord|7:default|7:channel|7:room/a?|-";
+    const key = "agent:main:conversation:discord:default:channel:room%2Fa%3F";
     const search = searchForSession(key);
     expect(search).toContain(encodeURIComponent(key));
     expect(new URLSearchParams(search).get("session")).toBe(key);

@@ -13,6 +13,16 @@
   margin-bottom: 14px;
 }
 
+.sessions-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sessions-archive-all-summary {
+  white-space: pre-wrap;
+}
+
 .sessions-header__title {
   display: flex;
   align-items: center;
@@ -299,8 +309,8 @@
 .session-key-cell {
   display: grid;
   gap: 3px;
-  min-width: 0;
-  max-width: 340px;
+  min-width: max-content;
+  width: max-content;
 }
 
 .session-key-cell__primary {
@@ -312,9 +322,8 @@
 
 .session-key-cell__primary > a,
 .session-key-cell__primary > span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: max-content;
+  overflow-wrap: normal;
   white-space: nowrap;
 }
 
@@ -710,8 +719,7 @@
 .session-details-row td {
   padding: 0;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 34%),
-    var(--bg-accent);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 34%), var(--bg-accent);
 }
 
 .session-details-panel {

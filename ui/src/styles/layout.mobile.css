@@ -78,7 +78,7 @@
   .chat-controls__agent,
   .chat-controls__model {
     min-width: 0;
-    max-width: none;
+    max-width: unset;
   }
 
   .chat-controls__session select,
@@ -862,7 +862,7 @@
   }
 
   .session-key-cell {
-    max-width: 200px;
+    max-width: none;
   }
 
   .session-details-panel {
@@ -882,7 +882,14 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .session-key-cell .session-link,
+  .session-key-cell .session-link {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+    overflow-wrap: normal;
+    word-break: normal;
+  }
+
   .session-key-cell .session-key-display-name {
     overflow: hidden;
     text-overflow: ellipsis;
@@ -946,6 +953,6 @@
   }
 
   .session-key-cell {
-    max-width: 140px;
+    max-width: unset;
   }
 }

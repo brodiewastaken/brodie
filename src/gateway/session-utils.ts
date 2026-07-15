@@ -2270,26 +2270,31 @@ export function buildGatewaySessionRow(params: {
         entry,
         rowContext: params.rowContext,
       }) ?? resolveNonNegativeNumber(transcriptUsage?.estimatedCostUsd));
-  const contextTokens = lightweight
-    ? (resolvePositiveNumber(entry?.contextTokens) ??
-      resolvePositiveNumber(
-        resolveContextTokensForModel({
-          cfg,
+  const contextCatalogEntry =
+    params.modelCatalog && rowModelProvider && rowModel
+      ? findModelCatalogEntry(params.modelCatalog, {
           provider: rowModelProvider,
-          model: rowModel,
-          allowAsyncLoad: false,
-        }),
-      ))
-    : (resolvePositiveNumber(entry?.contextTokens) ??
-      resolvePositiveNumber(transcriptUsage?.contextTokens) ??
-      resolvePositiveNumber(
-        resolveContextTokensForModel({
-          cfg,
-          provider: rowModelProvider,
-          model: rowModel,
-          allowAsyncLoad: false,
-        }),
-      ));
+          modelId: rowModel,
+        })
+      : undefined;
+  const resolvedModelContextTokens = resolvePositiveNumber(
+    resolveContextTokensForModel({
+      cfg,
+      provider: rowModelProvider,
+      model: rowModel,
+      modelContextTokens: contextCatalogEntry?.contextTokens,
+      modelContextWindow: contextCatalogEntry?.contextWindow,
+      allowAsyncLoad: false,
+    }),
+  );
+  const recordedContextTokens = [
+    resolvePositiveNumber(entry?.contextTokens),
+    ...(lightweight ? [] : [resolvePositiveNumber(transcriptUsage?.contextTokens)]),
+  ].filter((value): value is number => value !== undefined);
+  const contextTokens =
+    resolvedModelContextTokens === undefined
+      ? recordedContextTokens[0]
+      : Math.min(resolvedModelContextTokens, ...recordedContextTokens);
 
   let derivedTitle: string | undefined;
   let lastMessagePreview: string | undefined;
@@ -2642,6 +2647,9 @@ function resolveSessionsListLimit(
   opts: SessionsListParams,
   defaultLimit?: number,
 ): number | undefined {
+  if (opts.allUnarchived === true) {
+    return undefined;
+  }
   if (typeof opts.limit !== "number" || !Number.isFinite(opts.limit)) {
     return defaultLimit;
   }
@@ -2649,6 +2657,9 @@ function resolveSessionsListLimit(
 }
 
 function resolveSessionsListOffset(opts: SessionsListParams): number {
+  if (opts.allUnarchived === true) {
+    return 0;
+  }
   if (typeof opts.offset !== "number" || !Number.isFinite(opts.offset)) {
     return 0;
   }
@@ -2776,7 +2787,7 @@ function filterSessionEntries(params: {
     })
     .filter(([, entry]) => {
       const archived = entry?.archivedAt !== undefined;
-      return opts.archived === true ? archived : !archived;
+      return opts.allUnarchived === true || opts.archived !== true ? !archived : archived;
     })
     .filter(([, entry]) => {
       if (!label) {

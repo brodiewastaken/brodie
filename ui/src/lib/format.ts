@@ -211,6 +211,22 @@ export function parseSessionKeyParts(
   if (afterAgent.startsWith("conversation-v1:")) {
     return null;
   }
+  if (afterAgent.startsWith("conversation:")) {
+    const parts = afterAgent.split(":");
+    if (parts.length !== 5 && parts.length !== 7) {
+      return null;
+    }
+    try {
+      const channel = decodeURIComponent(parts[1] ?? "");
+      const accountId = decodeURIComponent(parts[2] ?? "");
+      if (!channel || !accountId) {
+        return null;
+      }
+      return { agentId: decodeURIComponent(agentId), channel, accountId };
+    } catch {
+      return null;
+    }
+  }
   const secondColon = afterAgent.indexOf(":");
   if (secondColon < 1) {
     return null;

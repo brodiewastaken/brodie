@@ -57,6 +57,7 @@ function createScrollHost(
     chatNewMessagesBelow: false,
     chatIsProgrammaticScroll: false,
     chatProgrammaticScrollTarget: 0,
+    requestUpdate: vi.fn(),
     settings,
     topbarObserver: null as ResizeObserver | null,
   };
@@ -81,6 +82,17 @@ describe("handleChatScroll", () => {
     const event = createScrollEvent(2000, 1600, 400);
     handleChatScroll(host, event);
     expect(host.chatUserNearBottom).toBe(true);
+  });
+
+  it("shows the scroll-to-bottom affordance whenever history is not at the latest event", () => {
+    const { host } = createScrollHost({});
+
+    handleChatScroll(host, createScrollEvent(1000, 761, 200));
+    expect(host.chatUserNearBottom).toBe(true);
+    expect(host.chatNewMessagesBelow).toBe(true);
+
+    handleChatScroll(host, createScrollEvent(1000, 800, 200));
+    expect(host.chatNewMessagesBelow).toBe(false);
   });
 
   it("sets chatUserNearBottom=true when distance is just under threshold", () => {
@@ -178,6 +190,19 @@ describe("scheduleChatScroll", () => {
     scheduleChatScroll(host);
     await host.updateComplete;
 
+    expect(container.scrollTop).toBe(container.scrollHeight);
+  });
+
+  it("targets the single raw transcript timeline", async () => {
+    const { host, container } = createScrollHost({
+      scrollHeight: 2000,
+      scrollTop: 500,
+      clientHeight: 400,
+    });
+    scheduleChatScroll(host, false, false, { source: "manual" });
+    await host.updateComplete;
+
+    expect(host.querySelector).toHaveBeenCalledWith(".chat-raw-transcript");
     expect(container.scrollTop).toBe(container.scrollHeight);
   });
 
@@ -380,12 +405,14 @@ describe("scheduleChatScroll", () => {
       chatAutoScroll: "off",
     });
     host.chatUserNearBottom = false;
+    host.chatNewMessagesBelow = true;
 
     scheduleChatScroll(host, true, false, { source: "manual" });
     await host.updateComplete;
 
     expect(container.scrollTop).toBe(container.scrollHeight);
     expect(host.chatNewMessagesBelow).toBe(false);
+    expect(host.requestUpdate).toHaveBeenCalledOnce();
   });
 
   it("scrolls even when user is scrolled up when chat auto-scroll is always", async () => {
@@ -470,6 +497,7 @@ describe("resetChatScroll", () => {
     host.chatFollowLocked = true;
     host.chatLastScrollTop = 300;
     host.chatHeaderControlsHidden = true;
+    host.chatNewMessagesBelow = true;
 
     resetChatScroll(host);
 
@@ -480,6 +508,8 @@ describe("resetChatScroll", () => {
     expect(host.chatHeaderControlsHidden).toBe(false);
     expect(host.chatIsProgrammaticScroll).toBe(false);
     expect(host.chatProgrammaticScrollTarget).toBe(0);
+    expect(host.chatNewMessagesBelow).toBe(false);
+    expect(host.requestUpdate).toHaveBeenCalledOnce();
   });
 });
 

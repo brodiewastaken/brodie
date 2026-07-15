@@ -34,6 +34,7 @@ export const ChatHistoryParamsSchema = Type.Object(
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
     offset: Type.Optional(Type.Integer({ minimum: 0 })),
     maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 500_000 })),
+    beforeSeq: Type.Optional(Type.Integer({ minimum: 1 })),
   },
   { additionalProperties: false },
 );
@@ -51,8 +52,13 @@ export const ChatMessageGetParamsSchema = Type.Object(
   {
     sessionKey: NonEmptyString,
     agentId: Type.Optional(NonEmptyString),
-    messageId: NonEmptyString,
+    messageId: Type.Optional(NonEmptyString),
+    seq: Type.Optional(Type.Integer({ minimum: 1 })),
     maxChars: Type.Optional(Type.Integer({ minimum: 1, maximum: 2_000_000 })),
+    /** Byte cursor for bounded raw-row reads. Requires seq and chunkBytes. */
+    chunkOffset: Type.Optional(Type.Integer({ minimum: 0 })),
+    /** Maximum raw bytes returned before base64 expansion. */
+    chunkBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 512 * 1024 })),
   },
   { additionalProperties: false },
 );
@@ -62,6 +68,19 @@ export const ChatMessageGetResultSchema = Type.Object(
   {
     ok: Type.Boolean(),
     message: Type.Optional(Type.Unknown()),
+    seq: Type.Optional(Type.Integer({ minimum: 1 })),
+    chunk: Type.Optional(
+      Type.Object(
+        {
+          offset: Type.Integer({ minimum: 0 }),
+          byteLength: Type.Integer({ minimum: 0, maximum: 512 * 1024 }),
+          totalBytes: Type.Integer({ minimum: 0 }),
+          dataBase64: Type.String(),
+          done: Type.Boolean(),
+        },
+        { additionalProperties: false },
+      ),
+    ),
     unavailableReason: Type.Optional(
       Type.Union([
         Type.Literal("not_found"),
@@ -149,6 +168,7 @@ export const ChatDeltaEventSchema = Type.Object(
     state: Type.Literal("delta"),
     message: Type.Optional(Type.Unknown()),
     deltaText: Type.String(),
+    phase: Type.Optional(Type.String()),
     replace: Type.Optional(Type.Boolean()),
     usage: Type.Optional(Type.Unknown()),
   },

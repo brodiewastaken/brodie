@@ -2568,7 +2568,7 @@ describe("oversized transcript line guards", () => {
     storePath = nextStorePath;
   });
 
-  test("readRecentSessionMessagesAsync replaces oversized JSONL lines with placeholders", async () => {
+  test("readRecentSessionMessagesAsync replaces oversized JSONL lines with deferred references", async () => {
     const sessionId = "test-oversized-recent";
     const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
     const oversizedContent = "x".repeat(300 * 1024);
@@ -2586,7 +2586,9 @@ describe("oversized transcript line guards", () => {
 
     const serialized = JSON.stringify(out);
     expect(serialized).not.toContain(oversizedContent);
-    expect(serialized).toContain("[chat.history omitted: message too large]");
+    expect(serialized).toContain('"deferredTranscriptRow"');
+    expect(serialized).toContain('"reason":"oversized"');
+    expect(serialized).not.toContain("[chat.history omitted: message too large]");
     expect(serialized).toContain("after oversized");
   });
 
@@ -2619,7 +2621,8 @@ describe("oversized transcript line guards", () => {
     expect(serialized).toContain("root");
     expect(serialized).toContain("oversized-leaf");
     expect(serialized).not.toContain(oversizedContent);
-    expect(serialized).toContain("[chat.history omitted: message too large]");
+    expect(serialized).toContain('"deferredTranscriptRow"');
+    expect(serialized).not.toContain("[chat.history omitted: message too large]");
   });
 
   test("recent readers stay bounded when a leaf target is outside the tail window", async () => {
@@ -2801,7 +2804,7 @@ describe("oversized transcript line guards", () => {
     expect(serialized).not.toContain(oversizedContent);
   });
 
-  test("readSessionMessagesAsync keeps id-less oversized message placeholders", async () => {
+  test("readSessionMessagesAsync keeps id-less oversized deferred references", async () => {
     const sessionId = "test-oversized-idless-async";
     const transcriptPath = path.join(tmpDir, `${sessionId}.jsonl`);
     const oversizedContent = "w".repeat(300 * 1024);
@@ -2820,7 +2823,9 @@ describe("oversized transcript line guards", () => {
 
     expect(out).toHaveLength(1);
     const serialized = JSON.stringify(out);
-    expect(serialized).toContain("[chat.history omitted: message too large]");
+    expect(serialized).toContain('"deferredTranscriptRow"');
+    expect(serialized).toContain('"reason":"oversized"');
+    expect(serialized).not.toContain("[chat.history omitted: message too large]");
     expect(serialized).not.toContain(oversizedContent);
   });
 

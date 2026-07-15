@@ -18,6 +18,7 @@ const isEmbeddedAgentRunActiveMock = vi.hoisted(() => vi.fn());
 vi.mock("../config/io.js", () => ({ getRuntimeConfig: () => ({}) }));
 vi.mock("./chat-display-projection.js", () => ({
   projectChatDisplayMessage: (message: unknown) => message,
+  projectChatDisplayMessages: (messages: unknown[]) => messages,
 }));
 vi.mock("./session-utils.js", () => ({
   attachOpenClawTranscriptMeta: (message: unknown) => message,
@@ -53,7 +54,9 @@ function createHandler(projectSessionActive: boolean) {
   const handler = createTranscriptUpdateBroadcastHandler({
     broadcastToConnIds,
     sessionEventSubscribers: { getAll: () => new Set(["conn-1"]) },
-    sessionMessageSubscribers: { get: () => new Set<string>() },
+    sessionMessageSubscribers: {
+      get: () => new Set<string>(),
+    },
     chatAbortControllers: new Map([["run-before-finalize", createActiveRun(projectSessionActive)]]),
   });
   return { broadcastToConnIds, handler };
@@ -165,5 +168,35 @@ describe("createTranscriptUpdateBroadcastHandler", () => {
     ).resolves.toMatchObject({
       senderIsOwner: true,
     });
+  });
+
+  it("broadcasts one raw live event to every selected connection", async () => {
+    const broadcastToConnIds = vi.fn();
+    const handler = createTranscriptUpdateBroadcastHandler({
+      broadcastToConnIds,
+      sessionEventSubscribers: { getAll: () => new Set(["conn-standard", "conn-raw"]) },
+      sessionMessageSubscribers: {
+        get: () => new Set(["conn-standard", "conn-raw"]),
+      },
+      chatAbortControllers: new Map(),
+    });
+
+    handler({
+      sessionKey: "agent:main:main",
+      message: { role: "assistant", content: "exact" },
+      messageId: "message-live-mode",
+      messageSeq: 2,
+    });
+
+    await vi.waitFor(() => expect(broadcastToConnIds).toHaveBeenCalledTimes(1));
+    const broadcast = broadcastToConnIds.mock.calls[0];
+    if (!broadcast) {
+      throw new Error("expected one raw transcript broadcast");
+    }
+    expect(broadcast[1].message).toMatchObject({
+      role: "assistant",
+      content: "exact",
+    });
+    expect([...broadcast[2]]).toEqual(["conn-standard", "conn-raw"]);
   });
 });

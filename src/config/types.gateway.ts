@@ -145,6 +145,17 @@ export type GatewayControlUiConfig = {
   allowExternalEmbedUrls?: boolean;
   /** Optional max-width for grouped Control UI chat messages (default: min(900px, 68%)). */
   chatMessageMaxWidth?: string;
+  /** Bounded Control UI transcript history page settings. */
+  transcript?: {
+    pageSize?: number;
+    maxChars?: number;
+  };
+  /** Independent single-operator debugging escape hatches. */
+  security?: {
+    redactInjectedMessages?: boolean;
+    assistantMediaAnyLocalPath?: boolean;
+    allowMainSessionDelete?: boolean;
+  };
   /** Allowed browser origins for Control UI/WebChat websocket connections. */
   allowedOrigins?: string[];
   /**
