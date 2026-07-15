@@ -180,10 +180,12 @@ vi.mock("../gateway/server-constants.js", () => ({
 }));
 
 vi.mock("../gateway/server-methods/chat.js", () => ({
-  CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES: 100_000,
+  BOUNDED_CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES: 100_000,
   augmentChatHistoryWithCanvasBlocks: (messages: unknown[]) => messages,
-  enforceChatHistoryFinalBudget: ({ messages }: { messages: unknown[] }) => ({ messages }),
-  replaceOversizedChatHistoryMessages: ({ messages }: { messages: unknown[] }) => ({ messages }),
+  enforceBoundedChatHistoryBudget: ({ messages }: { messages: unknown[] }) => ({ messages }),
+  replaceOversizedBoundedChatHistoryMessages: ({ messages }: { messages: unknown[] }) => ({
+    messages,
+  }),
 }));
 
 vi.mock("../gateway/session-utils.js", () => ({

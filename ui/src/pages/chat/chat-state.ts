@@ -335,6 +335,9 @@ export function resetChatStateForRouteSession(state: ChatPageHost, sessionKey: s
   state.chatAttachments = [];
   state.chatReplyTarget = null;
   state.chatMessages = restoreChatMessagesForSession(state, sessionKey);
+  state.chatHistoryOldestSeq = null;
+  state.chatHistoryHasMore = false;
+  state.chatHistoryLoadingOlder = false;
   state.chatToolMessages = [];
   state.chatStreamSegments = [];
   state.chatThinkingLevel = null;
@@ -987,6 +990,9 @@ export function createPageState(
     chatSending: false,
     chatMessage: "",
     chatMessages: [] as unknown[],
+    chatHistoryOldestSeq: null,
+    chatHistoryHasMore: false,
+    chatHistoryLoadingOlder: false,
     chatToolMessages: [] as Record<string, unknown>[],
     chatThinkingLevel: null,
     chatVerboseLevel: null,
@@ -1079,7 +1085,13 @@ export function createPageState(
     resetChatScroll(state);
     scheduleChatScroll(state, true, Boolean(options?.smooth), { source: "manual" });
   };
-  state.handleChatScroll = (event) => handleChatScroll(state, event);
+  state.handleChatScroll = (event) => {
+    const showedScrollToBottom = state.chatNewMessagesBelow;
+    handleChatScroll(state, event);
+    if (showedScrollToBottom !== state.chatNewMessagesBelow) {
+      state.requestUpdate?.();
+    }
+  };
   state.handleChatDraftChange = (next) => handleChatDraftChange(state, next);
   state.handleChatInputHistoryKey = (input) => handleChatInputHistoryKey(state, input);
   state.applySettings = (next) => {

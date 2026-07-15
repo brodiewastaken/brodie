@@ -245,4 +245,29 @@ describe("native Gateway protocol levels", () => {
       }
     }
   });
+
+  it("emits the session archive result as a closed Swift union", async () => {
+    const swiftGeneratedPath =
+      "apps/shared/OpenClawKit/Sources/OpenClawProtocol/GatewayModels.swift";
+    const swiftGenerated = await readRepoFile(swiftGeneratedPath);
+    const enumStart = "public enum SessionArchiveResultRow: Codable, Sendable {";
+    const start = swiftGenerated.indexOf(enumStart);
+    if (start < 0) {
+      throw new Error(`${swiftGeneratedPath}: missing Swift enum for SessionArchiveResultRow.`);
+    }
+    const end = swiftGenerated.indexOf("\n}\n", start);
+    const enumSource = swiftGenerated.slice(start, end);
+    for (const expectedCase of [
+      "case archived(SessionArchiveArchivedResultRow)",
+      "case protected(SessionArchiveProtectedResultRow)",
+      "case error(SessionArchiveErrorResultRow)",
+    ]) {
+      assertPattern(
+        enumSource,
+        swiftGeneratedPath,
+        new RegExp(`^    ${expectedCase.replace(/[()]/g, "\\$&")}$`, "m"),
+        `SessionArchiveResultRow must include ${expectedCase}.`,
+      );
+    }
+  });
 });

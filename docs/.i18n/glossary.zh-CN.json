@@ -1410,5 +1410,37 @@
   {
     "source": "Zalo personal channel config",
     "target": "Zalo 个人渠道配置"
+  },
+  {
+    "source": "Atomic Conversational Actions",
+    "target": "原子化会话操作"
+  },
+  {
+    "source": "Canonical Conversation Sessions",
+    "target": "规范会话"
+  },
+  {
+    "source": "Context and Operational State",
+    "target": "上下文与运行状态"
+  },
+  {
+    "source": "Conversation Scheduler",
+    "target": "会话调度器"
+  },
+  {
+    "source": "Durable delegated work",
+    "target": "持久化委派工作"
+  },
+  {
+    "source": "Exact Operator State",
+    "target": "精确操作员状态"
+  },
+  {
+    "source": "Unified Run Policy",
+    "target": "统一运行策略"
+  },
+  {
+    "source": "Bun",
+    "target": "Bun"
   }
 ]

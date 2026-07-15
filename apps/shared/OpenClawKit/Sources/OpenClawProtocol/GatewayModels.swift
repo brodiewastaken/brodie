@@ -2716,18 +2716,22 @@ public struct SessionsSendParams: Codable, Sendable {
 public struct SessionsMessagesSubscribeParams: Codable, Sendable {
     public let key: String
     public let agentid: String?
+    public let projectionmode: AnyCodable?
 
     public init(
         key: String,
-        agentid: String? = nil)
+        agentid: String? = nil,
+        projectionmode: AnyCodable?)
     {
         self.key = key
         self.agentid = agentid
+        self.projectionmode = projectionmode
     }
 
     private enum CodingKeys: String, CodingKey {
         case key
         case agentid = "agentId"
+        case projectionmode = "projectionMode"
     }
 }
 
@@ -2768,6 +2772,96 @@ public struct SessionsAbortParams: Codable, Sendable {
         case key
         case runid = "runId"
         case agentid = "agentId"
+    }
+}
+
+public struct SessionsArchiveParams: Codable, Sendable {
+    public let targets: [[String: AnyCodable]]
+
+    public init(
+        targets: [[String: AnyCodable]])
+    {
+        self.targets = targets
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case targets
+    }
+}
+
+public struct SessionsArchiveResult: Codable, Sendable {
+    public let rows: [SessionArchiveResultRow]
+
+    public init(
+        rows: [SessionArchiveResultRow])
+    {
+        self.rows = rows
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case rows
+    }
+}
+
+public struct SessionArchiveArchivedResultRow: Codable, Sendable {
+    public let key: String
+    public let status: String
+
+    public init(
+        key: String,
+        status: String)
+    {
+        self.key = key
+        self.status = status
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case status
+    }
+}
+
+public struct SessionArchiveErrorResultRow: Codable, Sendable {
+    public let key: String
+    public let status: String
+    public let reason: String
+
+    public init(
+        key: String,
+        status: String,
+        reason: String)
+    {
+        self.key = key
+        self.status = status
+        self.reason = reason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case status
+        case reason
+    }
+}
+
+public struct SessionArchiveProtectedResultRow: Codable, Sendable {
+    public let key: String
+    public let status: String
+    public let reason: String
+
+    public init(
+        key: String,
+        status: String,
+        reason: String)
+    {
+        self.key = key
+        self.status = status
+        self.reason = reason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case key
+        case status
+        case reason
     }
 }
 
@@ -8669,19 +8763,25 @@ public struct ChatHistoryParams: Codable, Sendable {
     public let limit: Int?
     public let offset: Int?
     public let maxchars: Int?
+    public let beforeseq: Int?
+    public let projectionmode: AnyCodable?
 
     public init(
         sessionkey: String,
         agentid: String? = nil,
         limit: Int?,
         offset: Int? = nil,
-        maxchars: Int?)
+        maxchars: Int?,
+        beforeseq: Int?,
+        projectionmode: AnyCodable?)
     {
         self.sessionkey = sessionkey
         self.agentid = agentid
         self.limit = limit
         self.offset = offset
         self.maxchars = maxchars
+        self.beforeseq = beforeseq
+        self.projectionmode = projectionmode
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -8690,6 +8790,8 @@ public struct ChatHistoryParams: Codable, Sendable {
         case limit
         case offset
         case maxchars = "maxChars"
+        case beforeseq = "beforeSeq"
+        case projectionmode = "projectionMode"
     }
 }
 
@@ -8710,47 +8812,67 @@ public struct ChatMetadataParams: Codable, Sendable {
 public struct ChatMessageGetParams: Codable, Sendable {
     public let sessionkey: String
     public let agentid: String?
-    public let messageid: String
+    public let messageid: String?
+    public let seq: Int?
     public let maxchars: Int?
+    public let chunkoffset: Int?
+    public let chunkbytes: Int?
 
     public init(
         sessionkey: String,
         agentid: String? = nil,
-        messageid: String,
-        maxchars: Int?)
+        messageid: String?,
+        seq: Int?,
+        maxchars: Int?,
+        chunkoffset: Int?,
+        chunkbytes: Int?)
     {
         self.sessionkey = sessionkey
         self.agentid = agentid
         self.messageid = messageid
+        self.seq = seq
         self.maxchars = maxchars
+        self.chunkoffset = chunkoffset
+        self.chunkbytes = chunkbytes
     }
 
     private enum CodingKeys: String, CodingKey {
         case sessionkey = "sessionKey"
         case agentid = "agentId"
         case messageid = "messageId"
+        case seq
         case maxchars = "maxChars"
+        case chunkoffset = "chunkOffset"
+        case chunkbytes = "chunkBytes"
     }
 }
 
 public struct ChatMessageGetResult: Codable, Sendable {
     public let ok: Bool
     public let message: AnyCodable?
+    public let seq: Int?
+    public let chunk: [String: AnyCodable]?
     public let unavailablereason: AnyCodable?
 
     public init(
         ok: Bool,
         message: AnyCodable?,
+        seq: Int?,
+        chunk: [String: AnyCodable]?,
         unavailablereason: AnyCodable?)
     {
         self.ok = ok
         self.message = message
+        self.seq = seq
+        self.chunk = chunk
         self.unavailablereason = unavailablereason
     }
 
     private enum CodingKeys: String, CodingKey {
         case ok
         case message
+        case seq
+        case chunk
         case unavailablereason = "unavailableReason"
     }
 }
@@ -8945,6 +9067,7 @@ public struct ChatDeltaEvent: Codable, Sendable {
     public let state: String
     public let message: AnyCodable?
     public let deltatext: String
+    public let phase: String?
     public let replace: Bool?
     public let usage: AnyCodable?
 
@@ -8957,6 +9080,7 @@ public struct ChatDeltaEvent: Codable, Sendable {
         state: String,
         message: AnyCodable?,
         deltatext: String,
+        phase: String?,
         replace: Bool?,
         usage: AnyCodable?)
     {
@@ -8968,6 +9092,7 @@ public struct ChatDeltaEvent: Codable, Sendable {
         self.state = state
         self.message = message
         self.deltatext = deltatext
+        self.phase = phase
         self.replace = replace
         self.usage = usage
     }
@@ -8981,6 +9106,7 @@ public struct ChatDeltaEvent: Codable, Sendable {
         case state
         case message
         case deltatext = "deltaText"
+        case phase
         case replace
         case usage
     }
@@ -9197,6 +9323,40 @@ public struct ShutdownEvent: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case reason
         case restartexpectedms = "restartExpectedMs"
+    }
+}
+
+public enum SessionArchiveResultRow: Codable, Sendable {
+    case archived(SessionArchiveArchivedResultRow)
+    case protected(SessionArchiveProtectedResultRow)
+    case error(SessionArchiveErrorResultRow)
+
+    private enum CodingKeys: String, CodingKey {
+        case discriminator = "status"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let discriminator = try container.decode(String.self, forKey: .discriminator)
+        switch discriminator {
+        case "archived": self = try .archived(SessionArchiveArchivedResultRow(from: decoder))
+        case "protected": self = try .protected(SessionArchiveProtectedResultRow(from: decoder))
+        case "error": self = try .error(SessionArchiveErrorResultRow(from: decoder))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .discriminator,
+                in: container,
+                debugDescription: "Unknown SessionArchiveResultRow discriminator value"
+            )
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        switch self {
+        case .archived(let value): try value.encode(to: encoder)
+        case .protected(let value): try value.encode(to: encoder)
+        case .error(let value): try value.encode(to: encoder)
+        }
     }
 }
 

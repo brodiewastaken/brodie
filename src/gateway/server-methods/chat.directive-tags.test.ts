@@ -88,6 +88,7 @@ const mockState = vi.hoisted(() => ({
   lastDispatchImages: undefined as Array<{ mimeType: string; data: string }> | undefined,
   lastDispatchImageOrder: undefined as string[] | undefined,
   lastDispatchThinkingLevelOverride: undefined as string | undefined,
+  lastDispatchRunModelOverride: undefined as { provider: string; model: string } | undefined,
   lastDispatchUserTurnInput: undefined as unknown,
   modelCatalog: null as ModelCatalogEntry[] | null,
   emittedTranscriptUpdates: [] as Array<{
@@ -244,12 +245,14 @@ vi.mock("../../auto-reply/dispatch.js", () => ({
         images?: Array<{ mimeType: string; data: string }>;
         imageOrder?: string[];
         thinkingLevelOverride?: string;
+        runModelOverride?: { provider: string; model: string };
       };
     }) => {
       mockState.lastDispatchCtx = params.ctx;
       mockState.lastDispatchImages = params.replyOptions?.images;
       mockState.lastDispatchImageOrder = params.replyOptions?.imageOrder;
       mockState.lastDispatchThinkingLevelOverride = params.replyOptions?.thinkingLevelOverride;
+      mockState.lastDispatchRunModelOverride = params.replyOptions?.runModelOverride;
       const recorder = params.replyOptions?.userTurnTranscriptRecorder;
       mockState.lastDispatchUserTurnInput = recorder?.resolveMessage
         ? await recorder.resolveMessage()
@@ -439,7 +442,53 @@ vi.mock("../../media/store.js", async () => {
   };
 });
 
-const { chatHandlers } = await import("./chat.js");
+const operatorSchedulerMock = vi.hoisted(() => ({
+  mode: "native" as "native" | "busy" | "terminal-delivered",
+  releaseStarted: undefined as (() => void) | undefined,
+  calls: [] as Array<{ runId?: string; recoveryPayload?: unknown }>,
+}));
+
+vi.mock("../../scheduler/runtime-turn-admission.js", () => ({
+  admitRuntimeTurnThroughScheduler: async (params: {
+    runId?: string;
+    recoveryPayload?: unknown;
+    execute: (runId: string) => Promise<unknown>;
+  }) => {
+    operatorSchedulerMock.calls.push({
+      runId: params.runId,
+      recoveryPayload: params.recoveryPayload,
+    });
+    const runId = params.runId ?? "scheduled-operator-turn";
+    if (operatorSchedulerMock.mode === "terminal-delivered") {
+      return {
+        durablyAccepted: true,
+        existingTerminalState: "delivered" as const,
+        started: Promise.resolve(),
+        completion: Promise.resolve(),
+      };
+    }
+    if (operatorSchedulerMock.mode === "busy") {
+      let releaseStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        releaseStarted = resolve;
+      });
+      operatorSchedulerMock.releaseStarted = releaseStarted;
+      return {
+        durablyAccepted: true,
+        started,
+        completion: started.then(async () => await params.execute(runId)),
+      };
+    }
+    const completion = params.execute(runId);
+    return {
+      durablyAccepted: false,
+      started: Promise.resolve(),
+      completion,
+    };
+  },
+}));
+
+const { chatHandlers, executeRecoveredGatewayChatTurn } = await import("./chat.js");
 
 // Multi-media transcript mirroring can exceed 1s on loaded CI before the async broadcast lands.
 async function waitForAssertion(assertion: () => void, timeoutMs = 5_000, stepMs = 2) {
@@ -847,6 +896,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     mockState.lastDispatchImages = undefined;
     mockState.lastDispatchImageOrder = undefined;
     mockState.lastDispatchThinkingLevelOverride = undefined;
+    mockState.lastDispatchRunModelOverride = undefined;
     mockState.lastDispatchUserTurnInput = undefined;
     mockState.modelCatalog = null;
     mockState.emittedTranscriptUpdates = [];
@@ -868,6 +918,9 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     mockState.beforeMessageWriteContent = null;
     mockState.beforeMessageWriteCalls = [];
     mockState.dispatchBlockedByBeforeAgentRun = false;
+    operatorSchedulerMock.mode = "native";
+    operatorSchedulerMock.releaseStarted = undefined;
+    operatorSchedulerMock.calls = [];
   });
 
   it("broadcasts session metadata changes reported by chat command dispatch", async () => {
@@ -6578,6 +6631,26 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
 });
 
 describe("chat.send operator UI client sender context", () => {
+  afterEach(() => {
+    operatorSchedulerMock.mode = "native";
+    operatorSchedulerMock.releaseStarted = undefined;
+    operatorSchedulerMock.calls = [];
+  });
+
+  function controlUiClient() {
+    return {
+      connect: {
+        client: {
+          id: GATEWAY_CLIENT_NAMES.CONTROL_UI,
+          mode: GATEWAY_CLIENT_MODES.WEBCHAT,
+          version: "dev",
+          platform: "web",
+        },
+        scopes: ["operator.write"],
+      },
+    };
+  }
+
   it("does not inject sender identity fields for Control UI clients", async () => {
     const respond = vi.fn();
     const context = createChatContext();
@@ -6587,22 +6660,130 @@ describe("chat.send operator UI client sender context", () => {
       respond,
       idempotencyKey: "idem-control-ui-sender",
       message: "hello from control ui",
-      client: {
-        connect: {
-          client: {
-            id: GATEWAY_CLIENT_NAMES.CONTROL_UI,
-            mode: GATEWAY_CLIENT_MODES.WEBCHAT,
-            version: "dev",
-            platform: "web",
-          },
-          scopes: ["operator.write"],
-        },
-      },
+      client: controlUiClient(),
       expectBroadcast: false,
     });
 
     expect(mockState.lastDispatchCtx?.SenderId).toBeUndefined();
     expect(mockState.lastDispatchCtx?.SenderName).toBeUndefined();
     expect(mockState.lastDispatchCtx?.SenderUsername).toBeUndefined();
+  });
+
+  it("acknowledges a durably admitted operator turn while its lane remains busy", async () => {
+    await createTranscriptFixture("openclaw-chat-send-operator-busy-");
+    operatorSchedulerMock.mode = "busy";
+    mockState.lastDispatchCtx = undefined;
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    const send = runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-control-ui-busy",
+      message: "wait behind the active turn",
+      client: controlUiClient(),
+      waitFor: "none",
+    });
+
+    await waitForAssertion(() => {
+      expect(respond).toHaveBeenCalledWith(
+        true,
+        { runId: "idem-control-ui-busy", status: "in_flight" },
+        undefined,
+        { runId: "idem-control-ui-busy" },
+      );
+    });
+    expect(mockState.lastDispatchCtx).toBeUndefined();
+
+    operatorSchedulerMock.releaseStarted?.();
+    await send;
+    await waitForAssertion(() => {
+      expect(context.dedupe.has("chat:idem-control-ui-busy")).toBe(true);
+    });
+    expect((mockState.lastDispatchCtx as MsgContext | undefined)?.Body).toBe(
+      "wait behind the active turn",
+    );
+    expect(respond).toHaveBeenCalledTimes(1);
+  });
+
+  it("rehydrates a never-started operator turn through the authorized execution seam", async () => {
+    await createTranscriptFixture("openclaw-chat-send-operator-recovery-");
+    mockState.finalPayload = { text: "recovered reply" };
+    const context = createChatContext();
+
+    await executeRecoveredGatewayChatTurn({
+      agentId: "main",
+      sessionKey: "main",
+      runId: "idem-control-ui-recovery",
+      payload: {
+        kind: "gateway_operator_chat",
+        version: 1,
+        agentId: "main",
+        senderIsOwner: false,
+        model: { provider: "openai", model: "gpt-5.5" },
+        originatingRoute: {
+          originatingChannel: "webchat",
+          explicitDeliverRoute: false,
+        },
+        params: {
+          sessionKey: "main",
+          message: "recover this accepted turn",
+          timeoutMs: 30_000,
+          idempotencyKey: "idem-control-ui-recovery",
+        },
+      },
+      context: context as GatewayRequestContext,
+    });
+
+    expect(mockState.lastDispatchCtx?.Body).toBe("recover this accepted turn");
+    expect(mockState.lastDispatchRunModelOverride).toEqual({
+      provider: "openai",
+      model: "gpt-5.5",
+    });
+    expect(context.dedupe.get("chat:idem-control-ui-recovery")?.ok).toBe(true);
+    expect(findUserUpdate()).toBeDefined();
+    expect(context.broadcast).toHaveBeenCalledWith(
+      "chat",
+      expect.objectContaining({
+        runId: "idem-control-ui-recovery",
+        state: "final",
+      }),
+    );
+  });
+
+  it("returns terminal success without replay when process-local dedupe is missing", async () => {
+    await createTranscriptFixture("openclaw-chat-send-operator-terminal-retry-");
+    operatorSchedulerMock.mode = "terminal-delivered";
+    mockState.lastDispatchCtx = undefined;
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-control-ui-terminal-retry",
+      message: "do not replay this turn",
+      client: controlUiClient(),
+      waitFor: "none",
+    });
+
+    expect(mockState.lastDispatchCtx).toBeUndefined();
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      { runId: "idem-control-ui-terminal-retry", status: "ok" },
+      undefined,
+      {
+        cached: true,
+        runId: "idem-control-ui-terminal-retry",
+      },
+    );
+    expect(context.dedupe.get("chat:idem-control-ui-terminal-retry")?.ok).toBe(true);
+    expect(context.broadcast).toHaveBeenCalledWith(
+      "chat",
+      expect.objectContaining({
+        runId: "idem-control-ui-terminal-retry",
+        state: "final",
+      }),
+    );
   });
 });

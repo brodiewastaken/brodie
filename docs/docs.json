@@ -1213,6 +1213,7 @@
                   "concepts/atomic-conversational-actions",
                   "concepts/unified-run-policy",
                   "concepts/context-operational-state",
+                  "concepts/exact-operator-state",
                   "concepts/channel-docking",
                   "concepts/session-pruning",
                   "concepts/session-tool",

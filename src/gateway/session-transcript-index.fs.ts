@@ -1,7 +1,7 @@
+import { createHash } from "node:crypto";
 // Filesystem transcript indexer.
 // Streams JSONL transcript files into byte-offset indexes for history paging.
 import fs from "node:fs";
-import { StringDecoder } from "node:string_decoder";
 import {
   parseSessionTranscriptTreeEntry,
   scanSessionTranscriptTree,
@@ -17,7 +17,6 @@ const TRANSCRIPT_INDEX_READ_CHUNK_BYTES = 64 * 1024;
 const MAX_TRANSCRIPT_INDEX_CACHE_ENTRIES = 256;
 const MAX_TRANSCRIPT_INDEX_PARSE_LINE_BYTES = 256 * 1024;
 const OVERSIZED_TRANSCRIPT_METADATA_PREFIX_CHARS = 64 * 1024;
-const TRANSCRIPT_OVERSIZED_MESSAGE_PLACEHOLDER = "[chat.history omitted: message too large]";
 
 type ParsedTranscriptRecord = Record<string, unknown>;
 
@@ -117,9 +116,10 @@ function buildOversizedIndexedRawEntry(params: {
   line: string;
   offset: number;
   byteLength: number;
+  sha256: string;
 }): IndexedRawEntry | null {
   // Oversized lines may contain huge message arrays, so recover only metadata
-  // from a bounded prefix and synthesize a visible placeholder record.
+  // from a bounded prefix and defer the exact row to the chunked reader.
   const prefix = params.line.slice(0, OVERSIZED_TRANSCRIPT_METADATA_PREFIX_CHARS);
   const messageMatch = /"message"\s*:/.exec(prefix);
   const recordPrefix = messageMatch ? prefix.slice(0, messageMatch.index) : prefix;
@@ -137,8 +137,14 @@ function buildOversizedIndexedRawEntry(params: {
     ...(timestamp !== undefined ? { timestamp } : {}),
     message: {
       role,
-      content: [{ type: "text", text: TRANSCRIPT_OVERSIZED_MESSAGE_PLACEHOLDER }],
-      __openclaw: { truncated: true, reason: "oversized" },
+      content: [],
+      __openclaw: {
+        deferredTranscriptRow: {
+          reason: "oversized",
+          byteLength: params.byteLength,
+          sha256: params.sha256,
+        },
+      },
     },
   };
   const treeEntry = parseSessionTranscriptTreeEntry(record);
@@ -153,15 +159,61 @@ function buildOversizedIndexedRawEntry(params: {
 
 async function visitTranscriptJsonLines(
   filePath: string,
-  visit: (line: string, offset: number, byteLength: number) => void,
+  visit: (line: string, offset: number, byteLength: number, sha256: string) => void,
 ): Promise<void> {
   const handle = await fs.promises.open(filePath, "r");
   try {
-    const decoder = new StringDecoder("utf8");
     const buffer = Buffer.allocUnsafe(TRANSCRIPT_INDEX_READ_CHUNK_BYTES);
-    let carry = "";
-    let carryOffset = 0;
-    let nextOffset = 0;
+    const captureLimit = MAX_TRANSCRIPT_INDEX_PARSE_LINE_BYTES + 1;
+    let lineOffset = 0;
+    let lineByteLength = 0;
+    let capturedBytes = 0;
+    let capturedParts: Buffer[] = [];
+    let lastLineByte: number | undefined;
+    let pendingHashByte: number | undefined;
+    let lineHash = createHash("sha256");
+    let readOffset = 0;
+
+    const appendSegment = (segment: Buffer) => {
+      lineByteLength += segment.byteLength;
+      if (segment.byteLength > 0) {
+        lastLineByte = segment[segment.byteLength - 1];
+        if (pendingHashByte !== undefined) {
+          lineHash.update(Buffer.from([pendingHashByte]));
+        }
+        if (segment.byteLength > 1) {
+          lineHash.update(segment.subarray(0, segment.byteLength - 1));
+        }
+        pendingHashByte = segment[segment.byteLength - 1];
+      }
+      const remainingCapture = captureLimit - capturedBytes;
+      if (remainingCapture <= 0 || segment.byteLength === 0) {
+        return;
+      }
+      const captured = Buffer.from(segment.subarray(0, remainingCapture));
+      capturedParts.push(captured);
+      capturedBytes += captured.byteLength;
+    };
+
+    const finishLine = () => {
+      const hasCarriageReturn = lastLineByte === 0x0d;
+      const byteLength = lineByteLength - (hasCarriageReturn ? 1 : 0);
+      const captured = Buffer.concat(capturedParts, capturedBytes);
+      const capturedLine =
+        hasCarriageReturn && lineByteLength <= captureLimit
+          ? captured.subarray(0, Math.max(0, captured.byteLength - 1))
+          : captured;
+      if (pendingHashByte !== undefined && pendingHashByte !== 0x0d) {
+        lineHash.update(Buffer.from([pendingHashByte]));
+      }
+      visit(capturedLine.toString("utf8"), lineOffset, byteLength, lineHash.digest("hex"));
+      lineByteLength = 0;
+      capturedBytes = 0;
+      capturedParts = [];
+      lastLineByte = undefined;
+      pendingHashByte = undefined;
+      lineHash = createHash("sha256");
+    };
 
     while (true) {
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
@@ -169,27 +221,26 @@ async function visitTranscriptJsonLines(
         break;
       }
       const chunk = buffer.subarray(0, bytesRead);
-      const text = carry + decoder.write(chunk);
-      const lines = text.split("\n");
-      carry = lines.pop() ?? "";
-      let lineOffset = carryOffset;
-      for (const rawLine of lines) {
-        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-        const byteLength = Buffer.byteLength(line, "utf8");
-        visit(line, lineOffset, byteLength);
-        lineOffset += Buffer.byteLength(rawLine, "utf8") + 1;
+      let cursor = 0;
+      while (cursor < chunk.byteLength) {
+        const newline = chunk.indexOf(0x0a, cursor);
+        const end = newline === -1 ? chunk.byteLength : newline;
+        appendSegment(chunk.subarray(cursor, end));
+        if (newline === -1) {
+          break;
+        }
+        finishLine();
+        lineOffset = readOffset + newline + 1;
+        cursor = newline + 1;
       }
-      nextOffset += bytesRead;
-      carryOffset = nextOffset - Buffer.byteLength(carry, "utf8");
+      readOffset += bytesRead;
       // Yield between chunks so a large transcript scan does not monopolize the
       // gateway event loop while chat/session traffic is still flowing.
       await yieldTranscriptIndexScan();
     }
 
-    const tail = carry + decoder.end();
-    if (tail) {
-      const line = tail.endsWith("\r") ? tail.slice(0, -1) : tail;
-      visit(line, carryOffset, Buffer.byteLength(line, "utf8"));
+    if (lineByteLength > 0) {
+      finishLine();
     }
   } finally {
     await handle.close();
@@ -243,12 +294,12 @@ async function buildSessionTranscriptIndex(
 ): Promise<SessionTranscriptIndex> {
   const rawEntries: IndexedRawEntry[] = [];
 
-  await visitTranscriptJsonLines(filePath, (line, offset, byteLength) => {
+  await visitTranscriptJsonLines(filePath, (line, offset, byteLength, sha256) => {
     if (!line.trim()) {
       return;
     }
     if (byteLength > MAX_TRANSCRIPT_INDEX_PARSE_LINE_BYTES) {
-      const rawEntry = buildOversizedIndexedRawEntry({ line, offset, byteLength });
+      const rawEntry = buildOversizedIndexedRawEntry({ line, offset, byteLength, sha256 });
       if (!rawEntry) {
         return;
       }

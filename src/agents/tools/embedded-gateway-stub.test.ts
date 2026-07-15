@@ -31,12 +31,12 @@ const runtime = vi.hoisted(() => ({
   projectRecentChatDisplayMessages: vi.fn((messages: unknown[]): unknown[] => messages),
   augmentChatHistoryWithCanvasBlocks: vi.fn((messages: unknown[]) => messages),
   getMaxChatHistoryMessagesBytes: vi.fn(() => 100_000),
-  CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES: 100_000,
-  replaceOversizedChatHistoryMessages: vi.fn(({ messages }: { messages: unknown[] }) => ({
+  BOUNDED_CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES: 100_000,
+  replaceOversizedBoundedChatHistoryMessages: vi.fn(({ messages }: { messages: unknown[] }) => ({
     messages,
   })),
   capArrayByJsonBytes: vi.fn((items: unknown[]) => ({ items })),
-  enforceChatHistoryFinalBudget: vi.fn(({ messages }: { messages: unknown[] }) => ({ messages })),
+  enforceBoundedChatHistoryBudget: vi.fn(({ messages }: { messages: unknown[] }) => ({ messages })),
   loadCombinedSessionStoreForGateway: vi.fn(() => ({
     storePath: "/tmp/openclaw-sessions.json",
     store: {},
@@ -420,7 +420,7 @@ describe("embedded gateway stub", () => {
       messages: rawMessages,
       totalMessages: 10,
     }));
-    runtime.enforceChatHistoryFinalBudget.mockReturnValueOnce({ messages: returnedMessages });
+    runtime.enforceBoundedChatHistoryBudget.mockReturnValueOnce({ messages: returnedMessages });
 
     const callGateway = createEmbeddedCallGateway();
     const result = await callGateway<{

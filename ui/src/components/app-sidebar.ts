@@ -29,7 +29,6 @@ import type { ThemeMode } from "../app/theme.ts";
 import { t } from "../i18n/index.ts";
 import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "../lib/external-link.ts";
 import { formatRelativeTimestamp } from "../lib/format.ts";
-import { startHoverMarquee, stopHoverMarquee } from "../lib/hover-marquee.ts";
 import { resolveSessionDisplayName } from "../lib/session-display.ts";
 import {
   dissolveSessionGroup,
@@ -188,7 +187,6 @@ class AppSidebar extends LitElement {
     EventTarget,
     ReturnType<typeof globalThis.setTimeout>
   >();
-
   override connectedCallback() {
     super.connectedCallback();
     this.style.display = "contents";
@@ -1279,14 +1277,12 @@ class AppSidebar extends LitElement {
           event.preventDefault();
           this.openSessionMenu(session, event.clientX, event.clientY);
         }}
-        @mouseenter=${(event: MouseEvent) => startHoverMarquee(event.currentTarget as HTMLElement)}
-        @mouseleave=${(event: MouseEvent) => stopHoverMarquee(event.currentTarget as HTMLElement)}
       >
         <a
           href=${session.href}
           class="sidebar-recent-session__link"
           draggable="false"
-          title=${`${session.label} · ${session.key}`}
+          title=${session.key}
           @click=${(event: MouseEvent) => {
             if (!shouldHandleNavigationClick(event)) {
               return;
@@ -1302,7 +1298,7 @@ class AppSidebar extends LitElement {
                 aria-label=${t("sessionsView.unread")}
               ></span>`
             : nothing}
-          <span class="sidebar-recent-session__name hover-marquee">${session.label}</span>
+          <span class="sidebar-recent-session__name">${session.label}</span>
         </a>
         <span class="sidebar-recent-session__aside session-row-aside">
           <span class="session-row-trail">

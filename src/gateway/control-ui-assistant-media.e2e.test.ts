@@ -1,5 +1,6 @@
 // Control UI assistant media e2e tests verify scoped media-ticket access through gateway HTTP routes.
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
 import { installGatewayTestHooks, testState, withGatewayServer } from "./test-helpers.js";
@@ -65,5 +66,56 @@ describe("Control UI assistant media e2e", () => {
         },
       },
     );
+  });
+
+  test("assistantMediaAnyLocalPath independently gates files outside allowed roots", async () => {
+    testState.gatewayAuth = { mode: "token", token: CONTROL_UI_E2E_TOKEN };
+    const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-media-outside-"));
+    const outsidePath = path.join(outsideDir, "outside-roots.txt");
+    await fs.writeFile(outsidePath, "outside the roots\n", "utf8");
+
+    const fetchMeta = async (port: number) => {
+      const route = `http://127.0.0.1:${port}/__openclaw__/assistant-media`;
+      return await fetch(`${route}?meta=1&source=${encodeURIComponent(outsidePath)}`, {
+        headers: { Authorization: `Bearer ${CONTROL_UI_E2E_TOKEN}` },
+      });
+    };
+
+    try {
+      await withGatewayServer(
+        async ({ port }) => {
+          const response = await fetchMeta(port);
+          expect(response.status).toBe(200);
+          expect((await response.json()) as { available?: boolean }).toMatchObject({
+            available: false,
+          });
+        },
+        { serverOptions: { controlUiEnabled: true } },
+      );
+
+      testState.gatewayControlUi = { security: { assistantMediaAnyLocalPath: true } };
+      await withGatewayServer(
+        async ({ port }) => {
+          const response = await fetchMeta(port);
+          expect(response.status).toBe(200);
+          expect((await response.json()) as { available?: boolean }).toMatchObject({
+            available: true,
+          });
+          const route = `http://127.0.0.1:${port}/__openclaw__/assistant-media`;
+          const served = await fetch(`${route}?source=${encodeURIComponent(outsidePath)}`, {
+            headers: { Authorization: `Bearer ${CONTROL_UI_E2E_TOKEN}` },
+          });
+          expect(served.status).toBe(200);
+          expect(await served.text()).toBe("outside the roots\n");
+          expect((await fetch(`${route}?source=${encodeURIComponent(outsidePath)}`)).status).toBe(
+            401,
+          );
+        },
+        { serverOptions: { controlUiEnabled: true } },
+      );
+    } finally {
+      testState.gatewayControlUi = undefined;
+      await fs.rm(outsideDir, { recursive: true, force: true });
+    }
   });
 });

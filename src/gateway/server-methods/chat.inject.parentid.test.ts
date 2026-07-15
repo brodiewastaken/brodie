@@ -150,4 +150,36 @@ describe("gateway chat.inject transcript writes", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("persists literal injected text only when its security flag is disabled", async () => {
+    const { dir, transcriptPath } = createTranscriptFixtureSync({
+      prefix: "openclaw-chat-inject-unredacted-",
+      sessionId: "sess-unredacted",
+    });
+    const fakeApiKey = "sk-proj-FAKEKEYFORTESTINGONLY1234567890";
+    const updates: Array<{ message?: unknown }> = [];
+    const unsubscribe = onSessionTranscriptUpdate((update) => updates.push(update));
+
+    try {
+      const appended = await appendInjectedAssistantMessageToTranscript({
+        transcriptPath,
+        sessionKey: "global",
+        message: `Here is your key: ${fakeApiKey}`,
+        config: {
+          logging: { redactSensitive: "tools" },
+          gateway: { controlUi: { security: { redactInjectedMessages: false } } },
+        },
+      });
+
+      expect(appended.ok).toBe(true);
+      expect(JSON.stringify(appended.message)).toContain(fakeApiKey);
+      const lines = readTranscriptLines(transcriptPath);
+      const last = JSON.parse(lines.at(-1) as string) as { message?: unknown };
+      expect(JSON.stringify(last.message)).toContain(fakeApiKey);
+      expect(JSON.stringify(updates[0]?.message)).toContain(fakeApiKey);
+    } finally {
+      unsubscribe();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

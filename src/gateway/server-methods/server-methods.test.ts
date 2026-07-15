@@ -660,7 +660,6 @@ describe("waitForAgentJob", () => {
     expect(agentJobTesting.getAgentRunCacheSize()).toBe(max);
     agentJobTesting.resetAgentRunCache();
   });
-
 });
 
 describe("augmentChatHistoryWithCanvasBlocks", () => {
@@ -1441,18 +1440,6 @@ describe("projectRecentChatDisplayMessages", () => {
     expect(result).toEqual([
       {
         role: "assistant",
-        content: [
-          {
-            type: "tool_call",
-            id: "call-message",
-            name: "message",
-            args: { action: "send", message: "visible via message tool" },
-          },
-        ],
-        timestamp: 1,
-      },
-      {
-        role: "assistant",
         senderLabel: "Forwarded from main",
         content: [{ type: "text", text: "inter-session update" }],
         provenance: {
@@ -1463,18 +1450,16 @@ describe("projectRecentChatDisplayMessages", () => {
         timestamp: 2,
       },
       {
-        role: "toolResult",
-        toolName: "message",
-        toolCallId: "call-message",
-        content: JSON.stringify({ ok: true }),
-        timestamp: 3,
-      },
-      {
         role: "assistant",
-        content: [{ type: "text", text: "visible via message tool" }],
-        openclawMessageToolMirror: {
-          toolName: "message",
-          toolCallId: "call-message",
+        content: [],
+        openclawConversationalAction: {
+          action: "send",
+          outcome: "delivered",
+          visibleMessages: ["visible via message tool"],
+          receipt: { ok: true },
+        },
+        __openclaw: {
+          conversationalActionId: "call-message",
         },
         timestamp: 1,
       },
@@ -1802,7 +1787,7 @@ describe("projectRecentChatDisplayMessages", () => {
     ]);
   });
 
-  it("drops channel-final delivery mirrors that duplicate the preceding assistant reply", () => {
+  it("keeps the authoritative channel-final delivery mirror beside preceding provider prose", () => {
     const result = projectRecentChatDisplayMessages([
       {
         role: "user",
@@ -1841,6 +1826,15 @@ describe("projectRecentChatDisplayMessages", () => {
         content: [{ type: "text", text: "Yo Peter. I’m here." }],
         __openclaw: { mirrorIdentity: "run-1:assistant" },
         timestamp: 2,
+      },
+      {
+        role: "assistant",
+        provider: "openclaw",
+        model: "delivery-mirror",
+        content: [{ type: "text", text: "Yo Peter. I’m here." }],
+        idempotencyKey: "channel-final:message-1:0",
+        openclawDeliveryMirror: { kind: "channel-final", sourceMessageId: "message-1" },
+        timestamp: 3,
       },
     ]);
   });

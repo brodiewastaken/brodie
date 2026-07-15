@@ -1992,6 +1992,7 @@ export async function applySessionPatchProjection<
   TFailure extends SessionPatchProjectionFailure,
 >(params: {
   storePath: string;
+  skipMaintenance?: boolean;
   resolveTarget: (snapshot: SessionPatchProjectionSnapshot) => SessionPatchProjectionTarget;
   project: (
     context: SessionPatchProjectionContext,

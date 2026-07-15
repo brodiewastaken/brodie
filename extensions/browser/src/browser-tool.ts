@@ -811,6 +811,13 @@ export function createBrowserTool(opts?: {
           const fullPage = Boolean(params.fullPage);
           const ref = readStringParam(params, "ref");
           const element = readStringParam(params, "element");
+          if (fullPage && (ref || element)) {
+            const error = new Error(
+              "fullPage screenshot cannot be combined with ref or element clipping",
+            ) as Error & { code: string };
+            error.code = "BROWSER_SCREENSHOT_INCOMPATIBLE_OPTIONS";
+            throw error;
+          }
           const labels = typeof params.labels === "boolean" ? params.labels : undefined;
           const type = params.type === "jpeg" ? "jpeg" : "png";
           const effectiveTimeoutMs = requestedTimeoutMs ?? DEFAULT_BROWSER_SCREENSHOT_TIMEOUT_MS;

@@ -1079,6 +1079,37 @@ describe("handleChatEvent", () => {
     expectTextChatMessage(state.chatMessages[1], "assistant", "Here is my reply");
   });
 
+  it("materializes terminal provider prose into the raw runtime timeline", () => {
+    const existingMessage = {
+      role: "user",
+      content: [{ type: "text", text: "Hi" }],
+      timestamp: 1,
+    };
+    const state = createState({
+      sessionKey: "main",
+      chatRunId: "run-1",
+      chatStream: "provider prose that was not authored through a conversational action",
+      chatStreamStartedAt: 100,
+      chatMessages: [existingMessage],
+    });
+
+    expect(
+      handleChatEvent(state, {
+        runId: "run-1",
+        sessionKey: "main",
+        state: "final",
+      }),
+    ).toBe("final");
+    expect(state.chatMessages).toHaveLength(2);
+    expect(state.chatMessages[0]).toEqual(existingMessage);
+    expectTextChatMessage(
+      state.chatMessages[1],
+      "assistant",
+      "provider prose that was not authored through a conversational action",
+    );
+    expect(state.chatStream).toBeNull();
+  });
+
   it("does not persist empty or whitespace-only stream on final", () => {
     const state = createState({
       sessionKey: "main",
@@ -1762,8 +1793,8 @@ describe("handleChatEvent", () => {
   });
 });
 
-describe("loadChatHistory filtering", () => {
-  it("filters legacy silent assistant messages from history", async () => {
+describe("loadChatHistory raw transcript retention", () => {
+  it("retains legacy silent assistant messages in exact history", async () => {
     const messages = [
       { role: "user", content: [{ type: "text", text: "Hello" }] },
       { role: "assistant", content: [{ type: "text", text: "NO_REPLY" }] },
@@ -1783,12 +1814,7 @@ describe("loadChatHistory filtering", () => {
 
     await loadChatHistory(state);
 
-    expect(state.chatMessages).toHaveLength(5);
-    expect(state.chatMessages[0]).toEqual(messages[0]);
-    expect(state.chatMessages[1]).toEqual(messages[2]);
-    expect(state.chatMessages[2]).toEqual(messages[3]);
-    expect(state.chatMessages[3]).toEqual(messages[4]);
-    expect(state.chatMessages[4]).toEqual(messages[5]);
+    expect(state.chatMessages).toEqual(messages);
     expect(state.chatThinkingLevel).toBe("low");
     expect(state.chatVerboseLevel).toBe("full");
     expect(state.chatLoading).toBe(false);
@@ -1810,7 +1836,7 @@ describe("loadChatHistory filtering", () => {
     expect(state.chatMessages).toHaveLength(1);
   });
 
-  it("filters the synthetic transcript-repair tool result from history", async () => {
+  it("retains synthetic transcript-repair tool results for forensic history", async () => {
     const messages = [
       { role: "user", content: [{ type: "text", text: "hello" }] },
       {
@@ -1842,10 +1868,10 @@ describe("loadChatHistory filtering", () => {
 
     await loadChatHistory(state);
 
-    expect(state.chatMessages).toEqual([messages[0], messages[2]]);
+    expect(state.chatMessages).toEqual(messages);
   });
 
-  it("keeps image-only user messages that carry transcript media paths", async () => {
+  it("retains empty and image-only user rows in exact history", async () => {
     const messages = [
       { role: "user", content: "", MediaPath: "/tmp/openclaw/user-upload.png" },
       {
@@ -1865,7 +1891,7 @@ describe("loadChatHistory filtering", () => {
 
     await loadChatHistory(state);
 
-    expect(state.chatMessages).toEqual([messages[0], messages[1]]);
+    expect(state.chatMessages).toEqual(messages);
   });
 
   it("keeps a user message even if it matches the synthetic repair text", async () => {
@@ -2541,7 +2567,7 @@ describe("loadChatHistory retry handling", () => {
     }
   });
 
-  it("filters assistant NO_REPLY messages and keeps user NO_REPLY messages", async () => {
+  it("retains assistant and user NO_REPLY rows in the raw timeline", async () => {
     const request = vi.fn().mockResolvedValue({
       messages: [
         { role: "assistant", content: [{ type: "text", text: "NO_REPLY" }] },
@@ -2562,6 +2588,7 @@ describe("loadChatHistory retry handling", () => {
       limit: 100,
     });
     expect(state.chatMessages).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "NO_REPLY" }] },
       { role: "assistant", content: [{ type: "text", text: "visible answer" }] },
       { role: "user", content: [{ type: "text", text: "NO_REPLY" }] },
     ]);
@@ -2570,7 +2597,7 @@ describe("loadChatHistory retry handling", () => {
     expect(state.lastError).toBeNull();
   });
 
-  it("filters heartbeat acknowledgements and internal-only user messages", async () => {
+  it("retains heartbeat acknowledgements and internal runtime rows", async () => {
     const request = vi.fn().mockResolvedValue({
       messages: [
         { role: "assistant", content: [{ type: "text", text: "HEARTBEAT_OK" }] },
@@ -2599,6 +2626,20 @@ describe("loadChatHistory retry handling", () => {
     await loadChatHistory(state);
 
     expect(state.chatMessages).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "HEARTBEAT_OK" }] },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: [
+              "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>",
+              "subagent completion payload",
+              "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+            ].join("\n"),
+          },
+        ],
+      },
       { role: "assistant", content: [{ type: "text", text: "visible answer" }] },
     ]);
   });

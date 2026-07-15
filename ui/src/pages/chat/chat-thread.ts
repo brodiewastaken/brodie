@@ -604,7 +604,15 @@ function hasRenderableNormalizedMessage(message: unknown): boolean {
   }
   const role = normalizeRoleForGrouping(normalized.role);
   const hasVisibleSenderLabel = role === "assistant" && Boolean(normalized.senderLabel?.trim());
-  return normalized.content.length > 0 || Boolean(normalized.replyTarget) || hasVisibleSenderLabel;
+  const hasConversationalAction = Boolean(
+    asRecord(asRecord(message)?.openclawConversationalAction),
+  );
+  return (
+    normalized.content.length > 0 ||
+    Boolean(normalized.replyTarget) ||
+    hasVisibleSenderLabel ||
+    hasConversationalAction
+  );
 }
 
 function sanitizeStreamText(text: string): string {

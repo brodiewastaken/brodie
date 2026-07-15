@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // Filesystem session history readers.
 // Parses transcript JSONL files for messages, previews, counts, and usage metadata.
 import fs from "node:fs";
@@ -316,7 +317,6 @@ async function readRecentTranscriptTailLinesAsync(
 const MAX_TRANSCRIPT_PARSE_LINE_BYTES = 256 * 1024;
 const OVERSIZED_TRANSCRIPT_METADATA_PREFIX_CHARS = 64 * 1024;
 const OVERSIZED_TRANSCRIPT_METADATA_SUFFIX_CHARS = 64 * 1024;
-const TRANSCRIPT_OVERSIZED_MESSAGE_PLACEHOLDER = "[chat.history omitted: message too large]";
 
 function isOversizedTranscriptLine(line: string): boolean {
   return Buffer.byteLength(line, "utf8") > MAX_TRANSCRIPT_PARSE_LINE_BYTES;
@@ -391,8 +391,14 @@ function buildOversizedTranscriptRecord(line: string): TailTranscriptRecord {
     message: {
       role,
       ...(idempotencyKey ? { idempotencyKey } : {}),
-      content: [{ type: "text", text: TRANSCRIPT_OVERSIZED_MESSAGE_PLACEHOLDER }],
-      __openclaw: { truncated: true, reason: "oversized" },
+      content: [],
+      __openclaw: {
+        deferredTranscriptRow: {
+          reason: "oversized",
+          byteLength: Buffer.byteLength(line, "utf8"),
+          sha256: createHash("sha256").update(line, "utf8").digest("hex"),
+        },
+      },
     },
   };
   return { record };
@@ -678,6 +684,216 @@ export async function readSessionMessageByIdAsync(
   }
   const message = indexedTranscriptEntryToMessage(entry);
   return { message, seq: entry.seq, oversized: false, found: true };
+}
+
+export type ReadIndexedSessionWindowOptions = {
+  maxMessages: number;
+  allowResetArchiveFallback?: boolean;
+};
+
+async function readIndexedSessionMessagesWindowAsync(params: {
+  sessionId: string;
+  storePath: string | undefined;
+  sessionFile: string | undefined;
+  agentId?: string;
+  beforeSeq?: number;
+  opts?: ReadIndexedSessionWindowOptions;
+}): Promise<unknown[]> {
+  const maxMessages = resolveNonNegativeIntegerOption(params.opts?.maxMessages, 0);
+  if (maxMessages === 0) {
+    return [];
+  }
+  const filePath =
+    params.opts?.allowResetArchiveFallback === true
+      ? await findExistingTranscriptHistoryPathAsync(
+          params.sessionId,
+          params.storePath,
+          params.sessionFile,
+          params.agentId,
+        )
+      : findExistingTranscriptPath(
+          params.sessionId,
+          params.storePath,
+          params.sessionFile,
+          params.agentId,
+        );
+  if (!filePath) {
+    return [];
+  }
+  const index = await readSessionTranscriptIndex(filePath);
+  if (!index || index.entries.length === 0) {
+    return [];
+  }
+  const beforeSeq = params.beforeSeq;
+  const entries =
+    beforeSeq === undefined
+      ? index.entries
+      : index.entries.filter((entry) => entry.seq < beforeSeq);
+  return entries.slice(-maxMessages).flatMap((entry) => indexedTranscriptEntryToMessages(entry));
+}
+
+/** Reads the indexed transcript tail with absolute sequence metadata. */
+export async function readSessionMessagesTailAsync(
+  sessionId: string,
+  storePath: string | undefined,
+  sessionFile: string | undefined,
+  opts?: ReadIndexedSessionWindowOptions,
+  agentId?: string,
+): Promise<unknown[]> {
+  return await readIndexedSessionMessagesWindowAsync({
+    sessionId,
+    storePath,
+    sessionFile,
+    opts,
+    agentId,
+  });
+}
+
+/** Reads the nearest indexed transcript rows below an exclusive sequence cursor. */
+export async function readSessionMessagesBeforeSeqAsync(
+  sessionId: string,
+  storePath: string | undefined,
+  sessionFile: string | undefined,
+  beforeSeq: number,
+  opts?: ReadIndexedSessionWindowOptions,
+  agentId?: string,
+): Promise<unknown[]> {
+  const normalizedBeforeSeq = resolveIntegerOption(beforeSeq, 0, { min: 1 });
+  if (normalizedBeforeSeq <= 1) {
+    return [];
+  }
+  return await readIndexedSessionMessagesWindowAsync({
+    sessionId,
+    storePath,
+    sessionFile,
+    beforeSeq: normalizedBeforeSeq,
+    opts,
+    agentId,
+  });
+}
+
+/** Fetches one full transcript row through the absolute sequence namespace. */
+export async function readSessionMessageBySeqAsync(
+  sessionId: string,
+  storePath: string | undefined,
+  sessionFile: string | undefined,
+  seq: number,
+  opts?: { allowResetArchiveFallback?: boolean; agentId?: string },
+): Promise<{ message?: unknown; seq?: number; oversized: boolean; found: boolean }> {
+  const normalizedSeq = resolveIntegerOption(seq, 0, { min: 1 });
+  if (normalizedSeq < 1) {
+    return { oversized: false, found: false };
+  }
+  const filePath =
+    opts?.allowResetArchiveFallback === true
+      ? await findExistingTranscriptHistoryPathAsync(
+          sessionId,
+          storePath,
+          sessionFile,
+          opts.agentId,
+        )
+      : findExistingTranscriptPath(sessionId, storePath, sessionFile, opts?.agentId);
+  if (!filePath) {
+    return { oversized: false, found: false };
+  }
+  const index = await readSessionTranscriptIndex(filePath);
+  const entry = index?.entries.find((candidate) => candidate.seq === normalizedSeq);
+  if (!entry) {
+    return { oversized: false, found: false };
+  }
+  if (entry.byteLength <= MAX_TRANSCRIPT_PARSE_LINE_BYTES) {
+    return {
+      message: indexedTranscriptEntryToMessage(entry),
+      seq: entry.seq,
+      oversized: false,
+      found: true,
+    };
+  }
+  return { oversized: true, found: true, seq: entry.seq };
+}
+
+export const MAX_TRANSCRIPT_ROW_CHUNK_BYTES = 512 * 1024;
+
+export type SessionMessageChunkBySeqResult = {
+  found: boolean;
+  seq?: number;
+  offset?: number;
+  totalBytes?: number;
+  bytes?: Uint8Array;
+  done?: boolean;
+};
+
+/** Reads one bounded byte range from the exact persisted JSONL row at seq. */
+export async function readSessionMessageChunkBySeqAsync(
+  sessionId: string,
+  storePath: string | undefined,
+  sessionFile: string | undefined,
+  seq: number,
+  chunkOffset: number,
+  chunkBytes: number,
+  opts?: { allowResetArchiveFallback?: boolean; agentId?: string },
+): Promise<SessionMessageChunkBySeqResult> {
+  const normalizedSeq = resolveIntegerOption(seq, 0, { min: 1 });
+  const normalizedOffset = resolveNonNegativeIntegerOption(chunkOffset, 0);
+  const normalizedChunkBytes = Math.min(
+    MAX_TRANSCRIPT_ROW_CHUNK_BYTES,
+    resolveIntegerOption(chunkBytes, MAX_TRANSCRIPT_ROW_CHUNK_BYTES, { min: 1 }),
+  );
+  if (normalizedSeq < 1) {
+    return { found: false };
+  }
+  const filePath =
+    opts?.allowResetArchiveFallback === true
+      ? await findExistingTranscriptHistoryPathAsync(
+          sessionId,
+          storePath,
+          sessionFile,
+          opts.agentId,
+        )
+      : findExistingTranscriptPath(sessionId, storePath, sessionFile, opts?.agentId);
+  if (!filePath) {
+    return { found: false };
+  }
+  const index = await readSessionTranscriptIndex(filePath);
+  const entry = index?.entries.find((candidate) => candidate.seq === normalizedSeq);
+  if (!entry || normalizedOffset > entry.byteLength) {
+    return { found: false };
+  }
+  const requestedBytes = Math.min(normalizedChunkBytes, entry.byteLength - normalizedOffset);
+  if (requestedBytes === 0) {
+    return {
+      found: true,
+      seq: entry.seq,
+      offset: normalizedOffset,
+      totalBytes: entry.byteLength,
+      bytes: new Uint8Array(),
+      done: true,
+    };
+  }
+  const handle = await fs.promises.open(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(requestedBytes);
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      requestedBytes,
+      entry.offset + normalizedOffset,
+    );
+    if (bytesRead <= 0) {
+      return { found: false };
+    }
+    const nextOffset = normalizedOffset + bytesRead;
+    return {
+      found: true,
+      seq: entry.seq,
+      offset: normalizedOffset,
+      totalBytes: entry.byteLength,
+      bytes: buffer.subarray(0, bytesRead),
+      done: nextOffset >= entry.byteLength,
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function visitSessionMessagesAsync(

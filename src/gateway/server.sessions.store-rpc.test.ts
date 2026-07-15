@@ -94,6 +94,7 @@ test("lists and patches session store via sessions.* RPC", async () => {
   expect(methods).toContain("sessions.list");
   expect(methods).toContain("sessions.preview");
   expect(methods).toContain("sessions.cleanup");
+  expect(methods).toContain("sessions.archive");
   expect(methods).toContain("sessions.patch");
   expect(methods).toContain("sessions.reset");
   expect(methods).toContain("sessions.delete");
@@ -553,6 +554,112 @@ test("lists and patches session store via sessions.* RPC", async () => {
   expect((badThinking.error as { message?: unknown } | undefined)?.message ?? "").toMatch(
     /invalid thinkinglevel/i,
   );
+});
+
+test("sessions.archive returns ordered outcomes for 1000 targets in one request", async () => {
+  const { storePath } = await createSessionStoreDir();
+  const mutableEntries = Object.fromEntries(
+    Array.from({ length: 998 }, (_, index) => [
+      `agent:main:archive-batch-${index}`,
+      { sessionId: `sess-archive-batch-${index}`, updatedAt: Date.now() - index },
+    ]),
+  );
+  await writeSessionStore({
+    entries: {
+      ...mutableEntries,
+      global: {
+        sessionId: "sess-global",
+        updatedAt: Date.now(),
+      },
+    },
+  });
+  const targets = [
+    ...Object.keys(mutableEntries).map((key) => ({ key, agentId: "main" })),
+    { key: "global", agentId: "main" },
+    { key: "global", agentId: "missing" },
+  ];
+
+  const archived = await directSessionHandlerReq<{
+    rows: Array<{ key: string; status: "archived" | "protected" | "error"; reason?: string }>;
+  }>("sessions.archive", { targets });
+
+  expect(archived.ok).toBe(true);
+  expect(archived.payload?.rows).toHaveLength(1000);
+  expect(archived.payload?.rows[0]).toEqual({
+    key: "agent:main:archive-batch-0",
+    status: "archived",
+  });
+  expect(archived.payload?.rows[997]).toEqual({
+    key: "agent:main:archive-batch-997",
+    status: "archived",
+  });
+  expect(archived.payload?.rows[998]).toEqual({
+    key: "global",
+    status: "protected",
+    reason: "Cannot archive an agent's main session.",
+  });
+  expect(archived.payload?.rows[999]).toMatchObject({
+    key: "global",
+    status: "error",
+  });
+
+  const persisted = JSON.parse(await fs.readFile(storePath, "utf8")) as Record<
+    string,
+    { archivedAt?: number }
+  >;
+  expect(
+    Object.entries(persisted).filter(
+      ([key, entry]) => key !== "global" && typeof entry.archivedAt === "number",
+    ),
+  ).toHaveLength(998);
+  expect(persisted.global?.archivedAt).toBeUndefined();
+});
+
+test("sessions.archive relocates a stable cron generation and preserves history", async () => {
+  const { dir, storePath } = await createSessionStoreDir();
+  const key = "agent:main:cron:daily";
+  await writeSessionStore({
+    entries: {
+      [key]: {
+        sessionId: "cron-session",
+        updatedAt: Date.now() - 60_000,
+        lifecycleRevision: "cron-revision",
+        sessionFile: path.join(dir, "cron-session.jsonl"),
+      },
+    },
+  });
+  await fs.writeFile(path.join(dir, "cron-session.jsonl"), "history\n", "utf-8");
+
+  const archived = await directSessionHandlerReq<{
+    rows: Array<{
+      key: string;
+      status: string;
+      archivedKey?: string;
+      sessionId?: string;
+      relocated?: boolean;
+    }>;
+  }>("sessions.archive", { targets: [{ key, agentId: "main" }] });
+
+  expect(archived.payload?.rows[0]).toEqual({
+    key,
+    status: "archived",
+    archivedKey: `${key}:run:cron-session`,
+    sessionId: "cron-session",
+    relocated: true,
+  });
+  const persisted = JSON.parse(await fs.readFile(storePath, "utf8")) as Record<string, unknown>;
+  expect(persisted[key]).toBeUndefined();
+  expect(persisted[`${key}:run:cron-session`]).toMatchObject({ archivedAt: expect.any(Number) });
+  expect(await fs.readFile(path.join(dir, "cron-session.jsonl"), "utf8")).toBe("history\n");
+
+  const retried = await directSessionHandlerReq<{
+    rows: Array<{ archivedKey?: string; relocated?: boolean; status: string }>;
+  }>("sessions.archive", { targets: [{ key, agentId: "main" }] });
+  expect(retried.payload?.rows[0]).toMatchObject({
+    status: "archived",
+    archivedKey: `${key}:run:cron-session`,
+    relocated: false,
+  });
 });
 
 test("sessions.list configuredAgentsOnly keeps configured-agent children and hides unrelated stores", async () => {

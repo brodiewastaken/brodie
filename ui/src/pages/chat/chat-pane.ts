@@ -33,9 +33,11 @@ import {
   applyChatAgentsList,
   clearChatHistory,
   loadChatHistory,
+  loadOlderChatHistory,
   syncSelectedSessionMessageSubscription,
 } from "./chat-history.ts";
 import { markQueuedChatSendsWaitingForReconnect } from "./chat-queue.ts";
+import type { RawTranscriptFullMessageResult } from "./chat-raw-transcript.ts";
 import { dismissRealtimeTalkError } from "./chat-realtime.ts";
 import { flushChatQueueForEvent, retryReconnectableQueuedChatSends } from "./chat-send.ts";
 import {
@@ -101,6 +103,104 @@ const NEW_SESSION_LIST_LOADING_MESSAGE =
   "Session list is still refreshing. Try New Chat again in a moment.";
 const NEW_SESSION_CREATE_FAILED_MESSAGE =
   "New Chat could not create a new session. Try again in a moment.";
+
+export async function loadRawTranscriptFullMessage(params: {
+  client: Pick<GatewayBrowserClient, "request"> | null;
+  connected: boolean;
+  sessionKey: string;
+  agentId?: string;
+  seq: number;
+  expectedSha256?: string;
+}): Promise<RawTranscriptFullMessageResult | null> {
+  if (!params.client || !params.connected) {
+    return null;
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const textChunks: string[] = [];
+  const byteChunks: Uint8Array[] = [];
+  let offset = 0;
+  let expectedTotalBytes: number | undefined;
+  while (true) {
+    const result = await params.client.request<{
+      ok?: boolean;
+      seq?: number;
+      unavailableReason?: "not_found" | "oversized" | "not_visible";
+      chunk?: {
+        offset: number;
+        byteLength: number;
+        totalBytes: number;
+        dataBase64: string;
+        done: boolean;
+      };
+    }>("chat.message.get", {
+      sessionKey: params.sessionKey,
+      ...(params.agentId ? { agentId: params.agentId } : {}),
+      seq: params.seq,
+      chunkOffset: offset,
+      chunkBytes: 512 * 1024,
+    });
+    if (!result.ok || !result.chunk) {
+      return {
+        ok: false,
+        unavailableReason: result.unavailableReason ?? "not_found",
+      };
+    }
+    const chunk = result.chunk;
+    if (
+      result.seq !== params.seq ||
+      chunk.offset !== offset ||
+      !Number.isSafeInteger(chunk.byteLength) ||
+      chunk.byteLength < 0 ||
+      chunk.byteLength > 512 * 1024 ||
+      !Number.isSafeInteger(chunk.totalBytes) ||
+      chunk.totalBytes < 0 ||
+      (expectedTotalBytes !== undefined && chunk.totalBytes !== expectedTotalBytes)
+    ) {
+      throw new Error("gateway returned an inconsistent transcript row chunk");
+    }
+    expectedTotalBytes ??= chunk.totalBytes;
+    const binary = globalThis.atob(chunk.dataBase64);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    if (bytes.byteLength !== chunk.byteLength || offset + bytes.byteLength > chunk.totalBytes) {
+      throw new Error("gateway returned an invalid transcript row chunk");
+    }
+    if (bytes.byteLength === 0 && !chunk.done) {
+      throw new Error("gateway returned a non-advancing transcript row chunk");
+    }
+    byteChunks.push(bytes);
+    textChunks.push(decoder.decode(bytes, { stream: true }));
+    offset += bytes.byteLength;
+    if (!chunk.done) {
+      continue;
+    }
+    if (offset !== chunk.totalBytes) {
+      throw new Error("gateway completed a transcript row before its declared byte length");
+    }
+    textChunks.push(decoder.decode());
+    if (params.expectedSha256) {
+      const completeBytes = new Uint8Array(offset);
+      let writeOffset = 0;
+      for (const byteChunk of byteChunks) {
+        completeBytes.set(byteChunk, writeOffset);
+        writeOffset += byteChunk.byteLength;
+      }
+      const digest = new Uint8Array(
+        await globalThis.crypto.subtle.digest("SHA-256", completeBytes),
+      );
+      const actualSha256 = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join(
+        "",
+      );
+      if (actualSha256 !== params.expectedSha256) {
+        throw new Error("gateway transcript row hash mismatch");
+      }
+    }
+    return {
+      ok: true,
+      seq: params.seq,
+      message: JSON.parse(textChunks.join("")) as unknown,
+    };
+  }
+}
 
 function keyboardEventPathMatches(event: KeyboardEvent, selector: string): boolean {
   return event
@@ -840,6 +940,22 @@ class ChatPane extends LitElement {
       compactionStatus: state.compactionStatus,
       fallbackStatus: state.fallbackStatus,
       messages: state.chatMessages,
+      historyHasMore: state.chatHistoryHasMore,
+      historyLoadingOlder: state.chatHistoryLoadingOlder,
+      onLoadOlderHistory: () => {
+        void loadOlderChatHistory(state).finally(() => state.requestUpdate?.());
+      },
+      onLoadRawFullMessage: async (seq, expectedSha256) => {
+        const agentId = scopedAgentParamsForSession(state, state.sessionKey).agentId;
+        return loadRawTranscriptFullMessage({
+          client: state.client,
+          connected: state.connected,
+          sessionKey: state.sessionKey,
+          ...(agentId ? { agentId } : {}),
+          seq,
+          ...(expectedSha256 ? { expectedSha256 } : {}),
+        });
+      },
       sideResult: state.chatSideResult,
       toolMessages: state.chatToolMessages,
       streamSegments: state.chatStreamSegments,

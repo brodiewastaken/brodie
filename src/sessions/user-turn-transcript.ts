@@ -14,6 +14,7 @@ import type {
   PersistedUserTurnMessage,
   UserTurnBeforeMessageWrite,
   UserTurnInput,
+  UserTurnModelInputSnapshot,
   UserTurnSessionEntry,
   UserTurnTranscriptFileTarget,
   UserTurnTranscriptPersistResult,
@@ -26,6 +27,7 @@ import type {
 export type {
   PersistedUserTurnMessage,
   UserTurnInput,
+  UserTurnModelInputSnapshot,
   UserTurnTranscriptRecorder,
 } from "./user-turn-transcript.types.js";
 export {
@@ -287,6 +289,21 @@ function readOpenClawMessageMeta(message: AgentMessage): Record<string, unknown>
   return meta && typeof meta === "object" && !Array.isArray(meta)
     ? (meta as Record<string, unknown>)
     : undefined;
+}
+
+/**
+ * Captures the exact current-turn text items installed at the LLM boundary.
+ * This is operator-only transcript metadata and never re-enters replay context.
+ */
+export function attachUserTurnModelInputSnapshot(
+  message: PersistedUserTurnMessage,
+  snapshot: UserTurnModelInputSnapshot,
+): void {
+  const record = message as unknown as Record<string, unknown>;
+  record["__openclaw"] = {
+    ...readOpenClawMessageMeta(message),
+    modelInput: snapshot,
+  };
 }
 
 export function buildPersistedUserTurnMessage(params: UserTurnInput): PersistedUserTurnMessage {

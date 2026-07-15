@@ -64,6 +64,8 @@ export type SessionsProps = {
   checkpointLoadingKey: string | null;
   checkpointBusyKey: string | null;
   checkpointErrorByKey: Record<string, string>;
+  archiveAllPending: boolean;
+  archiveAllSummary: string | null;
   onFiltersChange: (next: {
     activeMinutes: string;
     limit: string;
@@ -80,6 +82,7 @@ export type SessionsProps = {
   onPageChange: (page: number) => void;
   onPageSizeChange: (size: number) => void;
   onRefresh: () => void;
+  onArchiveAll: () => void;
   onPatch: (
     key: string,
     patch: {
@@ -113,7 +116,6 @@ const DEFAULT_THINK_LEVELS = ["off", "minimal", "low", "medium", "high"] as cons
 const VERBOSE_LEVEL_VALUES = ["", "off", "on", "full"] as const;
 const FAST_LEVEL_VALUES = ["", "auto", "on", "off"] as const;
 const REASONING_LEVELS = ["", "off", "on", "stream"] as const;
-const PAGE_SIZES = [10, 25, 50, 100] as const;
 
 function getAgentIdentity(
   agentIdentityById: Record<string, AgentIdentityResult>,
@@ -337,24 +339,11 @@ function sortRows(
   });
 }
 
-function paginateRows<T>(rows: T[], page: number, pageSize: number): T[] {
-  const start = page * pageSize;
-  return rows.slice(start, start + pageSize);
-}
-
-function hasPositiveNumberFilter(value: string): boolean {
-  const parsed = Number(value.trim());
-  return Number.isFinite(parsed) && parsed > 0;
-}
-
 function hasActiveFilters(props: SessionsProps): boolean {
   return (
     normalizeLowercaseStringOrEmpty(props.searchQuery).length > 0 ||
-    hasPositiveNumberFilter(props.activeMinutes) ||
-    hasPositiveNumberFilter(props.limit) ||
     !props.includeGlobal ||
-    !props.includeUnknown ||
-    !props.showArchived
+    !props.includeUnknown
   );
 }
 
@@ -705,10 +694,6 @@ export function renderSessions(props: SessionsProps) {
   const rawRows = props.result?.sessions ?? [];
   const filtered = filterRows(rawRows, props.searchQuery, props.agentIdentityById);
   const sorted = sortRows(filtered, props.sortColumn, props.sortDir);
-  const totalRows = sorted.length;
-  const totalPages = Math.max(1, Math.ceil(totalRows / props.pageSize));
-  const page = Math.min(props.page, totalPages - 1);
-  // Grouping shows all rows in their sections; pagination would split groups confusingly.
   const groupingActive = props.groupBy !== "none";
   const groups = groupingActive
     ? groupSessionRows({
@@ -717,7 +702,7 @@ export function renderSessions(props: SessionsProps) {
         knownCategories: props.knownCategories,
       })
     : null;
-  const paginated = groupingActive ? sorted : paginateRows(sorted, page, props.pageSize);
+  const visibleRows = sorted;
   const emptyBecauseFiltered =
     rawRows.length === 0 ? hasActiveFilters(props) : filtered.length === 0;
   const liveCount = rawRows.filter((row) => isSessionRunActive(row)).length;
@@ -725,11 +710,8 @@ export function renderSessions(props: SessionsProps) {
     rawRows.length === 1
       ? t("sessionsView.groupRowCountOne", { count: "1" })
       : t("sessionsView.groupRowCount", { count: String(rawRows.length) });
-  const activeTooltip = t("sessionsView.activeTooltip", { count: props.activeMinutes.trim() });
-  const limitTooltip = t("sessionsView.limitTooltip");
   const globalTooltip = t("sessionsView.globalTooltip");
   const unknownTooltip = t("sessionsView.unknownTooltip");
-  const showArchivedTooltip = t("sessionsView.archivedOnlyTooltip");
 
   const sortHeader = (
     col: "key" | "kind" | "updated" | "tokens",
@@ -779,13 +761,27 @@ export function renderSessions(props: SessionsProps) {
               `
             : html`<div class="card-sub">${t("sessionsView.subtitle")}</div>`}
         </div>
-        <button class="btn" ?disabled=${props.loading} @click=${props.onRefresh}>
-          ${props.loading ? t("common.loading") : t("common.refresh")}
-        </button>
+        <div class="sessions-header__actions">
+          <button
+            class="btn danger"
+            ?disabled=${props.loading || props.archiveAllPending}
+            @click=${props.onArchiveAll}
+          >
+            ${props.archiveAllPending ? t("common.loading") : t("sessionsView.archiveAll")}
+          </button>
+          <button class="btn" ?disabled=${props.loading} @click=${props.onRefresh}>
+            ${props.loading ? t("common.loading") : t("common.refresh")}
+          </button>
+        </div>
       </div>
 
       ${props.error
         ? html`<div class="callout danger" style="margin-bottom: 12px;">${props.error}</div>`
+        : nothing}
+      ${props.archiveAllSummary
+        ? html`<div class="callout sessions-archive-all-summary" style="margin-bottom: 12px;">
+            ${props.archiveAllSummary}
+          </div>`
         : nothing}
 
       <div class="data-table-wrapper">
@@ -798,44 +794,6 @@ export function renderSessions(props: SessionsProps) {
               .value=${props.searchQuery}
               @input=${(e: Event) => props.onSearchChange((e.target as HTMLInputElement).value)}
             />
-          </div>
-          <div class="session-filter-primary-row">
-            <openclaw-tooltip .content=${activeTooltip}>
-              <label class="session-filter-field">
-                <span class="session-filter-label">${t("sessionsView.active")}</span>
-                <input
-                  class="session-filter-input session-filter-input--minutes"
-                  placeholder=${t("sessionsView.minutesPlaceholder")}
-                  .value=${props.activeMinutes}
-                  ?disabled=${props.showArchived}
-                  @input=${(e: Event) =>
-                    props.onFiltersChange({
-                      activeMinutes: (e.target as HTMLInputElement).value,
-                      limit: props.limit,
-                      includeGlobal: props.includeGlobal,
-                      includeUnknown: props.includeUnknown,
-                      showArchived: props.showArchived,
-                    })}
-                />
-              </label>
-            </openclaw-tooltip>
-            <openclaw-tooltip .content=${limitTooltip}>
-              <label class="session-filter-field">
-                <span class="session-filter-label">${t("sessionsView.limit")}</span>
-                <input
-                  class="session-filter-input session-filter-input--limit"
-                  .value=${props.limit}
-                  @input=${(e: Event) =>
-                    props.onFiltersChange({
-                      activeMinutes: props.activeMinutes,
-                      limit: (e.target as HTMLInputElement).value,
-                      includeGlobal: props.includeGlobal,
-                      includeUnknown: props.includeUnknown,
-                      showArchived: props.showArchived,
-                    })}
-                />
-              </label>
-            </openclaw-tooltip>
           </div>
           <div
             class="session-filter-toggle-group"
@@ -868,21 +826,6 @@ export function renderSessions(props: SessionsProps) {
                   includeGlobal: props.includeGlobal,
                   includeUnknown: checked,
                   showArchived: props.showArchived,
-                }),
-            })}
-            ${renderFilterToggle({
-              name: "showArchived",
-              checked: props.showArchived,
-              label: t("sessionsView.archivedOnly"),
-              title: showArchivedTooltip,
-              extraClass: "session-archive-toggle",
-              onChange: (checked) =>
-                props.onFiltersChange({
-                  activeMinutes: props.activeMinutes,
-                  limit: props.limit,
-                  includeGlobal: props.includeGlobal,
-                  includeUnknown: props.includeUnknown,
-                  showArchived: checked,
                 }),
             })}
           </div>
@@ -936,19 +879,21 @@ export function renderSessions(props: SessionsProps) {
             <thead>
               <tr>
                 <th class="data-table-checkbox-col">
-                  ${paginated.length > 0
+                  ${visibleRows.length > 0
                     ? html`<input
                         type="checkbox"
-                        .checked=${paginated.length > 0 &&
-                        paginated.every((r) => props.selectedKeys.has(r.key))}
-                        .indeterminate=${paginated.some((r) => props.selectedKeys.has(r.key)) &&
-                        !paginated.every((r) => props.selectedKeys.has(r.key))}
+                        .checked=${visibleRows.length > 0 &&
+                        visibleRows.every((r) => props.selectedKeys.has(r.key))}
+                        .indeterminate=${visibleRows.some((r) => props.selectedKeys.has(r.key)) &&
+                        !visibleRows.every((r) => props.selectedKeys.has(r.key))}
                         @change=${() => {
-                          const allSelected = paginated.every((r) => props.selectedKeys.has(r.key));
+                          const allSelected = visibleRows.every((r) =>
+                            props.selectedKeys.has(r.key),
+                          );
                           if (allSelected) {
-                            props.onDeselectPage(paginated.map((r) => r.key));
+                            props.onDeselectPage(visibleRows.map((r) => r.key));
                           } else {
-                            props.onSelectPage(paginated.map((r) => r.key));
+                            props.onSelectPage(visibleRows.map((r) => r.key));
                           }
                         }}
                         aria-label=${t("sessionsView.selectAllOnPage")}
@@ -968,7 +913,7 @@ export function renderSessions(props: SessionsProps) {
               </tr>
             </thead>
             <tbody>
-              ${paginated.length === 0
+              ${visibleRows.length === 0
                 ? html`
                     <tr>
                       <td colspan=${sessionsTableColumnCount(props)} class="data-table-empty-cell">
@@ -991,40 +936,10 @@ export function renderSessions(props: SessionsProps) {
                       section.unshift(renderGroupHeaderRow(group, props));
                       return section;
                     })
-                  : paginated.flatMap((row) => renderRows(row, props))}
+                  : visibleRows.flatMap((row) => renderRows(row, props))}
             </tbody>
           </table>
         </div>
-
-        ${totalRows > 0 && !groupingActive
-          ? html`
-              <div class="data-table-pagination">
-                <div class="data-table-pagination__info">
-                  ${page * props.pageSize + 1}-${Math.min((page + 1) * props.pageSize, totalRows)}
-                  of ${totalRows} row${totalRows === 1 ? "" : "s"}
-                </div>
-                <div class="data-table-pagination__controls">
-                  <select
-                    class="data-table-pagination__size"
-                    .value=${String(props.pageSize)}
-                    @change=${(e: Event) =>
-                      props.onPageSizeChange(Number((e.target as HTMLSelectElement).value))}
-                  >
-                    ${PAGE_SIZES.map((s) => html`<option value=${s}>${s} per page</option>`)}
-                  </select>
-                  <button ?disabled=${page <= 0} @click=${() => props.onPageChange(page - 1)}>
-                    Previous
-                  </button>
-                  <button
-                    ?disabled=${page >= totalPages - 1}
-                    @click=${() => props.onPageChange(page + 1)}
-                  >
-                    ${t("common.next")}
-                  </button>
-                </div>
-              </div>
-            `
-          : nothing}
       </div>
     </section>
   `;
@@ -1050,10 +965,10 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
   const identityEmoji = normalizeOptionalString(agentIdentity?.emoji) ?? "";
   const identityName = normalizeOptionalString(agentIdentity?.name) ?? "";
   const friendlyKeyLabel =
-    identityName && keyParts
+    identityName && keyParts && !row.key.includes(":conversation:")
       ? `${identityEmoji ? `${identityEmoji} ` : ""}${identityName} (${keyParts.channel})`
       : null;
-  const keyCellTitle = friendlyKeyLabel ?? row.key;
+  const keyCellTitle = row.key;
   const isMainSession =
     row.key === "main" ||
     parseAgentSessionKey(row.key)?.rest === normalizeLowercaseStringOrEmpty(props.mainKey);
@@ -1133,7 +1048,7 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
       </td>
       <td class="data-table-key-col">
         <openclaw-tooltip .content=${keyCellTitle}>
-          <div class=${friendlyKeyLabel ? "session-key-cell" : "mono session-key-cell"}>
+          <div class="mono session-key-cell">
             <span class="session-key-cell__primary">
               ${row.unread === true
                 ? html`<span
@@ -1162,9 +1077,9 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
                         props.onNavigateToChat(row.key);
                       }
                     }}
-                    >${friendlyKeyLabel ?? row.key}</a
+                    >${row.key}</a
                   >`
-                : html`<span>${friendlyKeyLabel ?? row.key}</span>`}
+                : html`<span>${row.key}</span>`}
               ${trimmedLabel
                 ? html`<span class="session-label-chip" title=${trimmedLabel}
                     >${trimmedLabel}</span
@@ -1173,7 +1088,9 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
             </span>
             ${showDisplayName
               ? html`<span class="muted session-key-display-name">${displayName}</span>`
-              : nothing}
+              : friendlyKeyLabel
+                ? html`<span class="muted session-key-display-name">${friendlyKeyLabel}</span>`
+                : nothing}
           </div>
         </openclaw-tooltip>
       </td>

@@ -101,6 +101,13 @@ export function isAssistantHeartbeatAckForDisplay(message: unknown): boolean {
   if (role !== "assistant") {
     return false;
   }
+  if (
+    entry.openclawConversationalAction &&
+    typeof entry.openclawConversationalAction === "object" &&
+    !Array.isArray(entry.openclawConversationalAction)
+  ) {
+    return false;
+  }
   if (typeof entry.senderLabel === "string" && entry.senderLabel.trim()) {
     return false;
   }

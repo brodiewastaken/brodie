@@ -23,6 +23,7 @@ import {
   waitForDiagnosticEventsDrained,
   type DiagnosticEventPayload,
 } from "../../infra/diagnostic-events.js";
+import type { JsonValue } from "../../scheduler/conversation-scheduler.js";
 import {
   interruptSessionWorkAdmissions,
   runExclusiveSessionLifecycleMutation,
@@ -41,7 +42,7 @@ import {
 import { withTempDir } from "../../test-helpers/temp-dir.js";
 import { captureEnv, setTestEnvValue } from "../../test-utils/env.js";
 import { setGatewayDedupeEntry } from "./agent-wait-dedupe.js";
-import { agentHandlers } from "./agent.js";
+import { agentHandlers, executeRecoveredGatewayAgentTurn } from "./agent.js";
 import { chatHandlers } from "./chat.js";
 import { expectSubagentFollowupReactivation } from "./subagent-followup.test-helpers.js";
 import type { GatewayRequestContext } from "./types.js";
@@ -77,7 +78,12 @@ const mocks = vi.hoisted(() => ({
       lastInteractionAt: entry?.lastInteractionAt,
     }),
   ),
+  admitRuntimeTurn: vi.fn(),
   lifecycleGeneration: "test-generation",
+}));
+
+vi.mock("../../scheduler/runtime-turn-admission.js", () => ({
+  admitRuntimeTurnThroughScheduler: mocks.admitRuntimeTurn,
 }));
 
 vi.mock("../session-utils.js", async () => {
@@ -622,6 +628,17 @@ async function invokeAgentIdentityGet(
 }
 
 describe("gateway agent handler", () => {
+  beforeEach(() => {
+    mocks.admitRuntimeTurn.mockReset().mockImplementation(async (params) => {
+      const completion = Promise.resolve().then(() => params.execute(params.runId));
+      return {
+        durablyAccepted: true,
+        started: Promise.resolve(),
+        completion,
+      };
+    });
+  });
+
   afterEach(() => {
     envSnapshot.restore();
     resetDetachedTaskLifecycleRuntimeForTests();
@@ -651,6 +668,145 @@ describe("gateway agent handler", () => {
     dateOnlyFakeClockActive = false;
     vi.useRealTimers();
     resetExecApprovalFollowupRuntimeHandoffsForTests();
+  });
+
+  it("durably admits an operator run before a bounded accepted ack", async () => {
+    primeMainAgentRun({ cfg: mocks.loadConfigReturn });
+    let releaseLane!: () => void;
+    const laneBlocked = new Promise<void>((resolve) => {
+      releaseLane = resolve;
+    });
+    let laneCompletion!: Promise<unknown>;
+    mocks.admitRuntimeTurn.mockImplementationOnce(async (params) => {
+      laneCompletion = laneBlocked.then(() => params.execute(params.runId));
+      return {
+        durablyAccepted: true,
+        started: laneBlocked,
+        completion: laneCompletion,
+      };
+    });
+
+    const respond = await invokeAgent(
+      {
+        message: "operator work",
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        idempotencyKey: "operator-bounded-ack",
+      },
+      {
+        client: operatorWriteGatewayClient(),
+        flushDispatch: false,
+      },
+    );
+
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ runId: "operator-bounded-ack", status: "accepted" }),
+      undefined,
+      { runId: "operator-bounded-ack" },
+    );
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    expect(mocks.admitRuntimeTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        producerKind: "operator",
+        sessionKey: "agent:main:main",
+        runId: "operator-bounded-ack",
+        recoveryPayload: expect.objectContaining({
+          kind: "gateway_operator_agent",
+          runId: "operator-bounded-ack",
+          sessionKey: "agent:main:main",
+        }),
+      }),
+    );
+    const admittedPayload = mocks.admitRuntimeTurn.mock.calls[0]?.[0]?.recoveryPayload;
+    // eslint-disable-next-line unicorn/prefer-structured-clone
+    expect(JSON.parse(JSON.stringify(admittedPayload))).toEqual(admittedPayload);
+    releaseLane();
+    await laneCompletion;
+  });
+
+  it("rehydrates a never-started authorized operator payload through the internal agent core", async () => {
+    primeMainAgentRun({ cfg: mocks.loadConfigReturn });
+    let recoveryPayload: JsonValue | undefined;
+    let releaseOriginal!: () => Promise<unknown>;
+    mocks.admitRuntimeTurn.mockImplementationOnce(async (params) => {
+      recoveryPayload = params.recoveryPayload;
+      releaseOriginal = async () => await params.execute(params.runId);
+      return {
+        durablyAccepted: true,
+        started: new Promise<void>(() => {}),
+        completion: new Promise<unknown>(() => {}),
+      };
+    });
+    const context = makeContext();
+
+    await invokeAgent(
+      {
+        message: "recover me",
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        idempotencyKey: "operator-recovery",
+      },
+      { client: operatorWriteGatewayClient(), context, flushDispatch: false },
+    );
+    expect(recoveryPayload).toBeDefined();
+    mocks.agentCommand.mockClear();
+
+    await executeRecoveredGatewayAgentTurn({
+      agentId: "main",
+      sessionKey: "agent:main:main",
+      runId: "operator-recovery",
+      payload: recoveryPayload!,
+      context,
+    });
+
+    expect(mocks.agentCommand).toHaveBeenCalledOnce();
+    expect(readLastAgentCommandCall()).toEqual(
+      expect.objectContaining({
+        message: "recover me",
+        runId: "operator-recovery",
+        sessionKey: "agent:main:main",
+      }),
+    );
+    await releaseOriginal();
+  });
+
+  it("restores deterministic terminal dedupe for an already-delivered operator retry", async () => {
+    primeMainAgentRun({ cfg: mocks.loadConfigReturn });
+    mocks.agentCommand.mockClear();
+    mocks.admitRuntimeTurn.mockResolvedValueOnce({
+      durablyAccepted: true,
+      existingTerminalState: "delivered",
+      started: Promise.resolve(),
+      completion: Promise.resolve(undefined),
+    });
+    const context = makeContext();
+
+    const respond = await invokeAgent(
+      {
+        message: "do not replay",
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        idempotencyKey: "operator-terminal-retry",
+      },
+      { client: operatorWriteGatewayClient(), context, flushDispatch: false },
+    );
+
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      {
+        runId: "operator-terminal-retry",
+        status: "ok",
+        summary: "already completed",
+      },
+      undefined,
+      { cached: true, runId: "operator-terminal-retry" },
+    );
+    expect(context.dedupe.get("agent:operator-terminal-retry")).toMatchObject({
+      ok: true,
+      payload: { runId: "operator-terminal-retry", status: "ok" },
+    });
   });
 
   it("passes resolved maintenance config to the gateway admission store write", async () => {

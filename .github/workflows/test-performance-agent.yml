@@ -1,11 +1,6 @@
 name: Test Performance Agent
 
 on:
-  workflow_run: # zizmor: ignore[dangerous-triggers] main-only test optimization after trusted CI; job gates repository, event, branch, actor, conclusion, current main SHA, and daily cadence before using write token
-    workflows:
-      - CI
-    types:
-      - completed
   workflow_dispatch:
 
 permissions:

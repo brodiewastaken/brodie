@@ -209,6 +209,18 @@ describe("parseSessionKeyParts", () => {
     });
   });
 
+  it("parses readable canonical conversation dimensions", () => {
+    expect(
+      parseSessionKeyParts(
+        "agent:main:conversation:whatsapp:brodie%3Abackup:group:120363406331109499@g.us",
+      ),
+    ).toEqual({
+      agentId: "main",
+      channel: "whatsapp",
+      accountId: "brodie:backup",
+    });
+  });
+
   it("returns null for non-agent or malformed keys", () => {
     expect(parseSessionKeyParts("global:default")).toBeNull();
     expect(parseSessionKeyParts("direct:some-key")).toBeNull();

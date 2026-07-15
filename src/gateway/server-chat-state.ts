@@ -290,7 +290,6 @@ export function createSessionMessageSubscriberRegistry(): SessionMessageSubscrib
       const connIds = sessionToConnIds.get(normalizedSessionKey) ?? new Set<string>();
       connIds.add(normalizedConnId);
       sessionToConnIds.set(normalizedSessionKey, connIds);
-
       const sessionKeys = connToSessionKeys.get(normalizedConnId) ?? new Set<string>();
       sessionKeys.add(normalizedSessionKey);
       connToSessionKeys.set(normalizedConnId, sessionKeys);
