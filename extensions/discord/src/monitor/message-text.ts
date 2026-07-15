@@ -1,5 +1,6 @@
 // Discord plugin module implements message text behavior.
 import { ComponentType } from "discord-api-types/v10";
+import { runTasksWithConcurrency } from "openclaw/plugin-sdk/concurrency-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { Message } from "../internal/discord.js";
 import {
@@ -67,10 +68,68 @@ function resolveDiscordMentions(text: string, message: Message): string {
   }
   let out = text;
   for (const user of mentions) {
-    const label = user.globalName || user.username;
-    out = out.replace(new RegExp(`<@!?${user.id}>`, "g"), `@${label}`);
+    const username = user.username?.trim();
+    if (!username) {
+      continue;
+    }
+    out = out.replace(new RegExp(`<@!?${user.id}>`, "g"), `@${username} [${user.id}]`);
   }
   return out;
+}
+
+export async function resolveDiscordInboundMessageText(
+  message: Message,
+  options?: {
+    fallbackText?: string;
+    includeForwarded?: boolean;
+    resolveChannelName?: (channelId: string) => Promise<string | null | undefined>;
+  },
+): Promise<string> {
+  const text = resolveDiscordMessageText(message, options);
+  if (!text.includes("<#") || !options?.resolveChannelName) {
+    return text;
+  }
+
+  const channelIds = new Set<string>();
+  for (const match of text.matchAll(/#[^#[\]\n]+? \[<#(\d+)>\]|<#(\d+)>/gu)) {
+    const channelId = match[1] ?? match[2];
+    if (channelId) {
+      channelIds.add(channelId);
+    }
+  }
+  if (channelIds.size === 0) {
+    return text;
+  }
+
+  const names = new Map<string, string>();
+  const { results } = await runTasksWithConcurrency({
+    tasks: [...channelIds].map((channelId) => async () => {
+      try {
+        const name = (await options.resolveChannelName?.(channelId))?.trim();
+        return { channelId, name };
+      } catch {
+        // Native ids remain visible when Discord cannot resolve a channel name.
+        return { channelId, name: undefined };
+      }
+    }),
+    limit: 4,
+  });
+  for (const result of results) {
+    if (result?.name) {
+      names.set(result.channelId, result.name);
+    }
+  }
+  return text.replace(
+    /#[^#[\]\n]+? \[<#(\d+)>\]|<#(\d+)>/gu,
+    (token, canonicalId: string | undefined, rawId: string | undefined) => {
+      const channelId = canonicalId ?? rawId;
+      if (!channelId) {
+        return token;
+      }
+      const name = names.get(channelId);
+      return name ? `#${name} [<#${channelId}>]` : `<#${channelId}>`;
+    },
+  );
 }
 
 function resolveDiscordForwardedMessagesText(message: Message): string {

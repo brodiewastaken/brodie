@@ -50,7 +50,11 @@ async function processDiscordQueuedMessage(params: {
     (await loadMessageProcessRuntime()).processDiscordMessage;
   const abortSignal = mergeAbortSignals([params.job.runtime.abortSignal, params.lifecycleSignal]);
   try {
-    await processDiscordMessageImpl(materializeDiscordInboundJob(params.job, abortSignal));
+    await processDiscordMessageImpl(
+      materializeDiscordInboundJob(params.job, abortSignal),
+      undefined,
+      params.job.preparedProcessContext,
+    );
     await commitDiscordInboundReplay({
       replayKeys: params.job.replayKeys,
       replayGuard: params.replayGuard,

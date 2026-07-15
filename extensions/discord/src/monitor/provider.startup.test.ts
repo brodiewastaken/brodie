@@ -86,6 +86,9 @@ vi.mock("./listeners.js", () => ({
   DiscordThreadUpdateListener: function DiscordThreadUpdateListener() {
     return { type: "thread-update" };
   },
+  DiscordTypingListener: function DiscordTypingListener() {
+    return { type: "typing-start" };
+  },
   registerDiscordListener: vi.fn(),
 }));
 
@@ -380,7 +383,17 @@ describe("registerDiscordMonitorListeners", () => {
   it("skips reaction listeners when every configured guild disables reactions and DMs are off", () => {
     registerDiscordMonitorListeners(createListenerParams());
 
-    expect(registeredListenerTypes()).toEqual(["interaction", "message", "thread-update"]);
+    expect(registeredListenerTypes()).toEqual([
+      "interaction",
+      "message",
+      "thread-update",
+      "typing-start",
+    ]);
+  });
+
+  it("registers the scheduler typing listener", () => {
+    registerDiscordMonitorListeners(createListenerParams());
+    expect(registeredListenerTypes()).toContain("typing-start");
   });
 
   it("keeps reaction listeners when direct messages can emit reaction notifications", () => {

@@ -978,10 +978,51 @@ type InferredSessionDelivery = {
 const USER_PREFIXED_DIRECT_TARGET_CHANNELS = new Set(["discord", "mattermost", "msteams", "slack"]);
 
 function formatSessionDeliveryTarget(channel: string, peerKind: string, to: string): string {
-  return (peerKind === "direct" || peerKind === "dm") &&
-    USER_PREFIXED_DIRECT_TARGET_CHANNELS.has(channel)
-    ? `user:${to}`
-    : to;
+  const direct = peerKind === "direct" || peerKind === "dm";
+  if (direct && USER_PREFIXED_DIRECT_TARGET_CHANNELS.has(channel)) {
+    return to.startsWith("user:") ? to : `user:${to}`;
+  }
+  if (channel === "discord") {
+    return to.startsWith("channel:") ? to : `channel:${to}`;
+  }
+  return to;
+}
+
+function resolveDiscordCurrentTarget(params: {
+  currentChannelId?: string;
+  currentMessagingTarget?: string;
+  sessionTarget?: string;
+}): string | undefined {
+  const normalizeTyped = (value: string | undefined): string | undefined => {
+    const trimmed = value?.trim();
+    const match = trimmed?.match(/^(channel|user):(.+)$/);
+    if (!match) {
+      return undefined;
+    }
+    const kind = match[1];
+    let id = match[2];
+    while (id.startsWith(`${kind}:`)) {
+      id = id.slice(kind.length + 1);
+    }
+    if (!id || /^(?:channel|user):/.test(id)) {
+      throw new Error("invalid qualified Discord reply target");
+    }
+    return `${kind}:${id}`;
+  };
+  const liveTyped = [params.currentChannelId, params.currentMessagingTarget]
+    .map(normalizeTyped)
+    .filter((value): value is string => Boolean(value));
+  if (liveTyped.length > 1 && new Set(liveTyped).size > 1) {
+    throw new Error("conflicting authoritative Discord reply targets");
+  }
+  const selected = liveTyped[0] ?? normalizeTyped(params.sessionTarget);
+  if (selected) {
+    return selected;
+  }
+  if (params.currentMessagingTarget || params.currentChannelId || params.sessionTarget) {
+    throw new Error("Discord reply target must use channel:<id> or user:<id>");
+  }
+  return undefined;
 }
 
 function inferDeliveryFromSessionKey(
@@ -1026,10 +1067,19 @@ function resolveEffectiveCurrentChannelContext(options?: MessageToolOptions): {
       sessionDeliveryChannel === normalizeMessageChannel(currentChannelProvider)
         ? sessionDelivery?.to
         : undefined;
+    const authoritativeTarget =
+      normalizeMessageChannel(currentChannelProvider) === "discord"
+        ? resolveDiscordCurrentTarget({
+            currentChannelId,
+            currentMessagingTarget: options?.currentMessagingTarget,
+            sessionTarget: sameChannelSessionTarget,
+          })
+        : undefined;
     return {
       currentChannelProvider,
-      currentChannelId: currentChannelId ?? sameChannelSessionTarget,
-      currentMessagingTarget: options?.currentMessagingTarget ?? sameChannelSessionTarget,
+      currentChannelId: authoritativeTarget ?? currentChannelId ?? sameChannelSessionTarget,
+      currentMessagingTarget:
+        authoritativeTarget ?? options?.currentMessagingTarget ?? sameChannelSessionTarget,
     };
   }
   return {

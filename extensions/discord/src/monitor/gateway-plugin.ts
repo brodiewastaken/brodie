@@ -180,6 +180,9 @@ export function resolveDiscordGatewayIntents(params?: ResolveDiscordGatewayInten
     discordGateway.GatewayIntents.DirectMessages |
     discordGateway.GatewayIntents.GuildMessageReactions |
     discordGateway.GatewayIntents.DirectMessageReactions;
+  intents |=
+    discordGateway.GatewayIntents.GuildMessageTyping |
+    discordGateway.GatewayIntents.DirectMessageTyping;
   if (voiceStatesEnabled) {
     intents |= discordGateway.GatewayIntents.GuildVoiceStates;
   }

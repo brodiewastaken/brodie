@@ -31,5 +31,6 @@ export {
 export {
   resolveDiscordEmbedText,
   resolveDiscordForwardedMessagesTextFromSnapshots,
+  resolveDiscordInboundMessageText,
   resolveDiscordMessageText,
 } from "./message-text.js";

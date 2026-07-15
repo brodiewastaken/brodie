@@ -1669,6 +1669,103 @@ describe("message tool secret scoping", () => {
     expect(input?.toolContext?.replyToMode).toBe("all");
   });
 
+  it("keeps the typed live Discord target ahead of a bare session-derived target", async () => {
+    mockSendResult({ channel: "discord", to: "channel:123" });
+
+    await executeSend({
+      action: { message: "hi" },
+      toolOptions: {
+        config: { channels: { discord: {} } } as never,
+        sourceReplyDeliveryMode: "message_tool_only",
+        currentChannelProvider: "discord",
+        currentChannelId: "channel:123",
+        currentMessagingTarget: "123",
+        currentMessageId: "message-1",
+        agentSessionKey: "agent:main:discord:channel:123",
+      },
+    });
+
+    expect(firstRunMessageActionInput()?.params?.target).toBe("channel:123");
+  });
+
+  it("types Discord channel session fallbacks exactly once", async () => {
+    mockSendResult({ channel: "discord", to: "channel:123" });
+
+    await executeSend({
+      action: { message: "hi" },
+      toolOptions: {
+        config: { channels: { discord: {} } } as never,
+        sourceReplyDeliveryMode: "message_tool_only",
+        currentChannelProvider: "webchat",
+        currentMessageId: "message-1",
+        agentSessionKey: "agent:main:discord:channel:123",
+      },
+    });
+
+    expect(firstRunMessageActionInput()?.params?.target).toBe("channel:123");
+  });
+
+  it("uses a typed Discord session fallback ahead of ambiguous live context", async () => {
+    mockSendResult({ channel: "discord", to: "channel:123" });
+
+    await executeSend({
+      action: { message: "hi" },
+      toolOptions: {
+        config: { channels: { discord: {} } } as never,
+        sourceReplyDeliveryMode: "message_tool_only",
+        currentChannelProvider: "discord",
+        currentMessagingTarget: "123",
+        currentMessageId: "message-1",
+        agentSessionKey: "agent:main:discord:channel:123",
+      },
+    });
+
+    expect(firstRunMessageActionInput()?.params?.target).toBe("channel:123");
+  });
+
+  it("rejects conflicting or wholly ambiguous Discord reply targets", async () => {
+    await expect(
+      executeSend({
+        action: { message: "hi" },
+        toolOptions: {
+          config: { channels: { discord: {} } } as never,
+          sourceReplyDeliveryMode: "message_tool_only",
+          currentChannelProvider: "discord",
+          currentChannelId: "channel:123",
+          currentMessagingTarget: "user:456",
+        },
+      }),
+    ).rejects.toThrow("conflicting authoritative Discord reply targets");
+
+    await expect(
+      executeSend({
+        action: { message: "hi" },
+        toolOptions: {
+          config: { channels: { discord: {} } } as never,
+          sourceReplyDeliveryMode: "message_tool_only",
+          currentChannelProvider: "discord",
+          currentMessagingTarget: "123",
+        },
+      }),
+    ).rejects.toThrow("Discord reply target must use channel:<id> or user:<id>");
+  });
+
+  it("normalizes repeated Discord target prefixes", async () => {
+    mockSendResult({ channel: "discord", to: "channel:123" });
+
+    await executeSend({
+      action: { message: "hi" },
+      toolOptions: {
+        config: { channels: { discord: {} } } as never,
+        sourceReplyDeliveryMode: "message_tool_only",
+        currentChannelProvider: "discord",
+        currentChannelId: "channel:channel:123",
+      },
+    });
+
+    expect(firstRunMessageActionInput()?.params?.target).toBe("channel:123");
+  });
+
   it("scopes command-time secret resolution to the selected channel/account", async () => {
     mockSendResult({ channel: "discord", to: "discord:123" });
     mocks.getRuntimeConfig.mockReturnValue({

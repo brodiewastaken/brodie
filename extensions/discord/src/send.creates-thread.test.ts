@@ -75,10 +75,6 @@ function requestBody(source: MockCallSource, callIndex = 0) {
   return requireRecord(requestOptions(source, callIndex).body, `request body ${callIndex}`);
 }
 
-function timerDelayAt(source: MockCallSource, callIndex = 0) {
-  return mockArg(source, callIndex, 1, `timer delay ${callIndex}`);
-}
-
 function createRateLimitError(
   response: Response,
   body: { message: string; retry_after: number; global: boolean },
@@ -616,7 +612,10 @@ describe("retry rate limits", () => {
       expect(result.channelId).toBe("789");
       expect(result.receipt.primaryPlatformMessageId).toBe("msg1");
       expect(result.receipt.platformMessageIds).toEqual(["msg1"]);
-      expect(timerDelayAt(setTimeoutSpy as unknown as MockCallSource)).toBe(1);
+      // The outbound serializer's starvation-cap timer also schedules here, so
+      // find the retry delay instead of asserting on the first setTimeout call.
+      const timerDelays = setTimeoutSpy.mock.calls.map((call) => call[1]);
+      expect(timerDelays).toContain(1);
     } finally {
       setTimeoutSpy.mockRestore();
     }

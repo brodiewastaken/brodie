@@ -14,6 +14,7 @@ import { tempWorkspace, resolvePreferredOpenClawTmpDir } from "openclaw/plugin-s
 import { loadWebMediaRaw } from "openclaw/plugin-sdk/web-media";
 import { resolveDiscordAccount } from "./accounts.js";
 import type { RequestClient } from "./internal/discord.js";
+import { runDiscordOutboundSerialized } from "./outbound-serializer.js";
 import { parseAndResolveChannelRecipient } from "./recipient-resolution.js";
 import type { DiscordReplyReference } from "./reply-reference.js";
 import { createDiscordSendResult } from "./send.receipt.js";
@@ -102,30 +103,39 @@ export async function sendVoiceMessageDiscord(
     const recipient = await parseAndResolveChannelRecipient(to, cfg, opts.accountId);
     channelId = (await resolveChannelId(rest, recipient, request)).channelId;
 
-    const ogg = await ensureOggOpus(localInputPath);
-    oggPath = ogg.path;
-    oggCleanup = ogg.cleanup;
-
-    const metadata = await getVoiceMessageMetadata(oggPath);
-    const audioBuffer = await fs.readFile(oggPath);
-    const result = await sendDiscordVoiceMessage(
-      rest,
-      channelId,
-      audioBuffer,
-      metadata,
-      opts.reply?.messageId,
-      request,
-      opts.silent,
-      token,
-    );
-
-    recordChannelActivity({
-      channel: "discord",
+    const resolvedRest = rest;
+    const resolvedChannelId = channelId;
+    const resolvedToken = token;
+    return await runDiscordOutboundSerialized({
       accountId: accountInfo.accountId,
-      direction: "outbound",
-    });
+      channelId: resolvedChannelId,
+      task: async () => {
+        const ogg = await ensureOggOpus(localInputPath);
+        oggPath = ogg.path;
+        oggCleanup = ogg.cleanup;
 
-    return toDiscordSendResult(result, channelId, opts.reply);
+        const metadata = await getVoiceMessageMetadata(oggPath);
+        const audioBuffer = await fs.readFile(oggPath);
+        const result = await sendDiscordVoiceMessage(
+          resolvedRest,
+          resolvedChannelId,
+          audioBuffer,
+          metadata,
+          opts.reply?.messageId,
+          request,
+          opts.silent,
+          resolvedToken,
+        );
+
+        recordChannelActivity({
+          channel: "discord",
+          accountId: accountInfo.accountId,
+          direction: "outbound",
+        });
+
+        return toDiscordSendResult(result, resolvedChannelId, opts.reply);
+      },
+    });
   } catch (err) {
     if (channelId && rest && token) {
       throw await buildDiscordSendError(err, {

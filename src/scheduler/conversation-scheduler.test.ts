@@ -228,6 +228,30 @@ describe("ConversationScheduler", () => {
     });
   });
 
+  it("typing resets only an unopened text batch", async () => {
+    const { route, database } = await fixture();
+    let now = 1_000;
+    const scheduler = createConversationScheduler({
+      database,
+      now: () => now,
+      resolveDebounceMs: () => 1_000,
+    });
+    await scheduler.admit(event(route, "text"));
+    now = 1_500;
+    expect(await scheduler.noteTyping(route)).toBe(true);
+    expect(await scheduler.snapshot(route)).toMatchObject({
+      lanes: [{ pendingCount: 1, readyAt: 2_500 }],
+    });
+
+    const mediaRoute = directRoute(route, "-media");
+    await scheduler.admit({
+      ...event(mediaRoute, "media"),
+      producerKind: "human_media",
+      media: true,
+    });
+    expect(await scheduler.noteTyping(mediaRoute)).toBe(false);
+  });
+
   it("reserves before dispatch and preserves arrivals during the active run", async () => {
     const { route: baseRoute, database } = await fixture();
     const route = directRoute(baseRoute);

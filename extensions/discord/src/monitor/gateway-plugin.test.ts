@@ -14,6 +14,8 @@ const { GatewayIntents, GatewayPlugin } = vi.hoisted(() => {
     GuildPresences: 1 << 6,
     GuildMembers: 1 << 7,
     GuildVoiceStates: 1 << 8,
+    GuildMessageTyping: 1 << 9,
+    DirectMessageTyping: 1 << 10,
   } as const;
 
   class TestEmitter {
@@ -238,7 +240,9 @@ describe("createDiscordGatewayPlugin", () => {
         GatewayIntents.MessageContent |
         GatewayIntents.DirectMessages |
         GatewayIntents.GuildMessageReactions |
-        GatewayIntents.DirectMessageReactions,
+        GatewayIntents.DirectMessageReactions |
+        GatewayIntents.GuildMessageTyping |
+        GatewayIntents.DirectMessageTyping,
       reconnect: { maxAttempts: 50 },
     });
   });
