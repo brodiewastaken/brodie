@@ -119,6 +119,11 @@ describe("anthropic stream wrappers", () => {
     expect(captured.payload?.service_tier).toBeUndefined();
   });
 
+  it("skips unsupported service_tier for Claude Opus 5", () => {
+    const captured = runComposedAnthropicProviderStream("sk-ant-api-123", "claude-opus-5");
+    expect(captured.payload?.service_tier).toBeUndefined();
+  });
+
   it("composes the anthropic provider stream chain from extra params", () => {
     const captured = runComposedAnthropicProviderStream("sk-ant-api-123");
     expect(captured.headers?.["anthropic-beta"]).not.toContain(CONTEXT_1M_BETA);
@@ -170,6 +175,14 @@ describe("anthropic stream wrappers", () => {
 
     expect(fable5.headers?.["anthropic-beta"]).toBe(OAUTH_BETA_HEADER);
     expect(fable50.headers?.["anthropic-beta"]).toBeUndefined();
+  });
+
+  it("uses Opus 5 identity boundaries for context1m beta wrapper activation", () => {
+    const opus5 = runComposedAnthropicProviderStream("sk-ant-oat01-oauth-token", "claude-opus-5");
+    const opus50 = runComposedAnthropicProviderStream("sk-ant-oat01-oauth-token", "claude-opus-50");
+
+    expect(opus5.headers?.["anthropic-beta"]).toBe(OAUTH_BETA_HEADER);
+    expect(opus50.headers?.["anthropic-beta"]).toBeUndefined();
   });
 
   it("preserves OAuth-required betas when legacy context-1m is the only configured beta", () => {

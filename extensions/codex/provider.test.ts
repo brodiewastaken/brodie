@@ -404,10 +404,12 @@ describe("codex provider", () => {
         .resolveThinkingProfile?.({ provider: "codex", modelId } as never)
         ?.levels.map((level) => level.id);
 
+    expect(levels("gpt-6-astra")).toContain("max");
     expect(levels("gpt-5.6-sol")).toContain("max");
     expect(levels("gpt-5.6-terra")).toContain("max");
     expect(levels("gpt-5.6-luna")).toContain("max");
     expect(levels("gpt-5.6")).not.toContain("max");
+    expect(levels("gpt-6")).not.toContain("max");
     expect(levels("gpt-5.6-sol-oai")).not.toContain("max");
   });
 
@@ -436,17 +438,20 @@ describe("codex provider", () => {
         } as never)
         ?.levels.map((level) => level.id);
 
+    expect(levels("gpt-6-astra")).toContain("ultra");
     expect(levels("gpt-5.6-sol")).toContain("ultra");
     expect(levels("gpt-5.6-terra")).toContain("ultra");
     expect(levels("gpt-5.6-luna")).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
     expect(levels("gpt-5.6")).not.toContain("ultra");
 
     const directOpenAIEfforts = ["none", "low", "medium", "high", "xhigh", "max"];
+    expect(levels("gpt-6-astra", directOpenAIEfforts)).toContain("ultra");
     expect(levels("gpt-5.6-sol", directOpenAIEfforts)).toContain("ultra");
     expect(levels("gpt-5.6-terra", directOpenAIEfforts)).toContain("ultra");
   });
 
   it.each([
+    { modelId: "gpt-6-astra", expected: "medium" },
     { modelId: "gpt-5.6-sol", expected: "low" },
     { modelId: "gpt-5.6-terra", expected: "medium" },
     { modelId: "gpt-5.6-luna", expected: "medium" },
@@ -483,6 +488,8 @@ describe("codex provider", () => {
 
     const maxEfforts = ["low", "medium", "high", "xhigh", "max"];
     const ultraEfforts = [...maxEfforts, "ultra"];
+    expect(levels("gpt-6-astra", maxEfforts)).not.toContain("ultra");
+    expect(levels("gpt-6-astra", ultraEfforts)).toContain("ultra");
     expect(levels("gpt-5.6-sol", maxEfforts)).not.toContain("ultra");
     expect(levels("gpt-5.6-terra", maxEfforts)).not.toContain("ultra");
     expect(levels("gpt-5.6-sol", ultraEfforts)).toContain("ultra");

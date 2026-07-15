@@ -5,6 +5,15 @@
  */
 import type { Model } from "openclaw/plugin-sdk/llm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { resolveProviderTransportTurnStateWithPluginMock } = vi.hoisted(() => ({
+  resolveProviderTransportTurnStateWithPluginMock: vi.fn(() => undefined),
+}));
+
+vi.mock("../plugins/provider-runtime.js", () => ({
+  resolveProviderTransportTurnStateWithPlugin: resolveProviderTransportTurnStateWithPluginMock,
+}));
+
 import { attachModelProviderRequestTransport } from "./provider-request-config.js";
 
 const { buildGuardedModelFetchMock, guardedFetchMock } = vi.hoisted(() => ({
@@ -219,6 +228,8 @@ describe("anthropic transport stream", () => {
     vi.unstubAllEnvs();
     buildGuardedModelFetchMock.mockReset();
     guardedFetchMock.mockReset();
+    resolveProviderTransportTurnStateWithPluginMock.mockReset();
+    resolveProviderTransportTurnStateWithPluginMock.mockReturnValue(undefined);
     buildGuardedModelFetchMock.mockReturnValue(guardedFetchMock);
     guardedFetchMock.mockResolvedValue(createSseResponse());
   });
@@ -573,6 +584,37 @@ describe("anthropic transport stream", () => {
     expect(String(textBlock.textSignature)).toContain('"phase":"commentary"');
     expect(result.content.some((block) => (block as { type?: string }).type === "toolCall")).toBe(
       true,
+    );
+  });
+
+  it("forwards provider turn-state headers through Anthropic Messages requests", async () => {
+    resolveProviderTransportTurnStateWithPluginMock.mockReturnValueOnce({
+      headers: { "x-opencode-session": "conversation-123" },
+    });
+    await runTransportStream(
+      makeAnthropicTransportModel({
+        id: "qwen3.8-max",
+        name: "Qwen3.8 Max",
+        provider: "opencode-go",
+        baseUrl: "https://opencode.ai/zen/go",
+      }),
+      { messages: [{ role: "user", content: "hello" }] } as AnthropicStreamContext,
+      {
+        apiKey: "test-key",
+        sessionId: "conversation-123",
+        headers: { "User-Agent": "openclaw/2026.9.11" },
+      } as AnthropicStreamOptions,
+    );
+
+    expect(latestAnthropicRequestHeaders().get("x-opencode-session")).toBe("conversation-123");
+    expect(latestAnthropicRequestHeaders().get("user-agent")).toBe("openclaw/2026.9.11");
+    expect(resolveProviderTransportTurnStateWithPluginMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "opencode-go",
+        modelId: "qwen3.8-max",
+        allowRuntimePluginLoad: true,
+        context: expect.objectContaining({ sessionId: "conversation-123", transport: "stream" }),
+      }),
     );
   });
 
@@ -1281,6 +1323,8 @@ describe("anthropic transport stream", () => {
 
   it.each([
     ["claude-fable-5", "Claude Fable 5", "anthropic"],
+    ["claude-opus-5", "Claude Opus 5", "anthropic"],
+    ["claude-opus-5", "Claude Opus 5", "anthropic-vertex"],
     ["claude-sonnet-5", "Claude Sonnet 5", "anthropic"],
     ["claude-sonnet-5", "Claude Sonnet 5", "anthropic-vertex"],
   ])("surfaces structured %s streaming refusals for %s", async (id, name, provider) => {
@@ -1646,7 +1690,7 @@ describe("anthropic transport stream", () => {
     const firstCallParams = latestAnthropicRequest().payload;
     const system = requireArray(firstCallParams.system, "system");
     expect(requireRecord(system[0], "billing system item").text).toBe(
-      "x-anthropic-billing-header: cc_version=2.1.75; cc_entrypoint=sdk-cli;",
+      "x-anthropic-billing-header: cc_version=2.1.258; cc_entrypoint=sdk-cli;",
     );
     expect(
       system.some(
@@ -2453,6 +2497,85 @@ describe("anthropic transport stream", () => {
       (record) => record.type === "tool_use" && record.name === "lookup",
     );
     expect(toolUse.input).toEqual({});
+  });
+
+  it("passes provider-neutral message-tool invisible thinking through Anthropic replay", async () => {
+    await runTransportStream(
+      makeAnthropicTransportModel(),
+      {
+        messages: [
+          {
+            role: "assistant",
+            provider: "openai",
+            api: "openai-responses",
+            model: "gpt-5.6-sol",
+            stopReason: "toolUse",
+            timestamp: 0,
+            content: [
+              {
+                type: "toolCall",
+                id: "call_legacy_message",
+                name: "message",
+                arguments: {
+                  action: "silence",
+                  invisibleThinking: "private step-by-step reasoning",
+                },
+              },
+            ],
+          },
+        ],
+      } as unknown as AnthropicStreamContext,
+      { apiKey: "sk-ant-api" } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    const assistantMessage = findRecord(payload.messages, (record) => record.role === "assistant");
+    const toolUse = findRecord(
+      assistantMessage.content,
+      (record) => record.type === "tool_use" && record.name === "message",
+    );
+    expect(toolUse.input).toEqual({
+      action: "silence",
+      invisibleThinking: "private step-by-step reasoning",
+    });
+  });
+
+  it("never replays unsigned thinking from another provider into Anthropic messages", async () => {
+    await runTransportStream(
+      makeAnthropicTransportModel({ id: "claude-sonnet-5", name: "Claude Sonnet 5" }),
+      {
+        messages: [
+          { role: "user", content: "hello" },
+          {
+            role: "assistant",
+            provider: "openai",
+            api: "openai-responses",
+            model: "gpt-5.6-sol",
+            stopReason: "toolUse",
+            timestamp: 0,
+            content: [
+              { type: "thinking", thinking: "private foreign-provider analysis" },
+              { type: "toolCall", id: "call_1", name: "lookup", arguments: {} },
+            ],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_1",
+            toolName: "lookup",
+            content: [{ type: "text", text: "42" }],
+            isError: false,
+          },
+        ],
+      } as AnthropicStreamContext,
+      { apiKey: "sk-ant-api", reasoning: "high" } as AnthropicStreamOptions,
+    );
+
+    const payload = latestAnthropicRequest().payload;
+    const assistantMessage = findRecord(payload.messages, (record) => record.role === "assistant");
+    expect(assistantMessage.content).toEqual([
+      { type: "tool_use", id: "call_1", name: "lookup", input: {} },
+    ]);
+    expect(JSON.stringify(payload)).not.toContain("foreign-provider analysis");
   });
 
   it("replays reasoning_content from compatible Anthropic thinking blocks", async () => {
@@ -3450,6 +3573,7 @@ describe("anthropic transport stream", () => {
   });
 
   it.each([
+    { canonicalModelId: "claude-opus-5", expectedTemperature: undefined },
     { canonicalModelId: "claude-opus-4-8", expectedTemperature: undefined },
     { canonicalModelId: "claude-opus-4-6", expectedTemperature: 0.2 },
   ] as const)(
@@ -3511,6 +3635,51 @@ describe("anthropic transport stream", () => {
       tool_choice: testCase.toolChoice,
     });
     expect(payload).not.toHaveProperty("temperature");
+    if (testCase.effort) {
+      expect(payload.output_config).toEqual(testCase.effort);
+    } else {
+      expect(payload).not.toHaveProperty("output_config");
+    }
+  });
+
+  it.each([
+    {
+      name: "defaults to adaptive high",
+      reasoning: undefined,
+      thinking: { type: "adaptive", display: "summarized" },
+      effort: { effort: "high" },
+      toolChoice: { type: "auto" },
+    },
+    {
+      name: "allows explicit off",
+      reasoning: "off" as const,
+      thinking: { type: "disabled" },
+      effort: undefined,
+      toolChoice: { type: "any" },
+    },
+  ])("supports Claude Opus 5 transport: $name", async (testCase) => {
+    const model = makeAnthropicTransportModel({
+      id: "claude-opus-5",
+      name: "Claude Opus 5",
+      maxTokens: 128_000,
+    });
+
+    await runTransportStream(model, makeSonnet5PrefillContext(), {
+      apiKey: "sk-ant-api",
+      reasoning: testCase.reasoning,
+      temperature: 0.2,
+      toolChoice: "any",
+    } as AnthropicStreamOptions);
+
+    const payload = latestAnthropicRequest().payload;
+    expect(payload).toMatchObject({
+      max_tokens: 128_000,
+      messages: [{ role: "user" }],
+      thinking: testCase.thinking,
+      tool_choice: testCase.toolChoice,
+    });
+    expect(payload).not.toHaveProperty("temperature");
+    expect(payload).not.toHaveProperty("service_tier");
     if (testCase.effort) {
       expect(payload.output_config).toEqual(testCase.effort);
     } else {
@@ -3658,7 +3827,7 @@ describe("anthropic transport stream", () => {
     expect(payload.output_config).toEqual({ effort: "high" });
   });
 
-  it.each(["claude-opus-4-8", "claude-mythos-preview"])(
+  it.each(["claude-opus-5", "claude-opus-4-8", "claude-mythos-preview"])(
     "restores default sampling for %s transport requests after payload hooks",
     async (modelId) => {
       await runTransportStream(

@@ -38,6 +38,10 @@ type FastModeState = {
   fastAutoOnSeconds: number;
 };
 
+export function isFastModeEnforcedOff(cfg: OpenClawConfig | undefined): boolean {
+  return cfg?.agents?.defaults?.fastModeEnforcedOff === true;
+}
+
 function resolveConfiguredFastModeRaw(params: {
   cfg: OpenClawConfig | undefined;
   provider: string;
@@ -56,6 +60,14 @@ export function resolveFastModeState(params: {
   sessionEntry?: Pick<SessionEntry, "fastMode"> | undefined;
 }): FastModeState {
   const fastAutoOnSeconds = resolveFastModeModelAutoOnSeconds(params);
+  if (isFastModeEnforcedOff(params.cfg)) {
+    return {
+      mode: false,
+      enabled: false,
+      source: "config",
+      fastAutoOnSeconds,
+    };
+  }
   const sessionOverride = normalizeFastMode(params.sessionEntry?.fastMode);
   if (sessionOverride !== undefined) {
     return {

@@ -7,6 +7,10 @@ import {
   createPlainTextToolCallCompatWrapper,
   createToolStreamWrapper,
 } from "openclaw/plugin-sdk/provider-stream-shared";
+import {
+  resolveXaiReasoningEffort,
+  type XaiRequestedThinkingLevel,
+} from "./runtime-model-compat.js";
 
 const XAI_FAST_MODEL_IDS = new Map<string, string>([
   ["grok-3", "grok-3-fast"],
@@ -229,6 +233,7 @@ function normalizeXaiResponsesToolResultPayload(
 
 export function createXaiToolPayloadCompatibilityWrapper(
   baseStreamFn: StreamFn | undefined,
+  thinkingLevel?: XaiRequestedThinkingLevel,
 ): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) => {
@@ -242,11 +247,29 @@ export function createXaiToolPayloadCompatibilityWrapper(
             payloadObj.tools = payloadObj.tools.map((tool) => stripUnsupportedStrictFlag(tool));
           }
           normalizeXaiResponsesToolResultPayload(payloadObj, model);
-          if (!supportsReasoningControls(model)) {
-            // Only grok-4.3* advertises configurable effort; drop effort fields elsewhere.
-            delete payloadObj.reasoning;
+          if (!supportsReasoningControls(model) || thinkingLevel === undefined) {
+            // Fixed/non-reasoning Grok families reject effort fields; keep only advertised controls.
+            if (!supportsReasoningControls(model)) {
+              delete payloadObj.reasoning;
+              delete payloadObj.reasoningEffort;
+              delete payloadObj.reasoning_effort;
+            }
+          } else {
+            const effort = resolveXaiReasoningEffort({ model, thinkingLevel });
             delete payloadObj.reasoningEffort;
             delete payloadObj.reasoning_effort;
+            if (model.api === "openai-responses") {
+              const existingReasoning =
+                payloadObj.reasoning &&
+                typeof payloadObj.reasoning === "object" &&
+                !Array.isArray(payloadObj.reasoning)
+                  ? (payloadObj.reasoning as Record<string, unknown>)
+                  : {};
+              payloadObj.reasoning = { ...existingReasoning, effort };
+            } else {
+              delete payloadObj.reasoning;
+              payloadObj.reasoning_effort = effort;
+            }
           }
           // All reasoning xAI models should still request + later replay encrypted_content.
           ensureXaiResponsesEncryptedReasoningInclude(payloadObj, model);
@@ -302,7 +325,10 @@ export function wrapXaiProviderStream(ctx: ProviderWrapStreamFnContext): StreamF
   const extraParams = ctx.extraParams;
   const toolStreamEnabled = extraParams?.tool_stream !== false;
   return composeProviderStreamWrappers(ctx.streamFn, (streamFn) => {
-    let wrappedStreamFn = createXaiToolPayloadCompatibilityWrapper(streamFn);
+    let wrappedStreamFn = createXaiToolPayloadCompatibilityWrapper(
+      streamFn,
+      ctx.thinkingLevel as XaiRequestedThinkingLevel | undefined,
+    );
     if (hasXaiFastModeParam(extraParams)) {
       wrappedStreamFn = createXaiFastModeWrapper(wrappedStreamFn, () =>
         resolveXaiFastMode(extraParams),

@@ -4,8 +4,31 @@ import type { ChannelsConfig } from "./types.channels.js";
 import { ChannelHeartbeatVisibilitySchema } from "./zod-schema.channels.js";
 import { ContextVisibilityModeSchema, GroupPolicySchema } from "./zod-schema.core.js";
 
+const ChannelThinkingDefaultSchema = z.enum([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "adaptive",
+  "max",
+  "ultra",
+]);
+
+const ChannelModelOverrideSchema = z.union([
+  z.string(),
+  z
+    .object({
+      model: z.string().min(1),
+      thinking: ChannelThinkingDefaultSchema.optional(),
+      fastMode: z.boolean().optional(),
+    })
+    .strict(),
+]);
+
 const ChannelModelByChannelSchema = z
-  .record(z.string(), z.record(z.string(), z.string()))
+  .record(z.string(), z.record(z.string(), ChannelModelOverrideSchema))
   .optional();
 
 export const ChannelBotLoopProtectionSchema = z

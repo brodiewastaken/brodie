@@ -138,7 +138,11 @@ describe("model-pricing-cache", () => {
       channels: {
         modelByChannel: {
           slack: {
-            C123: "gpt",
+            C123: {
+              model: "gpt",
+              thinking: "high",
+              fastMode: false,
+            },
           },
         },
       },

@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import {
   clampOpenAIPromptCacheKey,
+  collapseDuplicateHumanInboundResponseInput,
   convertMessages,
   findOpenAIStrictToolProjectionDiagnostics,
   isOpenAICompatibleAzureResponsesBaseUrl,
@@ -65,8 +66,9 @@ import type {
 } from "openai/resources/responses/responses.js";
 import type { ModelCompatConfig } from "../config/types.models.js";
 import { sha256Hex, sha256HexPrefix } from "../infra/crypto-digest.js";
-import type { Api, Context, Model, Usage } from "../llm/types.js";
+import { createRawByteStreamCapture } from "../llm/raw-byte-stream.js";
 import "../llm/ai-transport-host.js";
+import type { Api, Context, Model, Usage } from "../llm/types.js";
 import { createAssistantMessageEventStream } from "../llm/utils/event-stream.js";
 import { redactIdentifier } from "../logging/redact-identifier.js";
 import { redactSensitiveText } from "../logging/redact.js";
@@ -163,6 +165,7 @@ type BaseStreamOptions = {
   sessionId?: string;
   promptCacheKey?: string;
   authProfileId?: string;
+  traceContext?: Record<string, unknown>;
   onPayload?: (payload: unknown, model: Model) => unknown;
   headers?: Record<string, string>;
   firstEventTimeoutMs?: number;
@@ -1941,7 +1944,8 @@ function resolveProviderTransportTurnState(
   const allowRuntimePluginLoad =
     normalizedProvider === "openai" ||
     normalizedProvider === "azure-openai" ||
-    normalizedProvider === "azure-openai-responses";
+    normalizedProvider === "azure-openai-responses" ||
+    normalizedProvider === "opencode-go";
   return resolveProviderTransportTurnStateWithPlugin({
     provider: model.provider,
     modelId: model.id,
@@ -1994,13 +1998,14 @@ function createOpenAIResponsesClient(
   optionHeaders?: Record<string, string>,
   turnHeaders?: Record<string, string>,
   sessionId?: string,
+  fetchFn: typeof fetch = buildGuardedModelFetch(model),
 ) {
   return new OpenAI({
     apiKey,
     baseURL: model.baseUrl,
     dangerouslyAllowBrowser: true,
     defaultHeaders: buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders, sessionId),
-    fetch: buildGuardedModelFetch(model),
+    fetch: fetchFn,
     ...buildOpenAISdkClientOptions(model),
   });
 }
@@ -2037,6 +2042,22 @@ export function createOpenAIResponsesTransportStreamFn(): StreamFn {
           attempt: 1,
           transport: "stream",
         });
+        const baseFetch = buildGuardedModelFetch(model);
+        let providerFetch = baseFetch;
+        if (usesNativeOpenAICodexResponsesBackend(model)) {
+          try {
+            const rawByteCapture = createRawByteStreamCapture({
+              provider: model.provider,
+              modelId: model.id,
+              traceContext: responsesOptions?.traceContext,
+            });
+            if (rawByteCapture) {
+              providerFetch = rawByteCapture.wrapFetch(baseFetch);
+            }
+          } catch {
+            // Diagnostic capture never affects provider traffic.
+          }
+        }
         const client = createOpenAIResponsesClient(
           model,
           context,
@@ -2044,6 +2065,7 @@ export function createOpenAIResponsesTransportStreamFn(): StreamFn {
           options?.headers,
           turnState?.headers,
           options?.sessionId,
+          providerFetch,
         );
         let params = buildOpenAIResponsesParams(
           model,
@@ -2350,7 +2372,7 @@ export function buildOpenAIResponsesParams(
     payloadPolicy.explicitStore !== false && !payloadPolicy.shouldStripStore;
   const replayResponsesItemIds =
     !isNativeCodexResponses && (options?.replayResponsesItemIds ?? policyAllowsReplayIds);
-  const messages = convertResponsesMessages(
+  const convertedMessages = convertResponsesMessages(
     model,
     context,
     new Set(["openai", "opencode", "azure-openai-responses", "github-copilot"]),
@@ -2363,6 +2385,9 @@ export function buildOpenAIResponsesParams(
       sessionId: options?.sessionId,
     },
   );
+  const messages = isNativeCodexResponses
+    ? collapseDuplicateHumanInboundResponseInput(convertedMessages)
+    : convertedMessages;
   if (isCodexResponses) {
     ensureOpenAICodexResponsesInput(messages, context);
   }
@@ -2661,8 +2686,14 @@ function createOpenAICompletionsClient(
   context: Context,
   apiKey: string,
   optionHeaders?: Record<string, string>,
+  turnHeaders?: Record<string, string>,
 ) {
-  const clientConfig = buildOpenAICompletionsClientConfig(model, context, optionHeaders);
+  const clientConfig = buildOpenAICompletionsClientConfig(
+    model,
+    context,
+    optionHeaders,
+    turnHeaders,
+  );
   return new OpenAI({
     apiKey,
     baseURL: clientConfig.baseURL,
@@ -2701,12 +2732,13 @@ function buildOpenAICompletionsClientConfig(
   model: Model,
   context: Context,
   optionHeaders?: Record<string, string>,
+  turnHeaders?: Record<string, string>,
 ): {
   baseURL: string;
   defaultHeaders: Record<string, string>;
   defaultQuery?: Record<string, string>;
 } {
-  const headers = buildOpenAIClientHeaders(model, context, optionHeaders);
+  const headers = buildOpenAIClientHeaders(model, context, optionHeaders, turnHeaders);
   const defaultQuery: Record<string, string> = {};
   let baseURL = model.baseUrl;
   let isAzureHost = false;
@@ -2770,7 +2802,19 @@ export function createOpenAICompletionsTransportStreamFn(): StreamFn {
       let firstEventAbort: ReturnType<typeof createFirstStreamEventAbortController> | undefined;
       try {
         const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-        const client = createOpenAICompletionsClient(model, context, apiKey, options?.headers);
+        const turnState = resolveProviderTransportTurnState(model, {
+          sessionId: options?.sessionId,
+          turnId: randomUUID(),
+          attempt: 1,
+          transport: "stream",
+        });
+        const client = createOpenAICompletionsClient(
+          model,
+          context,
+          apiKey,
+          options?.headers,
+          turnState?.headers,
+        );
         let params = buildOpenAICompletionsParams(
           model as OpenAIModeModel,
           context,

@@ -20,6 +20,7 @@ import {
   hasCommittedMessagingToolDeliveryEvidence,
   hasCommittedSourceReplyDeliveryEvidence,
   hasMessagingToolDeliveryEvidence,
+  hasProvisionalMessageToolDeliveryEvidence,
   hasVisibleTerminalOutboundDeliveryEvidence,
 } from "../delivery-evidence.js";
 import { isZeroUsageEmptyStopAssistantTurn } from "../empty-assistant-turn.js";
@@ -65,6 +66,7 @@ type IncompleteTurnAttempt = Pick<
   | "promptErrorSource"
   | "timedOutDuringCompaction"
   | "toolMetas"
+  | "successfulCronAdds"
 > &
   Partial<Pick<EmbeddedRunAttemptResult, "acceptedSessionSpawns">>;
 
@@ -628,6 +630,55 @@ function isNonVisibleAssistantTurnEligibleForSilentReply(params: {
     return false;
   }
   return isReasoningOnlyAssistantTurn(assistant);
+}
+
+export const MESSAGE_TOOL_ONLY_FINALIZE_CONTINUATION_PROMPT =
+  "The prior attempt stopped without an answer. Use the existing saved results and send exactly one reply to the current conversation now using the message tool. Do not use any other tool, repeat the work, or produce an ordinary final answer. If you cannot establish the answer, report that it is incomplete.";
+
+/**
+ * Allows one reply-only continuation after a normal, empty terminal turn that
+ * completed synchronous work. This is deliberately separate from prompt replay:
+ * the next attempt gets a replacement prompt and the message tool only.
+ */
+export function shouldRunMessageToolOnlyFinalizeContinuation(params: {
+  payloadCount: number;
+  aborted: boolean;
+  externalAbort: boolean;
+  timedOut: boolean;
+  promptError?: unknown;
+  sourceReplyDeliveryMode?: string;
+  priorConversationTerminalActivity?: boolean;
+  attempt: IncompleteTurnAttempt;
+}): boolean {
+  if (
+    params.payloadCount !== 0 ||
+    params.aborted ||
+    params.externalAbort ||
+    params.timedOut ||
+    Boolean(params.promptError) ||
+    params.sourceReplyDeliveryMode !== "message_tool_only" ||
+    params.priorConversationTerminalActivity === true ||
+    params.attempt.conversationOutcome === "deliberate_silence" ||
+    (params.attempt.successfulCronAdds ?? 0) > 0 ||
+    hasMessagingToolDeliveryEvidence(params.attempt) ||
+    hasProvisionalMessageToolDeliveryEvidence(params.attempt) ||
+    params.attempt.messageToolDeliveryState !== undefined ||
+    params.attempt.messageToolSourceReplyDeliveryState !== undefined ||
+    hasAcceptedSessionSpawn(params.attempt.acceptedSessionSpawns) ||
+    hasAttemptTerminalState(params.attempt)
+  ) {
+    return false;
+  }
+
+  if (
+    joinAssistantTexts(params.attempt.assistantTexts).length > 0 ||
+    !params.attempt.toolMetas.some((entry) => entry.replaySafe !== true)
+  ) {
+    return false;
+  }
+
+  const assistant = params.attempt.currentAttemptAssistant ?? params.attempt.lastAssistant;
+  return assistant?.stopReason === "stop";
 }
 
 function shouldSkipNonVisibleTurnRetry(params: {

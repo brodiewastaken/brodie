@@ -184,6 +184,23 @@ describe("streamOpenAICodexResponses transport", () => {
     expect(userAgent).toBe(`openclaw (${platform()} ${release()}; ${arch()})`);
   });
 
+  it("keeps native SSE on direct fetch when raw capture is disabled", async () => {
+    const buildModelFetch = vi.fn();
+    configureAiTransportHost({ buildModelFetch, createRawByteCapture: () => undefined });
+    const directFetch = vi.fn(async () => completedSseResponse());
+    vi.stubGlobal("fetch", directFetch);
+
+    await streamOpenAICodexResponses(model, context, {
+      apiKey: createJwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+      transport: "sse",
+    }).result();
+
+    expect(directFetch).toHaveBeenCalledOnce();
+    expect(buildModelFetch).not.toHaveBeenCalled();
+  });
+
   it("zstd-compresses SSE bodies without overriding an existing encoding", async () => {
     const captured: Array<{ body: BodyInit | null | undefined; encoding: string | null }> = [];
     vi.stubGlobal(
@@ -219,6 +236,8 @@ describe("streamOpenAICodexResponses transport", () => {
   it("keeps JSON request bodies for custom ChatGPT relays", async () => {
     let capturedBody: BodyInit | null | undefined;
     let capturedEncoding: string | null = null;
+    const createRawByteCapture = vi.fn();
+    configureAiTransportHost({ createRawByteCapture });
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_input, init) => {
@@ -242,6 +261,267 @@ describe("streamOpenAICodexResponses transport", () => {
     expect(capturedEncoding).toBeNull();
     expect(capturedBody).toEqual(expect.any(String));
     expect(JSON.parse(capturedBody as string)).toMatchObject({ model: model.id });
+    expect(createRawByteCapture).not.toHaveBeenCalled();
+  });
+
+  it("forwards correlated capture through the guarded SSE host fetch", async () => {
+    const captured: Array<{ event: string; bytes: string | Uint8Array }> = [];
+    const capture = {
+      appendBytes(params: { event: string; bytes: string | Uint8Array }) {
+        captured.push(params);
+      },
+      wrapFetch: vi.fn(),
+    };
+    const traceContext = { runId: "run-sse", callId: "call-sse" };
+    const responseText = await completedSseResponse("resp_captured_sse").text();
+    const responseBytes = new TextEncoder().encode(responseText);
+    const hostFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const requestBytes = init?.body as Uint8Array;
+      capture.appendBytes({ event: "openai.request.body", bytes: requestBytes });
+      const responseStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const bytes of [responseBytes.slice(0, 7), responseBytes.slice(7)]) {
+            capture.appendBytes({ event: "openai.response.sse_chunk", bytes });
+            controller.enqueue(bytes);
+          }
+          controller.close();
+        },
+      });
+      return new Response(responseStream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    capture.wrapFetch.mockReturnValue(hostFetch as typeof fetch);
+    const createRawByteCapture = vi.fn(() => capture);
+    configureAiTransportHost({ createRawByteCapture });
+
+    const result = await streamSimpleOpenAICodexResponses(model, context, {
+      apiKey: createJwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+      transport: "sse",
+      traceContext,
+    }).result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(createRawByteCapture).toHaveBeenCalledWith({
+      provider: "openai",
+      modelId: model.id,
+      traceContext,
+    });
+    expect(capture.wrapFetch).toHaveBeenCalledOnce();
+    expect(hostFetch).toHaveBeenCalledOnce();
+    expect(captured.map((row) => row.event)).toEqual([
+      "openai.request.body",
+      "openai.response.sse_chunk",
+      "openai.response.sse_chunk",
+    ]);
+    const requestBytes = captured[0]?.bytes as Uint8Array;
+    expect(requestBytes).toBe((hostFetch.mock.calls[0]?.[1] as RequestInit | undefined)?.body);
+    expect(
+      Buffer.concat(captured.slice(1).map((row) => Buffer.from(row.bytes as Uint8Array))).toString(
+        "utf8",
+      ),
+    ).toBe(responseText);
+    expect(
+      JSON.parse(Buffer.from(zstdDecompressSync(requestBytes)).toString("utf8")),
+    ).toMatchObject({ model: model.id });
+  });
+
+  it("captures the exact default WebSocket request and response frames", async () => {
+    const captured: Array<{ event: string; bytes: string | Uint8Array }> = [];
+    const traceContext = { runId: "run-ws", callId: "call-ws" };
+    const createRawByteCapture = vi.fn(() => ({
+      appendBytes(params: { event: string; bytes: string | Uint8Array }) {
+        captured.push(params);
+      },
+      wrapFetch(fetchFn: typeof fetch) {
+        return fetchFn;
+      },
+    }));
+    configureAiTransportHost({ createRawByteCapture });
+    let sentFrame = "";
+    const responseFrame = JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp_captured_ws",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+      },
+    });
+    class CapturedWebSocket extends EventTarget {
+      constructor() {
+        super();
+        queueMicrotask(() => this.dispatchEvent(new Event("open")));
+      }
+
+      send(data: string): void {
+        sentFrame = data;
+        queueMicrotask(() => {
+          this.dispatchEvent(Object.assign(new Event("message"), { data: responseFrame }));
+        });
+      }
+
+      close(): void {}
+    }
+    vi.stubGlobal("WebSocket", CapturedWebSocket);
+
+    const result = await streamSimpleOpenAICodexResponses(model, context, {
+      apiKey: createJwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+      transport: "auto",
+      traceContext,
+    }).result();
+
+    expect(result.stopReason).toBe("stop");
+    expect(createRawByteCapture).toHaveBeenCalledWith({
+      provider: "openai",
+      modelId: model.id,
+      traceContext,
+    });
+    expect(captured).toHaveLength(2);
+    expect(captured[0]).toMatchObject({
+      event: "openai.request.websocket_frame",
+      bytes: sentFrame,
+    });
+    expect(JSON.parse(String(captured[0]?.bytes))).toMatchObject({
+      type: "response.create",
+      model: model.id,
+      input: expect.any(Array),
+    });
+    expect(Buffer.from(captured[1]?.bytes as Uint8Array).toString("utf8")).toBe(responseFrame);
+  });
+
+  it("collapses the final text-only copy of an image-bearing queue turn", async () => {
+    const marker = "BRODIE_QUEUEFIRST_PROVIDER_DEDUPE";
+    const queueText = `[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n${marker}`;
+    const canonicalUnderstanding = "\n\nImage sidecar id: 8a8a8a8a8a8a8a8a";
+    const duplicateUnderstanding = "\n\nImage sidecar id: a1a1a1a1a1a1a1a1";
+    const mediaContext = {
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: queueText },
+            { type: "text", text: canonicalUnderstanding },
+            { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+          ],
+          timestamp: 1,
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: queueText },
+            { type: "text", text: duplicateUnderstanding },
+          ],
+          timestamp: 2,
+        },
+      ],
+    } satisfies Context;
+    let sentFrame = "";
+    const responseFrame = JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp_queue_dedupe",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+      },
+    });
+    class QueueDedupeWebSocket extends EventTarget {
+      constructor() {
+        super();
+        queueMicrotask(() => this.dispatchEvent(new Event("open")));
+      }
+
+      send(data: string): void {
+        sentFrame = data;
+        queueMicrotask(() => {
+          this.dispatchEvent(Object.assign(new Event("message"), { data: responseFrame }));
+        });
+      }
+
+      close(): void {}
+    }
+    vi.stubGlobal("WebSocket", QueueDedupeWebSocket);
+
+    await streamSimpleOpenAICodexResponses({ ...model, input: ["text", "image"] }, mediaContext, {
+      apiKey: createJwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+      transport: "auto",
+    }).result();
+
+    const frame = JSON.parse(sentFrame) as {
+      input: Array<{
+        role?: string;
+        content?: Array<{ type?: string; text?: string }>;
+      }>;
+    };
+    const markerItems = frame.input.filter((item) =>
+      item.content?.some((part) => part.type === "input_text" && part.text?.includes(marker)),
+    );
+    expect(markerItems).toHaveLength(1);
+    expect(markerItems[0]?.content?.map((part) => part.type)).toEqual([
+      "input_text",
+      "input_text",
+      "input_image",
+    ]);
+  });
+
+  it("keeps the default WebSocket stream working when capture throws", async () => {
+    configureAiTransportHost({
+      createRawByteCapture: () => ({
+        appendBytes() {
+          throw new Error("capture unavailable");
+        },
+        wrapFetch(fetchFn) {
+          return fetchFn;
+        },
+      }),
+    });
+    let sent = false;
+    class ThrowingCaptureWebSocket extends EventTarget {
+      constructor() {
+        super();
+        queueMicrotask(() => this.dispatchEvent(new Event("open")));
+      }
+
+      send(): void {
+        sent = true;
+        queueMicrotask(() => {
+          this.dispatchEvent(
+            Object.assign(new Event("message"), {
+              data: JSON.stringify({
+                type: "response.completed",
+                response: {
+                  id: "resp_capture_failure",
+                  status: "completed",
+                  output: [],
+                  usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+                },
+              }),
+            }),
+          );
+        });
+      }
+
+      close(): void {}
+    }
+    vi.stubGlobal("WebSocket", ThrowingCaptureWebSocket);
+
+    const result = await streamSimpleOpenAICodexResponses(model, context, {
+      apiKey: createJwt({
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" },
+      }),
+      transport: "auto",
+    }).result();
+
+    expect(sent).toBe(true);
+    expect(result.stopReason).toBe("stop");
   });
 
   it("reconnects once when the websocket connection limit is reached", async () => {

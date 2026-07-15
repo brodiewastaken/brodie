@@ -1,5 +1,6 @@
 // Coverage for incomplete-turn safety, retry instructions, and liveness states.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ClientToolDefinition } from "../../command/shared-types.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import {
   hasCommittedMessagingToolDeliveryEvidence,
@@ -25,6 +26,7 @@ import {
   buildAttemptReplayMetadata,
   DEFAULT_EMPTY_RESPONSE_RETRY_LIMIT,
   DEFAULT_REASONING_ONLY_RETRY_LIMIT,
+  MESSAGE_TOOL_ONLY_FINALIZE_CONTINUATION_PROMPT,
   EMPTY_RESPONSE_RETRY_INSTRUCTION,
   REASONING_ONLY_RETRY_INSTRUCTION,
   resolveEmptyResponseRetryInstruction,
@@ -36,6 +38,7 @@ import {
   resolveSilentToolResultReplyPayload,
   shouldRetryMissingAssistantTurn,
   shouldRetrySilentErrorAssistantTurn,
+  shouldRunMessageToolOnlyFinalizeContinuation,
   shouldTreatEmptyAssistantReplyAsSilent,
 } from "./run/incomplete-turn.js";
 import type { EmbeddedRunAttemptResult } from "./run/types.js";
@@ -128,6 +131,361 @@ describe("runEmbeddedAgent incomplete-turn safety", () => {
     });
     expect(result.meta?.livenessState).toBe("blocked");
   });
+
+  it("uses one message-only finalization continuation after synchronous work stops empty", async () => {
+    const emptyStop = {
+      role: "assistant",
+      stopReason: "stop",
+      provider: "openai",
+      model: "gpt-5.5",
+      content: [],
+    } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        toolMetas: [{ toolName: "write", replaySafe: false }],
+        messagesSnapshot: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "original request" }],
+          },
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "call_write", name: "write", arguments: {} }],
+          },
+          {
+            role: "toolResult",
+            toolCallId: "call_write",
+            toolName: "write",
+            content: [{ type: "text", text: "saved" }],
+          },
+        ] as unknown as EmbeddedRunAttemptResult["messagesSnapshot"],
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+    const setTerminalLifecycleMeta = vi.fn();
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        didSendViaMessagingTool: true,
+        messagingToolSentTexts: ["delivered reply"],
+        messageToolDeliveryState: "terminal",
+        messageToolSourceReplyDeliveryState: "terminal",
+        didDeliverSourceReplyViaMessageTool: true,
+        conversationOutcome: "sent",
+        // Native attempts explicitly return null for a clean prompt outcome.
+        promptError: null,
+        lastToolError: undefined,
+        setTerminalLifecycleMeta,
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+
+    const clientTools: ClientToolDefinition[] = [
+      {
+        type: "function",
+        function: { name: "client_finalize_escape" },
+      },
+    ];
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-message-tool-only-finalization",
+      sourceReplyDeliveryMode: "message_tool_only",
+      allowedConversationalActions: ["reply", "react"],
+      clientTools,
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    const secondCall = mockedRunEmbeddedAttempt.mock.calls[1]?.[0] as {
+      prompt?: string;
+      toolsAllow?: string[];
+      sourceReplyDeliveryMode?: string;
+      allowedConversationalActions?: readonly string[];
+      clientTools?: ClientToolDefinition[];
+      historicalReplayToolNames?: readonly string[];
+    };
+    expect(secondCall.prompt).toBe(MESSAGE_TOOL_ONLY_FINALIZE_CONTINUATION_PROMPT);
+    expect(secondCall.prompt).not.toContain(overflowBaseRunParams.prompt);
+    expect(secondCall.toolsAllow).toEqual([]);
+    expect(secondCall.sourceReplyDeliveryMode).toBe("message_tool_only");
+    expect(secondCall.allowedConversationalActions).toEqual(["reply"]);
+    expect(secondCall.clientTools).toBeUndefined();
+    expect(secondCall.historicalReplayToolNames).toEqual(["write"]);
+    expect(result.meta.error).toBeUndefined();
+    expect(result.meta.livenessState).toBe("working");
+    expect(result.conversationOutcome).toBe("sent");
+    expect(result.payloads?.some((payload) => payload.isError) ?? false).toBe(false);
+    expect(setTerminalLifecycleMeta).toHaveBeenCalledWith(
+      expect.objectContaining({ livenessState: "working", stopReason: "stop", aborted: false }),
+    );
+    expectWarnMessageWith("message-tool-only finalization continuation");
+  });
+
+  it("does not finalise again after the message-only continuation is empty", async () => {
+    const emptyStop = {
+      role: "assistant",
+      stopReason: "stop",
+      provider: "openai",
+      model: "gpt-5.5",
+      content: [],
+    } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        toolMetas: [{ toolName: "edit", replaySafe: false }],
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-message-tool-only-finalization-once",
+      sourceReplyDeliveryMode: "message_tool_only",
+      allowedConversationalActions: ["reply"],
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(result.payloads?.[0]?.isError).toBe(true);
+  });
+
+  it("does not retry after provisional delivery survives mid-turn recovery", async () => {
+    const emptyStop = {
+      role: "assistant",
+      stopReason: "stop",
+      provider: "openai",
+      model: "gpt-5.5",
+      content: [],
+    } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+    mockedRunEmbeddedAttempt
+      .mockResolvedValueOnce(
+        makeAttemptResult({
+          assistantTexts: [],
+          didDeliverSourceReplyViaMessageTool: true,
+          messageToolSourceReplyDeliveryState: "provisional",
+          preflightRecovery: {
+            route: "truncate_tool_results_only",
+            source: "mid-turn",
+            handled: true,
+          },
+          lastAssistant: emptyStop,
+          currentAttemptAssistant: emptyStop,
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeAttemptResult({
+          assistantTexts: [],
+          toolMetas: [{ toolName: "write", replaySafe: false }],
+          lastAssistant: emptyStop,
+          currentAttemptAssistant: emptyStop,
+        }),
+      );
+
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-message-tool-only-finalization-prior-provisional",
+      sourceReplyDeliveryMode: "message_tool_only",
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(result.payloads?.[0]?.isError).toBe(true);
+    expectNoWarnMessageWith("message-tool-only finalization continuation");
+  });
+
+  it("returns a non-fallback failure when the finalization dispatch throws", async () => {
+    const emptyStop = {
+      role: "assistant",
+      stopReason: "stop",
+      provider: "openai",
+      model: "gpt-5.5",
+      content: [],
+    } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        toolMetas: [{ toolName: "write", replaySafe: false }],
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+    mockedRunEmbeddedAttempt.mockRejectedValueOnce(new Error("provider unavailable"));
+
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-message-tool-only-finalization-provider-error",
+      sourceReplyDeliveryMode: "message_tool_only",
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(result.meta.error).toMatchObject({
+      kind: "provider_error",
+      message: "Message-tool-only finalization failed: provider unavailable",
+      fallbackSafe: false,
+    });
+    expect(result.payloads?.[0]?.text).toBe(
+      "⚠️ Agent couldn't finish sending the response. The existing work is saved; please try again.",
+    );
+  });
+
+  it("accounts finalization usage and preserves a terminal source delivery after a late error", async () => {
+    const emptyStop = {
+      role: "assistant",
+      stopReason: "stop",
+      provider: "openai",
+      model: "gpt-5.5",
+      content: [],
+    } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+    const setTerminalLifecycleMeta = vi.fn();
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        toolMetas: [{ toolName: "write", replaySafe: false }],
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        didSendViaMessagingTool: true,
+        messagingToolSentTexts: ["delivered reply"],
+        messageToolDeliveryState: "terminal",
+        messageToolSourceReplyDeliveryState: "terminal",
+        didDeliverSourceReplyViaMessageTool: true,
+        promptError: new Error("late provider error"),
+        attemptUsage: { input: 11, output: 7, total: 18 },
+        setTerminalLifecycleMeta,
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-message-tool-only-finalization-late-error",
+      sourceReplyDeliveryMode: "message_tool_only",
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
+    expect(result.meta.agentMeta?.usage?.output).toBe(7);
+    expect(setTerminalLifecycleMeta).toHaveBeenCalledWith({
+      replayInvalid: true,
+      livenessState: "abandoned",
+      stopReason: "stop",
+      aborted: false,
+    });
+    expect(result.meta.error).toMatchObject({ fallbackSafe: false });
+    expect(result.didDeliverSourceReplyViaMessageTool).toBe(true);
+    expect(result.messageToolSourceReplyDeliveryState).toBe("terminal");
+    expect(result.messagingToolSentTexts).toEqual(["delivered reply"]);
+  });
+
+  it("does not fall back when finalization has no retry budget", async () => {
+    const emptyStop = {
+      role: "assistant",
+      stopReason: "stop",
+      provider: "openai",
+      model: "gpt-5.5",
+      content: [],
+    } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+    mockedRunEmbeddedAttempt.mockResolvedValueOnce(
+      makeAttemptResult({
+        assistantTexts: [],
+        toolMetas: [{ toolName: "write", replaySafe: false }],
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      }),
+    );
+
+    const result = await runEmbeddedAgent({
+      ...overflowBaseRunParams,
+      runId: "run-message-tool-only-finalization-retry-budget",
+      sourceReplyDeliveryMode: "message_tool_only",
+      config: {
+        agents: {
+          defaults: {
+            model: { fallbacks: ["anthropic/claude-opus-4-6"] },
+            runRetries: { base: 1, perProfile: 0, min: 1, max: 1 },
+          },
+        },
+      } as OpenClawConfig,
+    });
+
+    expect(mockedRunEmbeddedAttempt).toHaveBeenCalledOnce();
+    expect(result.meta.error).toMatchObject({
+      kind: "provider_error",
+      fallbackSafe: false,
+    });
+  });
+
+  it("does not permit finalization where delivery may already have happened", () => {
+    const emptyStop = {
+      role: "assistant",
+      stopReason: "stop",
+      provider: "openai",
+      model: "gpt-5.5",
+      content: [],
+    } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+    const attempt = makeAttemptResult({
+      assistantTexts: [],
+      toolMetas: [{ toolName: "write", replaySafe: false }],
+      didSendViaMessagingTool: true,
+      messageToolDeliveryState: "provisional",
+      lastAssistant: emptyStop,
+      currentAttemptAssistant: emptyStop,
+    });
+
+    expect(
+      shouldRunMessageToolOnlyFinalizeContinuation({
+        payloadCount: 0,
+        aborted: false,
+        externalAbort: false,
+        timedOut: false,
+        sourceReplyDeliveryMode: "message_tool_only",
+        attempt,
+      }),
+    ).toBe(false);
+  });
+
+  it.each(["sent", "reacted", "deliberate_silence"] as const)(
+    "does not permit finalization after explicit %s outcome",
+    (conversationOutcome) => {
+      const emptyStop = {
+        role: "assistant",
+        stopReason: "stop",
+        provider: "openai",
+        model: "gpt-5.5",
+        content: [],
+      } as unknown as EmbeddedRunAttemptResult["lastAssistant"];
+      const attempt = makeAttemptResult({
+        assistantTexts: [],
+        conversationOutcome,
+        toolMetas: [{ toolName: "write", replaySafe: false }],
+        lastAssistant: emptyStop,
+        currentAttemptAssistant: emptyStop,
+      });
+
+      expect(
+        shouldRunMessageToolOnlyFinalizeContinuation({
+          payloadCount: 0,
+          aborted: false,
+          externalAbort: false,
+          timedOut: false,
+          sourceReplyDeliveryMode: "message_tool_only",
+          attempt,
+        }),
+      ).toBe(false);
+    },
+  );
 
   it("warns before retrying when an incomplete turn already sent a message", async () => {
     // Delivery evidence means retrying could duplicate user-visible output, so

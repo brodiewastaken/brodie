@@ -1402,6 +1402,7 @@ describe("Codex app-server thread lifecycle timing", () => {
 describe("resolveReasoningEffort (#71946)", () => {
   describe("modern Codex models (none/low/medium/high/xhigh enum)", () => {
     it.each([
+      "gpt-6-astra",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
@@ -1417,6 +1418,7 @@ describe("resolveReasoningEffort (#71946)", () => {
     );
 
     it.each([
+      "gpt-6-astra",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
@@ -1485,10 +1487,12 @@ describe("resolveReasoningEffort (#71946)", () => {
     });
 
     it("passes max only for known native GPT-5.6 models", () => {
+      expect(resolveReasoningEffort("max", "gpt-6-astra")).toBe("max");
       expect(resolveReasoningEffort("max", "gpt-5.6-sol")).toBe("max");
       expect(resolveReasoningEffort("max", "gpt-5.6-terra")).toBe("max");
       expect(resolveReasoningEffort("max", "gpt-5.6-luna")).toBe("max");
       expect(resolveReasoningEffort("max", "gpt-5.6")).toBeNull();
+      expect(resolveReasoningEffort("max", "gpt-6")).toBeNull();
       expect(resolveReasoningEffort("max", "gpt-5.6-sol-oai")).toBeNull();
       expect(resolveReasoningEffort("max", "gpt-5.5")).toBeNull();
       expect(resolveReasoningEffort("max", "gpt-4o")).toBeNull();
@@ -1498,9 +1502,12 @@ describe("resolveReasoningEffort (#71946)", () => {
       const ultraEfforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
       const maxEfforts = ["low", "medium", "high", "xhigh", "max"];
 
+      expect(resolveReasoningEffort("ultra", "gpt-6-astra", ultraEfforts)).toBe("ultra");
+      expect(resolveReasoningEffort("ultra", "gpt-6-astra", maxEfforts)).toBe("max");
       expect(resolveReasoningEffort("ultra", "gpt-5.6-sol", ultraEfforts)).toBe("ultra");
       expect(resolveReasoningEffort("ultra", "gpt-5.6-terra", ultraEfforts)).toBe("ultra");
       expect(resolveReasoningEffort("ultra", "gpt-5.6-luna", maxEfforts)).toBe("max");
+      expect(resolveReasoningEffort("ultra", "gpt-6-astra")).toBe("ultra");
       expect(resolveReasoningEffort("ultra", "gpt-5.6-sol")).toBe("ultra");
       expect(resolveReasoningEffort("ultra", "gpt-5.6-terra")).toBe("ultra");
       expect(resolveReasoningEffort("ultra", "gpt-5.6-luna")).toBe("max");
@@ -1510,6 +1517,7 @@ describe("resolveReasoningEffort (#71946)", () => {
 
 describe("native Codex Ultra turn mapping", () => {
   it.each([
+    { modelId: "gpt-6-astra", expected: "ultra" },
     { modelId: "gpt-5.6-sol", expected: "ultra" },
     { modelId: "gpt-5.6-terra", expected: "ultra" },
     { modelId: "gpt-5.6-luna", expected: "max" },

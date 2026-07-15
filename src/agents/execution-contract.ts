@@ -34,9 +34,11 @@ export function stripProviderPrefix(modelId: string): string {
  * - `gpt-5.4`, `gpt-5.4-alt`, `gpt-5.0` (dot separator)
  * - `gpt-5-preview`, `gpt-5-turbo`, `gpt-5-2025-03` (dash separator)
  *
- * Does NOT cover `gpt-4.5`, `gpt-6`, or any non-gpt-5 family member.
+ * - `gpt-6`, `gpt-6-astra` (the GPT-6 Codex family shares the same contract)
+ *
+ * Does NOT cover `gpt-4.5` or any pre-GPT-5 family member.
  */
-const STRICT_AGENTIC_MODEL_ID_PATTERN = /^gpt-5(?:[.o-]|$)/i;
+const STRICT_AGENTIC_MODEL_ID_PATTERN = /^gpt-(?:5|6)(?:[.o-]|$)/i;
 
 /**
  * Supported provider + model combinations where strict-agentic is the intended

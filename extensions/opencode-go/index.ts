@@ -12,7 +12,7 @@ import {
   normalizeOpencodeGoResolvedModel,
   resolveOpencodeGoModel,
 } from "./provider-catalog.js";
-import { createOpencodeGoWrapper } from "./stream.js";
+import { createOpencodeGoAttributionWrapper, createOpencodeGoWrapper } from "./stream.js";
 
 const PROVIDER_ID = "opencode-go";
 const OPENCODE_SHARED_PROFILE_IDS = ["opencode:default", "opencode-go:default"] as const;
@@ -113,10 +113,20 @@ export default definePluginEntry({
             }
           : undefined;
       },
+      resolveTransportTurnState: ({ model, sessionId, turnId }) => {
+        if (!normalizeOpencodeGoBaseUrl({ api: model?.api, baseUrl: model?.baseUrl })) {
+          return undefined;
+        }
+        const stableSessionId = sessionId?.trim() || turnId.trim();
+        return stableSessionId ? { headers: { "x-opencode-session": stableSessionId } } : undefined;
+      },
       resolveDynamicModel: ({ modelId }) => resolveOpencodeGoModel(modelId),
       catalog: {
         order: "simple",
         run: async (ctx) => {
+          if (ctx.config.models?.providers?.[PROVIDER_ID]?.models?.length) {
+            return null;
+          }
           const auth = resolveOpencodeGoCatalogAuth(ctx.resolveProviderApiKey);
           if (!auth) {
             return null;
@@ -134,9 +144,11 @@ export default definePluginEntry({
           };
         },
       },
-      augmentModelCatalog: () => listOpencodeGoModelCatalogEntries(),
+      augmentModelCatalog: (ctx) =>
+        ctx.config?.models?.providers?.[PROVIDER_ID] ? [] : listOpencodeGoModelCatalogEntries(),
       ...PASSTHROUGH_GEMINI_REPLAY_HOOKS,
       wrapStreamFn: (ctx) => createOpencodeGoWrapper(ctx.streamFn, ctx.thinkingLevel),
+      wrapSimpleCompletionStreamFn: (ctx) => createOpencodeGoAttributionWrapper(ctx.streamFn),
       isModernModelRef: () => true,
     });
     api.registerMediaUnderstandingProvider(opencodeGoMediaUnderstandingProvider);

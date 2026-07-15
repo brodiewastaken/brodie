@@ -262,6 +262,21 @@ describe("buildOpenAIProvider", () => {
     );
     expect(OPENAI_DEFAULT_MODEL).toBe("openai/gpt-5.6");
     expect(OPENAI_CODEX_DEFAULT_MODEL).toBe("openai/gpt-5.6-sol");
+    expect(
+      result.providers.openai?.models.find((model) => model.id === "gpt-6-astra"),
+    ).toMatchObject({
+      name: "GPT-6 Astra",
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 1_050_000,
+      maxTokens: 128_000,
+      cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+      thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
+      compat: {
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+      },
+    });
   });
 
   it("scopes the OpenAI API-key catalog to the OpenAI provider id", async () => {
@@ -728,6 +743,15 @@ describe("buildOpenAIProvider", () => {
     expect(provider.baseUrl).toBe("https://chatgpt.com/backend-api/codex");
     expect(provider.models.length).toBeGreaterThan(0);
     expect(provider.models.map((model) => model.id)).not.toContain("gpt-5.6");
+    expect(provider.models.find((model) => model.id === "gpt-6-astra")).toMatchObject({
+      contextWindow: 372_000,
+      contextTokens: 372_000,
+      thinkingLevelMap: { off: null },
+      cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+      compat: {
+        supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      },
+    });
     expect(provider.models.find((model) => model.id === "gpt-5.6-sol")).toMatchObject({
       contextWindow: 372_000,
       contextTokens: 372_000,
@@ -791,7 +815,7 @@ describe("buildOpenAIProvider", () => {
     expect(provider.hookAliases).toEqual(["azure-openai", "azure-openai-responses"]);
   });
 
-  it.each(["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
+  it.each(["gpt-5.5", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
     "prefers auth-aware Codex runtime metadata for %s over static OpenAI catalog rows",
     (modelId) => {
       const provider = buildOpenAIProvider();

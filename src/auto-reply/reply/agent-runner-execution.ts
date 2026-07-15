@@ -67,6 +67,10 @@ import {
 } from "../../agents/model-selection.js";
 import { resolveOpenAIRuntimeProvider } from "../../agents/openai-routing.js";
 import {
+  resolveRunPolicyCandidateFastMode,
+  resolveRunPolicyForConfiguredBrain,
+} from "../../agents/run-policy.js";
+import {
   AGENT_RUN_RESTART_ABORT_STOP_REASON,
   createAgentRunRestartAbortError,
   isAgentRunRestartAbortReason,
@@ -74,6 +78,7 @@ import {
 } from "../../agents/run-termination.js";
 import { buildAgentRuntimeOutcomePlan } from "../../agents/runtime-plan/build.js";
 import { resolveSessionRuntimeOverrideForProvider } from "../../agents/session-runtime-compat.js";
+import { getLatestSubagentRunByChildSessionKey } from "../../agents/subagent-registry.js";
 import { resolveCandidateThinkingLevel } from "../../agents/thinking-runtime.js";
 import { resolveGroupSessionKey, type SessionEntry } from "../../config/sessions.js";
 import { updateSessionEntry } from "../../config/sessions/session-accessor.js";
@@ -93,6 +98,7 @@ import { logSessionTurnCreated } from "../../logging/diagnostic.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { CommandLaneClearedError, GatewayDrainingError } from "../../process/command-queue.js";
 import { CommandLane } from "../../process/lanes.js";
+import { isCronSessionKey, isSubagentSessionKey } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
 import { shouldPreserveUserFacingSessionStateForInputProvenance } from "../../sessions/input-provenance.js";
 import {
@@ -1716,6 +1722,34 @@ async function runAgentTurnWithFallbackInternal(
           ...runnableRun,
           config: runtimeConfig,
         };
+  const fallbackOptions = resolveModelFallbackOptions(effectiveRun, runtimeConfig);
+  const policySessionKey = effectiveRun.runtimePolicySessionKey ?? effectiveRun.sessionKey;
+  const registeredRunPolicy =
+    policySessionKey && isSubagentSessionKey(policySessionKey)
+      ? getLatestSubagentRunByChildSessionKey(policySessionKey)?.resolvedRunPolicy
+      : undefined;
+  const runPolicy =
+    registeredRunPolicy ??
+    resolveRunPolicyForConfiguredBrain({
+      cfg: runtimeConfig,
+      kind: isCronSessionKey(policySessionKey)
+        ? "cron"
+        : isSubagentSessionKey(policySessionKey)
+          ? "subagent"
+          : "main",
+      explicitModel: `${effectiveRun.provider}/${effectiveRun.model}`,
+      explicitFallbacks: fallbackOptions.fallbacksOverride,
+      ...(effectiveRun.runPolicyReasoningOverride
+        ? {
+            explicitReasoning: effectiveRun.runPolicyReasoningOverride,
+            explicitReasoningSource: "explicit" as const,
+          }
+        : {}),
+      ...(typeof effectiveRun.fastMode === "boolean"
+        ? { explicitFastMode: effectiveRun.fastMode }
+        : {}),
+      ...(effectiveRun.authProfileId ? { authProfileId: effectiveRun.authProfileId } : {}),
+    });
   const preserveUserFacingSessionState = shouldPreserveUserFacingSessionStateForInputProvenance(
     effectiveRun.inputProvenance,
   );
@@ -2240,7 +2274,14 @@ async function runAgentTurnWithFallbackInternal(
       });
       const fallbackResult = await agentTurnTiming.measure("model_fallback", () =>
         runWithModelFallback<EmbeddedAgentRunResult>({
-          ...resolveModelFallbackOptions(effectiveRun, runtimeConfig),
+          ...fallbackOptions,
+          ...(runPolicy
+            ? {
+                fallbacksOverride: runPolicy.fallbacks.map(
+                  (fallback) => `${fallback.provider}/${fallback.model}`,
+                ),
+              }
+            : {}),
           runId,
           sessionId: params.followupRun.run.sessionId,
           lane: runLane,
@@ -2296,22 +2337,30 @@ async function runAgentTurnWithFallbackInternal(
             const suppressAssistantErrorPersistenceForCandidate =
               assistantErrorPersistedAcrossFallback;
             const candidateRun = resolveRunForFallbackCandidate(provider, model);
-            const candidateThinkLevel = resolveCandidateThinkingLevel({
-              cfg: runtimeConfig,
-              provider,
-              modelId: model,
-              level: params.followupRun.run.thinkLevel,
-              agentId: params.followupRun.run.agentId,
-              sessionKey: params.followupRun.run.runtimePolicySessionKey ?? params.sessionKey,
-              sessionEntry: params.getActiveSessionEntry(),
-            });
-            const candidateFastMode = resolveRunFastModeForFallbackCandidate({
-              run: candidateRun,
-              config: runtimeConfig,
-              provider,
-              model,
-              sessionEntry: params.getActiveSessionEntry(),
-            });
+            const candidateThinkLevel =
+              runPolicy?.reasoning ??
+              resolveCandidateThinkingLevel({
+                cfg: runtimeConfig,
+                provider,
+                modelId: model,
+                level: params.followupRun.run.thinkLevel,
+                agentId: params.followupRun.run.agentId,
+                sessionKey: params.followupRun.run.runtimePolicySessionKey ?? params.sessionKey,
+                sessionEntry: params.getActiveSessionEntry(),
+              });
+            const policyFastMode = runPolicy
+              ? resolveRunPolicyCandidateFastMode(runPolicy, provider, model)
+              : undefined;
+            const candidateFastMode =
+              policyFastMode !== undefined
+                ? { fastMode: policyFastMode, fastModeAutoOnSeconds: undefined }
+                : resolveRunFastModeForFallbackCandidate({
+                    run: candidateRun,
+                    config: runtimeConfig,
+                    provider,
+                    model,
+                    sessionEntry: params.getActiveSessionEntry(),
+                  });
             const activeProbe = effectiveRun.autoFallbackPrimaryProbe;
             if (activeProbe && provider === activeProbe.provider && model === activeProbe.model) {
               markAutoFallbackPrimaryProbe({
@@ -2674,6 +2723,18 @@ async function runAgentTurnWithFallbackInternal(
                     userTurnTranscriptRecorder,
                     currentInboundEventKind: params.followupRun.currentInboundEventKind,
                     currentInboundContext: params.followupRun.currentInboundContext,
+                    externalFiles: params.followupRun.externalFiles,
+                    queueBatchIdentity: params.followupRun.queueBatchIdentity,
+                    promptImageRefExclusions: params.followupRun.promptImageRefExclusions,
+                    maxNativeImages: runPolicy?.maxNativeImages,
+                    maxNativeImagesSource:
+                      runPolicy?.source.maxNativeImages === "model"
+                        ? "model"
+                        : runPolicy?.source.maxNativeImages === "default"
+                          ? "default"
+                          : runPolicy
+                             ? "global"
+                             : undefined,
                     extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
                     sourceReplyDeliveryMode: params.followupRun.run.sourceReplyDeliveryMode,
                     allowedConversationalActions:

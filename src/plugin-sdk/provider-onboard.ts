@@ -11,6 +11,7 @@ import { normalizeConfiguredProviderCatalogModelId } from "../agents/model-ref-s
 import {
   normalizeAgentModelMapForConfig,
   normalizeAgentModelRefForConfig,
+  patchAgentDefaultModelConfig,
 } from "../config/model-input.js";
 import type { AgentModelEntryConfig } from "../config/types.agent-defaults.js";
 import type {
@@ -393,10 +394,10 @@ export function applyAgentDefaultModelPrimary(
       ...cfg.agents,
       defaults: {
         ...defaults,
-        model: {
+        model: patchAgentDefaultModelConfig(defaults?.model, {
           ...(normalizedFallbacks ? { fallbacks: normalizedFallbacks } : undefined),
           primary: normalizeAgentModelRefForConfig(primary),
-        },
+        }),
         ...(normalizedModels !== undefined ? { models: normalizedModels } : undefined),
       },
     },

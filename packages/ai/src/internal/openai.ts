@@ -4,6 +4,7 @@ export * from "../providers/azure-openai-responses-client-compat.js";
 export * from "../providers/clean-for-gemini.js";
 export * from "../providers/openai-completions.js";
 export * from "../providers/openai-prompt-cache.js";
+export * from "../providers/openai-response-input-dedupe.js";
 export * from "../providers/openai-reasoning-effort.js";
 export * from "../providers/openai-responses.js";
 export * from "../providers/openai-responses-stream-compat.js";

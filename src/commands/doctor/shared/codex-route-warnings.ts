@@ -173,6 +173,20 @@ function collectStringModelSlot(params: {
   );
 }
 
+function collectChannelModelSlot(params: {
+  hits: CodexRouteHit[];
+  path: string;
+  value: unknown;
+  runtime?: string;
+}): boolean {
+  const structured = asMutableRecord(params.value);
+  return collectStringModelSlot({
+    ...params,
+    path: structured ? `${params.path}.model` : params.path,
+    value: structured?.model ?? params.value,
+  });
+}
+
 function collectModelConfigSlot(params: {
   hits: CodexRouteHit[];
   path: string;
@@ -969,7 +983,7 @@ function collectConfigModelRefs(cfg: OpenClawConfig): CodexRouteHit[] {
         continue;
       }
       for (const [targetId, model] of Object.entries(targets)) {
-        collectStringModelSlot({
+        collectChannelModelSlot({
           hits,
           path: `channels.modelByChannel.${channelId}.${targetId}`,
           value: model,
@@ -1084,10 +1098,11 @@ function collectChannelAgentRuntimeModelRefs(
       continue;
     }
     for (const [targetId, modelRef] of Object.entries(channelMap)) {
+      const structured = asMutableRecord(modelRef);
       collectStringModelConfigRef({
         refs,
-        path: `channels.modelByChannel.${channelId}.${targetId}`,
-        value: modelRef,
+        path: `channels.modelByChannel.${channelId}.${targetId}${structured ? ".model" : ""}`,
+        value: structured?.model ?? modelRef,
       });
     }
   }
@@ -2552,12 +2567,13 @@ function rewriteConfigModelRefsWithCompactionPolicy(params: {
         continue;
       }
       for (const targetId of Object.keys(targets)) {
+        const structured = asMutableRecord(targets[targetId]);
         rewriteStringModelSlotIfCanonicalCodexRuntime({
           cfg: nextConfig,
           hits,
-          container: targets,
-          key: targetId,
-          path: `channels.modelByChannel.${channelId}.${targetId}`,
+          container: structured ?? targets,
+          key: structured ? "model" : targetId,
+          path: `channels.modelByChannel.${channelId}.${targetId}${structured ? ".model" : ""}`,
         });
       }
     }

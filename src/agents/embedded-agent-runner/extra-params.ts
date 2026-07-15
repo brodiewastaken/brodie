@@ -2,6 +2,7 @@ import {
   type NativeWebSearchToolPolicyParams,
   isNativeWebSearchAllowedByToolPolicy,
 } from "../../agents/codex-native-web-search-core.js";
+import { isFastModeEnforcedOff } from "../../agents/fast-mode.js";
 /**
  * Resolves model extra parameters and transport overrides for embedded agents.
  */
@@ -154,6 +155,10 @@ export function resolveExtraParams(params: {
 
   applyDefaultOpenAIGptRuntimeParams(params, merged);
 
+  if (isFastModeEnforcedOff(params.cfg)) {
+    return enforceFastModeOffExtraParams(merged);
+  }
+
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
@@ -295,6 +300,9 @@ export function resolvePreparedExtraParams(params: {
       return cached;
     }
   }
+  const fastModeEnforcedOff =
+    isFastModeEnforcedOff(params.cfg) || merged.fastModeEnforcedOff === true;
+  const preparedInput = fastModeEnforcedOff ? enforceFastModeOffExtraParams(merged) : merged;
   const prepared =
     providerRuntimeDeps.prepareProviderExtraParams({
       provider: params.provider,
@@ -308,7 +316,7 @@ export function resolvePreparedExtraParams(params: {
         provider: params.provider,
         modelId: params.modelId,
         model: params.model,
-        extraParams: merged,
+        extraParams: preparedInput,
         thinkingLevel: params.thinkingLevel,
       },
     }) ?? merged;
@@ -334,13 +342,47 @@ export function resolvePreparedExtraParams(params: {
     merged: result,
     sources: [prepared, transportPatch ?? undefined],
   });
+  const enforcedResult = fastModeEnforcedOff ? enforceFastModeOffExtraParams(result) : result;
   if (cacheKey) {
     let bucket = preparedExtraParamsCache.get(cfg!);
     if (!bucket) {
       bucket = new Map();
       preparedExtraParamsCache.set(cfg!, bucket);
     }
-    bucket.set(cacheKey, result);
+    bucket.set(cacheKey, enforcedResult);
+  }
+  return enforcedResult;
+}
+
+function enforceFastModeOffExtraParams(value: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...value, fastMode: false };
+  delete result.fastModeEnforcedOff;
+  delete result.fast_mode;
+  if (result.serviceTier === "priority") {
+    delete result.serviceTier;
+  }
+  if (result.service_tier === "priority") {
+    delete result.service_tier;
+  }
+  if (result.speed === "fast") {
+    delete result.speed;
+  }
+  for (const key of ["extra_body", "extraBody"] as const) {
+    const nested = result[key];
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+      continue;
+    }
+    const sanitized = { ...(nested as Record<string, unknown>) };
+    if (sanitized.serviceTier === "priority") {
+      delete sanitized.serviceTier;
+    }
+    if (sanitized.service_tier === "priority") {
+      delete sanitized.service_tier;
+    }
+    if (sanitized.speed === "fast") {
+      delete sanitized.speed;
+    }
+    result[key] = sanitized;
   }
   return result;
 }
@@ -387,7 +429,7 @@ function shouldApplyDefaultOpenAIGptRuntimeParams(params: {
   if (params.provider !== "openai") {
     return false;
   }
-  return /^gpt-5(?:[.-]|$)/i.test(params.modelId);
+  return /^gpt-(?:5|6)(?:[.-]|$)/i.test(params.modelId);
 }
 
 function applyDefaultOpenAIGptRuntimeParams(
@@ -779,6 +821,26 @@ function createOpenAICompletionsExtraBodyWrapper(
   };
 }
 
+function createFastModeEnforcedOffPayloadWrapper(
+  baseStreamFn: StreamFn | undefined,
+): StreamFn | undefined {
+  if (!baseStreamFn) {
+    return undefined;
+  }
+  return (model, context, options) =>
+    streamWithPayloadPatch(baseStreamFn, model, context, options, (payload) => {
+      if (payload.serviceTier === "priority") {
+        delete payload.serviceTier;
+      }
+      if (payload.service_tier === "priority") {
+        delete payload.service_tier;
+      }
+      if (payload.speed === "fast") {
+        delete payload.speed;
+      }
+    });
+}
+
 type ApplyExtraParamsContext = {
   agent: { streamFn?: StreamFn };
   cfg: OpenClawConfig | undefined;
@@ -1081,7 +1143,7 @@ export function applyExtraParamsToAgent(
     modelId,
     agentId,
   });
-  const override =
+  const rawOverride =
     extraParamsOverride && Object.keys(extraParamsOverride).length > 0
       ? sanitizeExtraParamsRecord(
           Object.fromEntries(
@@ -1089,6 +1151,10 @@ export function applyExtraParamsToAgent(
           ),
         )
       : undefined;
+  const fastModeEnforcedOff =
+    isFastModeEnforcedOff(cfg) || rawOverride?.fastModeEnforcedOff === true;
+  const override =
+    rawOverride && fastModeEnforcedOff ? enforceFastModeOffExtraParams(rawOverride) : rawOverride;
   const effectiveExtraParams =
     options?.preparedExtraParams ??
     resolvePreparedExtraParams({
@@ -1104,6 +1170,9 @@ export function applyExtraParamsToAgent(
       model,
       resolvedTransport,
     });
+  const enforcedEffectiveExtraParams = fastModeEnforcedOff
+    ? enforceFastModeOffExtraParams(effectiveExtraParams)
+    : effectiveExtraParams;
   const wrapperContext: ApplyExtraParamsContext = {
     agent,
     cfg,
@@ -1113,7 +1182,7 @@ export function applyExtraParamsToAgent(
     workspaceDir,
     thinkingLevel,
     model,
-    effectiveExtraParams,
+    effectiveExtraParams: enforcedEffectiveExtraParams,
     resolvedExtraParams,
     override,
   };
@@ -1139,7 +1208,7 @@ export function applyExtraParamsToAgent(
       nativeWebSearchAllowedByToolPolicy,
       provider,
       modelId,
-      extraParams: effectiveExtraParams,
+      extraParams: enforcedEffectiveExtraParams,
       thinkingLevel,
       model,
       streamFn: providerStreamBase,
@@ -1155,6 +1224,9 @@ export function applyExtraParamsToAgent(
     ...wrapperContext,
     providerWrapperHandled,
   });
+  if (fastModeEnforcedOff) {
+    agent.streamFn = createFastModeEnforcedOffPayloadWrapper(agent.streamFn);
+  }
 
-  return { effectiveExtraParams };
+  return { effectiveExtraParams: enforcedEffectiveExtraParams };
 }

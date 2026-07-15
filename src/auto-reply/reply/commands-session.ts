@@ -10,7 +10,11 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
-import { formatFastModeCurrentStatus, resolveFastModeState } from "../../agents/fast-mode.js";
+import {
+  formatFastModeCurrentStatus,
+  isFastModeEnforcedOff,
+  resolveFastModeState,
+} from "../../agents/fast-mode.js";
 import {
   setChannelConversationBindingIdleTimeoutBySessionKey,
   setChannelConversationBindingMaxAgeBySessionKey,
@@ -461,6 +465,12 @@ export const handleFastCommand: CommandHandler = async (params, allowTextCommand
   const targetSessionEntry = params.sessionStore?.[params.sessionKey] ?? params.sessionEntry;
   const resetsToDefault = isSessionDefaultDirectiveValue(rawMode);
   const nextMode = resetsToDefault ? undefined : normalizeFastMode(rawMode);
+  if (isFastModeEnforcedOff(params.cfg) && (nextMode === true || nextMode === "auto")) {
+    return {
+      shouldContinue: false,
+      reply: { text: "⚙️ Fast mode is permanently disabled for this deployment." },
+    };
+  }
   if (nextMode === undefined) {
     if (resetsToDefault) {
       if (targetSessionEntry && params.sessionStore && params.sessionKey) {

@@ -12,9 +12,7 @@
   "providerEndpoints": [
     {
       "endpointClass": "opencode-native",
-      "hostSuffixes": [
-        "opencode.ai"
-      ]
+      "baseUrls": ["https://opencode.ai/zen", "https://opencode.ai/zen/v1"]
     }
   ],
   "providerRequest": {

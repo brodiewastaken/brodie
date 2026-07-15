@@ -95,11 +95,14 @@ function runXaiToolPayloadWrapper(params: {
   );
 }
 
-async function captureXaiResponsesPayloadWithThinking(): Promise<Record<string, unknown>> {
+async function captureXaiResponsesPayloadWithThinking(params: {
+  modelId: string;
+  thinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+}): Promise<Record<string, unknown>> {
   const model = applyXaiRuntimeModelCompat({
     api: "openai-responses",
     provider: "xai",
-    id: "grok-4.3",
+    id: params.modelId,
     baseUrl: "https://api.x.ai/v1",
     reasoning: true,
     input: ["text", "image"],
@@ -119,7 +122,7 @@ async function captureXaiResponsesPayloadWithThinking(): Promise<Record<string, 
       {
         apiKey: "test-api-key",
         cacheRetention: "none",
-        reasoning: "low",
+        reasoning: params.thinking,
         onPayload: (payload) => {
           clearTimeout(timeout);
           resolve(structuredClone(payload as Record<string, unknown>));
@@ -367,6 +370,38 @@ describe("xai stream wrappers", () => {
     expect(payload.reasoning_effort).toBe("high");
   });
 
+  it.each([
+    ["grok-4.3", "max", "high"],
+    ["grok-4.5", "off", "low"],
+    ["grok-4.6", "max", "xhigh"],
+    ["grok-4.6", "adaptive", "high"],
+    ["grok-4.6", "ultra", "xhigh"],
+  ] as const)("coerces %s %s at the final xai payload boundary", (modelId, thinking, effort) => {
+    const payload: Record<string, unknown> = {
+      reasoning: { effort: "low", summary: "auto" },
+      reasoningEffort: "low",
+    };
+    const baseStreamFn: StreamFn = (model, _context, options) => {
+      options?.onPayload?.(payload, model);
+      return {} as ReturnType<StreamFn>;
+    };
+    const wrapped = createXaiToolPayloadCompatibilityWrapper(baseStreamFn, thinking);
+
+    void wrapped(
+      applyXaiRuntimeModelCompat({
+        api: "openai-responses",
+        provider: "xai",
+        id: modelId,
+        reasoning: true,
+      }) as Model<"openai-responses">,
+      { messages: [] } as Context,
+      {},
+    );
+
+    expect(payload.reasoning).toEqual({ effort, summary: "auto" });
+    expect(payload).not.toHaveProperty("reasoningEffort");
+  });
+
   it("strips reasoning controls when compat disables reasoning effort", () => {
     const payload: Record<string, unknown> = {
       reasoning: { effort: "high" },
@@ -445,11 +480,40 @@ describe("xai stream wrappers", () => {
     expect(payload).not.toHaveProperty("include");
   });
 
-  it("keeps native xAI Responses thinking efforts before the shared runtime dispatches payloads", async () => {
-    const payload = await captureXaiResponsesPayloadWithThinking();
+  it.each([
+    ["grok-4.3", "off", "none"],
+    ["grok-4.3", "minimal", "low"],
+    ["grok-4.3", "low", "low"],
+    ["grok-4.3", "medium", "medium"],
+    ["grok-4.3", "high", "high"],
+    ["grok-4.3", "xhigh", "high"],
+    ["grok-4.3", "max", "high"],
+    ["grok-4.5", "off", "low"],
+    ["grok-4.5", "minimal", "low"],
+    ["grok-4.5", "low", "low"],
+    ["grok-4.5", "medium", "medium"],
+    ["grok-4.5", "high", "high"],
+    ["grok-4.5", "xhigh", "high"],
+    ["grok-4.5", "max", "high"],
+    ["grok-4.6", "off", "low"],
+    ["grok-4.6", "minimal", "low"],
+    ["grok-4.6", "low", "low"],
+    ["grok-4.6", "medium", "medium"],
+    ["grok-4.6", "high", "high"],
+    ["grok-4.6", "xhigh", "xhigh"],
+    ["grok-4.6", "max", "xhigh"],
+  ] as const)("maps %s %s to native effort %s", async (modelId, thinking, expectedEffort) => {
+    const payload = await captureXaiResponsesPayloadWithThinking({ modelId, thinking });
 
-    expect(payload.reasoning).toEqual({ effort: "low", summary: "auto" });
-    expect(payload.include).toEqual(["reasoning.encrypted_content"]);
+    expect(payload.reasoning).toEqual({
+      effort: expectedEffort,
+      ...(thinking === "off" ? {} : { summary: "auto" }),
+    });
+    if (thinking === "off") {
+      expect(payload).not.toHaveProperty("include");
+    } else {
+      expect(payload.include).toEqual(["reasoning.encrypted_content"]);
+    }
   });
 
   it("moves image-bearing tool results out of function_call_output payloads", () => {

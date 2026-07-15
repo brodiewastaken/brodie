@@ -48,9 +48,11 @@ export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORTS)[number];
 
 const GPT_56_MAX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const GPT_56_ULTRA_REASONING_EFFORTS = [...GPT_56_MAX_REASONING_EFFORTS, "ultra"] as const;
-const GPT_56_ULTRA_MODEL_IDS = new Set(["gpt-5.6-sol", "gpt-5.6-terra"]);
+// GPT-6 Astra advertises the same native max/ultra effort range as Sol and Terra.
+const GPT_56_ULTRA_MODEL_IDS = new Set(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"]);
 const GPT_56_MAX_MODEL_IDS = new Set([...GPT_56_ULTRA_MODEL_IDS, "gpt-5.6-luna"]);
 const GPT_56_DEFAULT_REASONING_EFFORTS = new Map<string, CodexReasoningEffort>([
+  ["gpt-6-astra", "medium"],
   ["gpt-5.6-sol", "low"],
   ["gpt-5.6-terra", "medium"],
   ["gpt-5.6-luna", "medium"],

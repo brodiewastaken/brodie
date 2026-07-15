@@ -7,7 +7,11 @@ import {
   requireXaiResponseTextCitationsAndInline,
   resolveXaiResponsesEndpoint,
 } from "./responses-tool-shared.js";
-import { isRecord } from "./tool-config-shared.js";
+import {
+  isRecord,
+  resolveXaiToolReasoningEffort,
+  type XaiToolReasoningEffort,
+} from "./tool-config-shared.js";
 import type { XaiWebSearchResponse } from "./web-search-response.types.js";
 export { extractXaiWebSearchContent } from "./responses-tool-shared.js";
 export type { XaiWebSearchResponse } from "./web-search-response.types.js";
@@ -18,6 +22,7 @@ type XaiWebSearchConfig = Record<string, unknown> & {
   baseUrl?: unknown;
   model?: unknown;
   inlineCitations?: unknown;
+  reasoningEffort?: unknown;
 };
 
 type XaiWebSearchResult = {
@@ -73,6 +78,12 @@ export function resolveXaiInlineCitations(searchConfig?: Record<string, unknown>
   return resolveXaiSearchConfig(searchConfig).inlineCitations === true;
 }
 
+export function resolveXaiWebSearchReasoningEffort(
+  searchConfig?: Record<string, unknown>,
+): XaiToolReasoningEffort | undefined {
+  return resolveXaiToolReasoningEffort(resolveXaiSearchConfig(searchConfig));
+}
+
 function isAbortError(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -97,6 +108,7 @@ export async function requestXaiWebSearch(params: {
   endpoint: string;
   timeoutSeconds: number;
   inlineCitations: boolean;
+  reasoningEffort?: XaiToolReasoningEffort;
 }): Promise<XaiWebSearchResult> {
   return await postTrustedWebToolsJson(
     {
@@ -107,6 +119,7 @@ export async function requestXaiWebSearch(params: {
         model: params.model,
         inputText: params.query,
         tools: [{ type: "web_search" }],
+        reasoningEffort: params.reasoningEffort,
       }),
       errorLabel: "xAI",
     },

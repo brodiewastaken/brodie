@@ -58,6 +58,12 @@ export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
   /** Active file-backed artifact target resolved by the run/session target seam. */
   sessionFile: string;
   initialReplayState?: EmbeddedRunReplayState;
+  /**
+   * Tool names observed in the immediately preceding completed attempt. They
+   * preserve its transcript pairs during replay sanitization only and never
+   * add executable tools to this attempt.
+   */
+  historicalReplayToolNames?: readonly string[];
   /** Pluggable context engine for ingest/assemble/compact lifecycle. */
   contextEngine?: ContextEngine;
   /** Resolved model context window in tokens for assemble/compact budgeting. */

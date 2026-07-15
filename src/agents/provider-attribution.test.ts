@@ -31,7 +31,14 @@ const providerEndpointPlugins = vi.hoisted(() => [
       { endpointClass: "deepseek-native", hosts: ["api.deepseek.com"] },
       { endpointClass: "github-copilot-native", hostSuffixes: [".githubcopilot.com"] },
       { endpointClass: "groq-native", hosts: ["api.groq.com"] },
-      { endpointClass: "opencode-native", hostSuffixes: ["opencode.ai"] },
+      {
+        endpointClass: "opencode-native",
+        baseUrls: ["https://opencode.ai/zen", "https://opencode.ai/zen/v1"],
+      },
+      {
+        endpointClass: "opencode-go-native",
+        baseUrls: ["https://opencode.ai/zen/go", "https://opencode.ai/zen/go/v1"],
+      },
       { endpointClass: "openrouter", hostSuffixes: ["openrouter.ai"] },
       { endpointClass: "zai-native", hosts: ["api.z.ai"] },
       { endpointClass: "google-generative-ai", hosts: ["generativelanguage.googleapis.com"] },
@@ -271,6 +278,23 @@ describe("provider attribution", () => {
     });
   });
 
+  it("returns a documented OpenCode Go attribution policy", () => {
+    expect(
+      resolveProviderAttributionPolicy("opencode-go", { OPENCLAW_VERSION: "2026.3.22" }),
+    ).toEqual({
+      provider: "opencode-go",
+      enabledByDefault: true,
+      verification: "vendor-documented",
+      hook: "request-headers",
+      docsUrl: "https://opencode.ai/docs/go/",
+      reviewNote:
+        "OpenCode Go requires coding agents to identify themselves with a specific User-Agent.",
+      product: "OpenClaw",
+      version: "2026.3.22",
+      headers: { "User-Agent": "openclaw/2026.3.22" },
+    });
+  });
+
   it("returns a hidden-spec xAI attribution policy", () => {
     expect(resolveProviderAttributionPolicy("xai", { OPENCLAW_VERSION: "2026.3.22" })).toEqual({
       provider: "xai",
@@ -310,6 +334,7 @@ describe("provider attribution", () => {
       ["nvidia", true, "vendor-documented", "request-headers"],
       ["google", true, "vendor-documented", "request-headers"],
       ["openai", true, "vendor-hidden-api-spec", "request-headers"],
+      ["opencode-go", true, "vendor-documented", "request-headers"],
       ["xai", true, "vendor-hidden-api-spec", "request-headers"],
       ["anthropic", false, "vendor-sdk-hook-only", "default-headers"],
       ["groq", false, "vendor-sdk-hook-only", "default-headers"],
@@ -536,8 +561,16 @@ describe("provider attribution", () => {
       endpointClass: "nvidia-native",
       hostname: "integrate.api.nvidia.com",
     });
-    expectRecordFields(resolveProviderEndpoint("https://opencode.ai/api"), {
+    expectRecordFields(resolveProviderEndpoint("https://opencode.ai/zen/v1"), {
       endpointClass: "opencode-native",
+      hostname: "opencode.ai",
+    });
+    expectRecordFields(resolveProviderEndpoint("https://opencode.ai/zen/go/v1"), {
+      endpointClass: "opencode-go-native",
+      hostname: "opencode.ai",
+    });
+    expectRecordFields(resolveProviderEndpoint("https://opencode.ai/api"), {
+      endpointClass: "custom",
       hostname: "opencode.ai",
     });
     expectRecordFields(resolveProviderEndpoint("https://api.xiaomimimo.com/v1"), {

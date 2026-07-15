@@ -158,6 +158,8 @@ export type LlmCompleteParams = {
   model?: string;
   maxTokens?: number;
   temperature?: number;
+  /** Reasoning level, normalized by the selected model's completion runtime. */
+  reasoning?: import("../../agents/simple-completion-runtime.js").SimpleCompletionModelOptions["reasoning"];
   systemPrompt?: string;
   signal?: AbortSignal;
   /** Human-readable reason for audit/debug output. */

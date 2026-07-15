@@ -35,7 +35,13 @@ describe("OpenAI provider policy artifact", () => {
       provider: "openai",
       modelId: "gpt-5.6-luna",
     })?.levels.map((level) => level.id);
+    const astraLevels = resolveThinkingProfile({
+      provider: "openai",
+      modelId: "gpt-6-astra",
+    })?.levels.map((level) => level.id);
 
+    expect(astraLevels).toContain("xhigh");
+    expect(astraLevels).toContain("max");
     expect(solLevels).toContain("max");
     expect(terraLevels).toContain("xhigh");
     expect(terraLevels).toContain("max");
@@ -44,6 +50,8 @@ describe("OpenAI provider policy artifact", () => {
   });
 
   it.each([
+    ["gpt-6-astra", "codex", "medium"],
+    ["gpt-6-astra", "openclaw", "medium"],
     ["gpt-5.6-sol", "codex", "low"],
     ["gpt-5.6-sol", "openclaw", "low"],
     ["gpt-5.6-terra", "codex", "medium"],
@@ -60,7 +68,7 @@ describe("OpenAI provider policy artifact", () => {
     expect(profile?.defaultLevel).toBe(expected);
   });
 
-  it.each(["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
+  it.each(["gpt-6-astra", "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
     "exposes logical Ultra for %s on the OpenClaw runtime",
     (modelId) => {
       const levels = resolveThinkingProfile({
@@ -73,7 +81,7 @@ describe("OpenAI provider policy artifact", () => {
     },
   );
 
-  it.each(["gpt-5.6-sol", "gpt-5.6-terra"])(
+  it.each(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"])(
     "uses native Ultra fallback for %s when model/list metadata is unavailable",
     (modelId) => {
       const levels = resolveThinkingProfile({
@@ -86,7 +94,7 @@ describe("OpenAI provider policy artifact", () => {
     },
   );
 
-  it.each(["gpt-5.6-sol", "gpt-5.6-terra"])(
+  it.each(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"])(
     "keeps native Ultra fallback for %s with direct OpenAI API metadata",
     (modelId) => {
       const levels = resolveThinkingProfile({
@@ -103,7 +111,7 @@ describe("OpenAI provider policy artifact", () => {
   );
 
   it("does not invent native Ultra support for bare or suffixed GPT-5.6 refs", () => {
-    for (const modelId of ["gpt-5.6", "gpt-5.6-sol-oai"]) {
+    for (const modelId of ["gpt-5.6", "gpt-5.6-sol-oai", "gpt-6", "gpt-6-astra-oai"]) {
       const levels = resolveThinkingProfile({
         provider: "openai",
         modelId,

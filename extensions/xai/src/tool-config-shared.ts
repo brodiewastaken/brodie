@@ -31,3 +31,22 @@ export function resolvePositiveIntegerToolConfig(
   const normalized = Math.trunc(raw);
   return normalized > 0 ? normalized : undefined;
 }
+
+export type XaiToolReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
+
+const XAI_TOOL_REASONING_EFFORTS = new Set<XaiToolReasoningEffort>([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
+
+export function resolveXaiToolReasoningEffort(
+  config: Record<string, unknown> | undefined,
+): XaiToolReasoningEffort | undefined {
+  const raw = coerceXaiToolConfig(config).reasoningEffort;
+  return typeof raw === "string" && XAI_TOOL_REASONING_EFFORTS.has(raw as XaiToolReasoningEffort)
+    ? (raw as XaiToolReasoningEffort)
+    : undefined;
+}

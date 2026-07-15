@@ -136,6 +136,10 @@
       "label": "Inline Citations",
       "help": "Include inline markdown citations in Grok responses."
     },
+    "webSearch.reasoningEffort": {
+      "label": "Grok Search Reasoning Effort",
+      "help": "Optional reasoning effort for Grok web search requests."
+    },
     "codeExecution.enabled": {
       "label": "Enable Code Execution",
       "help": "Enable the code_execution tool for remote xAI sandbox analysis."
@@ -155,6 +159,10 @@
     "xSearch.inlineCitations": {
       "label": "X Search Inline Citations",
       "help": "Keep inline markdown citations from xAI in x_search responses when available."
+    },
+    "xSearch.reasoningEffort": {
+      "label": "X Search Reasoning Effort",
+      "help": "Optional reasoning effort for x_search requests."
     },
     "xSearch.maxTurns": {
       "label": "X Search Max Turns",
@@ -262,6 +270,10 @@
           },
           "inlineCitations": {
             "type": "boolean"
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": ["none", "low", "medium", "high", "xhigh"]
           }
         }
       },
@@ -280,6 +292,10 @@
           },
           "inlineCitations": {
             "type": "boolean"
+          },
+          "reasoningEffort": {
+            "type": "string",
+            "enum": ["none", "low", "medium", "high", "xhigh"]
           },
           "maxTurns": {
             "type": "number"

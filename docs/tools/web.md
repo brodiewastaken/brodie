@@ -440,6 +440,7 @@ active for the turn that actually calls it.
             model: "grok-4-1-fast-non-reasoning",
             baseUrl: "https://api.x.ai/v1", // optional, overrides webSearch.baseUrl
             inlineCitations: false,
+            reasoningEffort: "low", // optional: none, low, medium, high, or xhigh
             maxTurns: 2,
             timeoutSeconds: 30,
             cacheTtlMinutes: 15,

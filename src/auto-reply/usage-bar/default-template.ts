@@ -14,6 +14,7 @@ export const DEFAULT_USAGE_BAR_TEMPLATE: UsageBarTemplate = {
   },
   aliases: {
     models: {
+      "claude-opus-5": "opus5",
       "claude-opus-4-6": "opus46",
       "claude-opus-4-8": "opus48",
       "claude-sonnet-4-6": "sonnet46",

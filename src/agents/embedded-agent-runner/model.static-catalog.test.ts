@@ -15,7 +15,8 @@ const providerMocks = vi.hoisted(() => ({
   runProviderStaticCatalog: vi.fn(),
 }));
 
-vi.mock("../../plugins/manifest-metadata-scan.js", () => ({
+vi.mock("../../plugins/manifest-metadata-scan.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../plugins/manifest-metadata-scan.js")>()),
   listOpenClawPluginManifestMetadata: manifestMocks.listOpenClawPluginManifestMetadata,
 }));
 

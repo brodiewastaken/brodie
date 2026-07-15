@@ -1006,6 +1006,7 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
   payload_message TEXT,
   payload_model TEXT,
   payload_fallbacks_json TEXT,
+  payload_fast_mode TEXT,
   payload_thinking TEXT,
   payload_timeout_seconds INTEGER,
   payload_allow_unsafe_external_content INTEGER,

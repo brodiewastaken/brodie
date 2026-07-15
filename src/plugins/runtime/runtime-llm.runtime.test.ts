@@ -567,6 +567,7 @@ describe("runtime.llm.complete", () => {
       ],
       temperature: 0.2,
       maxTokens: 64,
+      reasoning: "low",
       purpose: "test-purpose",
     });
 
@@ -590,6 +591,7 @@ describe("runtime.llm.complete", () => {
     expectFields(requireRecord(completionArg.options, "completion options"), {
       maxTokens: 64,
       temperature: 0.2,
+      reasoning: "low",
     });
     expectFields(requireRecord(result, "completion result"), {
       text: "done",
@@ -614,6 +616,26 @@ describe("runtime.llm.complete", () => {
     );
     expectFields(requireRecord(logPayload.usage, "log usage"), { costUsd: 0.0042 });
   });
+
+  it.each(["error", "aborted"])(
+    "rejects a provider %s result instead of reporting an empty successful completion",
+    async (stopReason) => {
+      const logger = createLogger();
+      const llm = createRuntimeLlm({ getConfig: () => cfg, logger });
+      hoisted.completeWithPreparedSimpleCompletionModel.mockResolvedValue({
+        content: [],
+        stopReason,
+        errorMessage: "Unsupported reasoning effort",
+      });
+
+      await expect(
+        llm.complete({ messages: [{ role: "user", content: "summarize" }], reasoning: "low" }),
+      ).rejects.toThrow(
+        "Plugin LLM completion failed for openai/gpt-5.5: Unsupported reasoning effort",
+      );
+      expect(logger.info).not.toHaveBeenCalled();
+    },
+  );
 
   it("uses scoped plugin identity and ignores caller-shaped spoofing input", async () => {
     const logger = createLogger();

@@ -397,6 +397,28 @@ describe("applyDefaultModel", () => {
     });
   });
 
+  it("preserves the fallback notice policy when changing the primary", () => {
+    const config = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-opus-4-6",
+            fallbacks: ["openai/gpt-5.4"],
+            fallbackNotice: "silent",
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+
+    const next = applyDefaultModel(config, "openrouter/auto");
+
+    expect(next.agents?.defaults?.model).toEqual({
+      primary: "openrouter/auto",
+      fallbacks: ["openai/gpt-5.4"],
+      fallbackNotice: "silent",
+    });
+  });
+
   it("adds the model to the allowlist", () => {
     const config = {
       agents: { defaults: { models: { "anthropic/claude-sonnet-4-6": {} } } },

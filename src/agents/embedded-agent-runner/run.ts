@@ -100,6 +100,7 @@ import {
   DEFAULT_FAST_MODE_AUTO_ON_SECONDS,
   type FastModeAutoProgressState,
   formatFastModeAutoProgressText,
+  isFastModeEnforcedOff,
   resolveFastModeForElapsed,
 } from "../fast-mode.js";
 import { ensureSelectedAgentHarnessPlugin } from "../harness/runtime-plugin.js";
@@ -223,6 +224,7 @@ import {
 import {
   DEFAULT_EMPTY_RESPONSE_RETRY_LIMIT,
   DEFAULT_REASONING_ONLY_RETRY_LIMIT,
+  MESSAGE_TOOL_ONLY_FINALIZE_CONTINUATION_PROMPT,
   hasAttemptTerminalState,
   resolveAttemptReplayMetadata,
   resolveEmptyResponseRetryInstruction,
@@ -233,6 +235,7 @@ import {
   resolveRunLivenessState,
   shouldRetryMissingAssistantTurn,
   shouldRetrySilentErrorAssistantTurn,
+  shouldRunMessageToolOnlyFinalizeContinuation,
   shouldTreatEmptyAssistantReplyAsSilent,
 } from "./run/incomplete-turn.js";
 import type { RunEmbeddedAgentParams } from "./run/params.js";
@@ -273,7 +276,12 @@ const BEFORE_AGENT_FINALIZE_RETRY_PROMPT_PREFIX =
   "Before accepting the previous final answer, apply this revision request and produce the revised final answer. Do not repeat completed work or rerun tools unless the request explicitly requires it.";
 const MAX_BEFORE_AGENT_FINALIZE_REVISIONS = 3;
 type EmbeddedRunAttemptForRunner = Awaited<ReturnType<typeof runEmbeddedAttemptWithBackend>>;
-type RunEmbeddedAgentParamsWithSessionFile = RunEmbeddedAgentParams & { sessionFile: string };
+type RunEmbeddedAgentParamsWithFastModePolicy = RunEmbeddedAgentParams & {
+  fastModeEnforcedOff?: boolean;
+};
+type RunEmbeddedAgentParamsWithSessionFile = RunEmbeddedAgentParamsWithFastModePolicy & {
+  sessionFile: string;
+};
 
 function isNoRealConversationCompactionNoop(params: {
   ok?: boolean;
@@ -509,6 +517,35 @@ function createScopedAuthProfileStore(
     : createEmptyAuthProfileStore();
 }
 
+function collectFinalizationHistoricalReplayToolNames(
+  messages: ReadonlyArray<{ role?: unknown; content?: unknown; toolName?: unknown }>,
+): string[] {
+  const names = new Set<string>();
+  const add = (value: unknown) => {
+    const name = normalizeOptionalString(value);
+    if (name) {
+      names.add(name);
+    }
+  };
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (!block || typeof block !== "object") {
+          continue;
+        }
+        const record = block as { type?: unknown; name?: unknown };
+        if (record.type === "toolCall" || record.type === "toolUse") {
+          add(record.name);
+        }
+      }
+    }
+    if (message.role === "toolResult") {
+      add(message.toolName);
+    }
+  }
+  return [...names];
+}
+
 function buildTraceToolSummary(params: {
   toolMetas?: Array<{ toolName: string; meta?: string; asyncStarted?: boolean }>;
   hadFailure: boolean;
@@ -643,19 +680,23 @@ export function runEmbeddedAgent(
   const config =
     paramsInput.config ??
     (needsConfiguredDefault ? (getRuntimeConfigSnapshot() ?? undefined) : undefined);
+  const fastModeEnforcedOff = isFastModeEnforcedOff(
+    paramsInput.config ?? getRuntimeConfigSnapshot() ?? undefined,
+  );
   const lifecycleGeneration =
     paramsInput.lifecycleGeneration ?? captureAgentRunLifecycleGeneration(paramsInput.runId);
   return withAgentRunLifecycleGeneration(lifecycleGeneration, () =>
     runEmbeddedAgentInternal({
       ...paramsInput,
       config,
+      fastModeEnforcedOff,
       lifecycleGeneration,
     }),
   );
 }
 
 async function runEmbeddedAgentInternal(
-  paramsInput: RunEmbeddedAgentParams,
+  paramsInput: RunEmbeddedAgentParamsWithFastModePolicy,
 ): Promise<EmbeddedAgentRunResult> {
   const paramsBase = applyAgentRunSessionTargetIdentity(paramsInput);
   let lifecycleGeneration = paramsBase.lifecycleGeneration!;
@@ -674,6 +715,9 @@ async function runEmbeddedAgentInternal(
   });
   let params: RunEmbeddedAgentParamsWithSessionFile = {
     ...paramsBase,
+    ...(paramsBase.fastModeEnforcedOff || isFastModeEnforcedOff(paramsBase.config)
+      ? { fastMode: false }
+      : {}),
     agentId: paramsBase.agentId ?? runSessionTarget.agentId,
     sessionId: runSessionTarget.sessionId,
     sessionKey: normalizeOptionalString(effectiveSessionKey ?? runSessionTarget.sessionKey),
@@ -1699,6 +1743,8 @@ async function runEmbeddedAgentInternal(
       let emptyResponseRetryInstruction: string | null = null;
       let compactionContinuationRetryInstruction: string | null = null;
       let nextAttemptPromptOverride: string | null = null;
+      let messageToolOnlyFinalizeContinuationActive = false;
+      let messageToolOnlyFinalizeHistoricalReplayToolNames: readonly string[] | undefined;
       let rateLimitProfileRotations = 0;
       let timeoutCompactionAttempts = 0;
       let codexAppServerRecoveryRetries = 0;
@@ -1996,10 +2042,69 @@ async function runEmbeddedAgentInternal(
         };
         let authRetryPending = false;
         let accumulatedReplayState = createEmbeddedRunReplayState();
-        // Hoisted so the retry-limit error path can use the most recent API total.
+        let priorConversationTerminalActivity = false;
+        // Hoisted so the retry-limit and finalization-failure paths can use the most recent API total.
         let lastTurnTotal: number | undefined;
+        const finalizeFailure = (
+          cause?: unknown,
+          attempt?: EmbeddedRunAttemptForRunner,
+        ): EmbeddedAgentRunResult => {
+          const diagnostic = cause ? formatErrorMessage(cause) : undefined;
+          const message = diagnostic
+            ? `Message-tool-only finalization failed: ${diagnostic}`
+            : "Message-tool-only finalization did not send a reply.";
+          return {
+            payloads: [
+              {
+                text: "⚠️ Agent couldn't finish sending the response. The existing work is saved; please try again.",
+                isError: true,
+              },
+            ],
+            meta: {
+              durationMs: Date.now() - started,
+              agentMeta: buildErrorAgentMeta({
+                sessionId: activeSessionId,
+                sessionFile: activeSessionFile,
+                provider,
+                model: model.id,
+                contextTokens: ctxInfo.tokens,
+                usageAccumulator,
+                lastRunPromptUsage,
+                lastTurnTotal,
+              }),
+              replayInvalid: true,
+              livenessState: "abandoned",
+              error: {
+                kind: "provider_error",
+                message,
+                fallbackSafe: false,
+              },
+            },
+            ...(attempt
+              ? {
+                  didSendViaMessagingTool: attempt.didSendViaMessagingTool,
+                  messageToolDeliveryState: attempt.messageToolDeliveryState,
+                  conversationOutcome: attempt.conversationOutcome,
+                  didDeliverSourceReplyViaMessageTool:
+                    attempt.didDeliverSourceReplyViaMessageTool === true,
+                  messageToolSourceReplyDeliveryState: attempt.messageToolSourceReplyDeliveryState,
+                  didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
+                  messagingToolSentTexts: attempt.messagingToolSentTexts,
+                  messagingToolSentMediaUrls: attempt.messagingToolSentMediaUrls,
+                  messagingToolSentTargets: attempt.messagingToolSentTargets,
+                  messagingToolSourceReplyPayloads: attempt.messagingToolSourceReplyPayloads,
+                  heartbeatToolResponse: attempt.heartbeatToolResponse,
+                  successfulCronAdds: attempt.successfulCronAdds,
+                  acceptedSessionSpawns: attempt.acceptedSessionSpawns,
+                }
+              : {}),
+          };
+        };
         while (true) {
           if (runLoopIterations >= MAX_RUN_LOOP_ITERATIONS) {
+            if (messageToolOnlyFinalizeContinuationActive) {
+              return finalizeFailure();
+            }
             const message =
               `Exceeded retry limit after ${runLoopIterations} attempts ` +
               `(max=${MAX_RUN_LOOP_ITERATIONS}).`;
@@ -2043,10 +2148,19 @@ async function runEmbeddedAgentInternal(
             startupStages.mark(EMBEDDED_RUN_ATTEMPT_DISPATCH_STAGE.workspace);
           }
 
-          const basePrompt =
-            nextAttemptPromptOverride ??
-            (provider === "anthropic" ? scrubAnthropicRefusalMagic(params.prompt) : params.prompt);
+          const basePrompt = messageToolOnlyFinalizeContinuationActive
+            ? MESSAGE_TOOL_ONLY_FINALIZE_CONTINUATION_PROMPT
+            : (nextAttemptPromptOverride ??
+              (provider === "anthropic"
+                ? scrubAnthropicRefusalMagic(params.prompt)
+                : params.prompt));
           nextAttemptPromptOverride = null;
+          const attemptToolsAllow = messageToolOnlyFinalizeContinuationActive
+            ? []
+            : params.toolsAllow;
+          const attemptAllowedConversationalActions = messageToolOnlyFinalizeContinuationActive
+            ? (["reply"] as const)
+            : params.allowedConversationalActions;
           const promptAdditions = [
             reasoningOnlyRetryInstruction,
             emptyResponseRetryInstruction,
@@ -2058,10 +2172,18 @@ async function runEmbeddedAgentInternal(
             promptAdditions.length > 0
               ? `${basePrompt}\n\n${promptAdditions.join("\n\n")}`
               : basePrompt;
-          const resolvedStreamApiKey = resolveAttemptDispatchApiKey({
-            apiKeyInfo,
-            runtimeAuthState,
-          });
+          let resolvedStreamApiKey: ReturnType<typeof resolveAttemptDispatchApiKey>;
+          try {
+            resolvedStreamApiKey = resolveAttemptDispatchApiKey({
+              apiKeyInfo,
+              runtimeAuthState,
+            });
+          } catch (err) {
+            if (messageToolOnlyFinalizeContinuationActive) {
+              return finalizeFailure(err);
+            }
+            throw err;
+          }
           const attemptFastMode = resolveAttemptFastModeParam();
           if (!startupStagesEmitted) {
             startupStages.mark(EMBEDDED_RUN_ATTEMPT_DISPATCH_STAGE.prompt);
@@ -2093,6 +2215,7 @@ async function runEmbeddedAgentInternal(
             extraParamsOverride: {
               ...params.streamParams,
               fastMode: attemptFastMode,
+              ...(params.fastModeEnforcedOff ? { fastModeEnforcedOff: true } : {}),
             },
           });
           if (!startupStagesEmitted) {
@@ -2163,7 +2286,9 @@ async function runEmbeddedAgentInternal(
             runLoopIterations,
             maxRunLoopIterations: MAX_RUN_LOOP_ITERATIONS,
           });
-          const rawAttempt = await runEmbeddedAttemptWithBackend({
+          let rawAttempt: Awaited<ReturnType<typeof runEmbeddedAttemptWithBackend>>;
+          try {
+            rawAttempt = await runEmbeddedAttemptWithBackend({
             sessionId: activeSessionId,
             sessionKey: resolvedSessionKey,
             promptCacheKey: params.promptCacheKey,
@@ -2214,7 +2339,7 @@ async function runEmbeddedAgentInternal(
             currentInboundContext: params.currentInboundContext,
             images: params.images,
             imageOrder: params.imageOrder,
-            clientTools: params.clientTools,
+            clientTools: messageToolOnlyFinalizeContinuationActive ? undefined : params.clientTools,
             disableTools: params.disableTools,
             provider,
             modelId,
@@ -2317,7 +2442,7 @@ async function runEmbeddedAgentInternal(
             onExecutionPhase: params.onExecutionPhase,
             extraSystemPrompt: params.extraSystemPrompt,
             sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
-            allowedConversationalActions: params.allowedConversationalActions,
+            allowedConversationalActions: attemptAllowedConversationalActions,
             inputProvenance: params.inputProvenance,
             streamParams: params.streamParams,
             modelRun: params.modelRun,
@@ -2329,7 +2454,10 @@ async function runEmbeddedAgentInternal(
             bootstrapContextMode: params.bootstrapContextMode,
             bootstrapContextRunKind: params.bootstrapContextRunKind,
             jobId: params.jobId,
-            toolsAllow: params.toolsAllow,
+            toolsAllow: attemptToolsAllow,
+            historicalReplayToolNames: messageToolOnlyFinalizeContinuationActive
+              ? messageToolOnlyFinalizeHistoricalReplayToolNames
+              : undefined,
             crestodianTool: params.crestodianTool,
             cleanupBundleMcpOnRunEnd: params.cleanupBundleMcpOnRunEnd,
             disableMessageTool: params.disableMessageTool,
@@ -2361,14 +2489,27 @@ async function runEmbeddedAgentInternal(
                 postCompactionAbortController = undefined;
               }
             });
+          } catch (err) {
+            if (messageToolOnlyFinalizeContinuationActive) {
+              return finalizeFailure(err);
+            }
+            throw err;
+          }
           if (postCompactionAbortError) {
+            if (messageToolOnlyFinalizeContinuationActive) {
+              return finalizeFailure(postCompactionAbortError);
+            }
             throw postCompactionAbortError;
           }
           const attempt = normalizeEmbeddedRunAttemptResult(rawAttempt);
-          if (attemptCancellationRequested) {
-            throwIfAborted();
-            throw createAgentRunDirectAbortError();
-          }
+          priorConversationTerminalActivity ||=
+            attempt.conversationOutcome === "sent" ||
+            attempt.conversationOutcome === "reacted" ||
+            attempt.conversationOutcome === "deliberate_silence" ||
+            attempt.didDeliverSourceReplyViaMessageTool === true ||
+            attempt.messageToolDeliveryState !== undefined ||
+            attempt.messageToolSourceReplyDeliveryState !== undefined ||
+            hasMessagingToolDeliveryEvidence(attempt);
 
           const {
             aborted,
@@ -2422,6 +2563,46 @@ async function runEmbeddedAgentInternal(
           // reflects current context usage, not accumulated tool-loop usage.
           lastRunPromptUsage = callUsage.latest;
           lastTurnTotal = callUsage.latest?.total;
+          if (resolveReplayInvalidFlag({ attempt, incompleteTurnText: null })) {
+            accumulatedReplayState.replayInvalid = true;
+          }
+          accumulatedReplayState = observeReplayMetadata(
+            accumulatedReplayState,
+            attempt.replayMetadata,
+          );
+          if (messageToolOnlyFinalizeContinuationActive) {
+            const didDeliverTerminalSourceReply =
+              attempt.didDeliverSourceReplyViaMessageTool === true &&
+              attempt.messageToolSourceReplyDeliveryState === "terminal";
+            const finalizationFailure =
+              !didDeliverTerminalSourceReply ||
+              aborted ||
+              externalAbort ||
+              timedOut ||
+              attemptCancellationRequested ||
+              preflightRecovery?.handled === true ||
+              promptError != null ||
+              attempt.lastToolError != null ||
+              currentAttemptAssistant?.stopReason === "error" ||
+              sessionLastAssistant?.stopReason === "error";
+            if (finalizationFailure) {
+              setTerminalLifecycleMeta({
+                replayInvalid: true,
+                livenessState: "abandoned",
+                stopReason: currentAttemptAssistant?.stopReason ?? sessionLastAssistant?.stopReason,
+              });
+              return finalizeFailure(
+                promptError ??
+                  attempt.lastToolError ??
+                  (aborted ? new Error("Finalization aborted") : undefined),
+                attempt,
+              );
+            }
+          }
+          if (attemptCancellationRequested) {
+            throwIfAborted();
+            throw createAgentRunDirectAbortError();
+          }
           // Idle-timeout cost-runaway breaker (#76293). Logic lives in the
           // pure helper below so it stays unit-testable; the run loop just
           // feeds it the latest attempt outcome and bails through the
@@ -2506,13 +2687,6 @@ async function runEmbeddedAgentInternal(
               attempt,
               incompleteTurnText,
             });
-          if (resolveReplayInvalidForAttempt(null)) {
-            accumulatedReplayState.replayInvalid = true;
-          }
-          accumulatedReplayState = observeReplayMetadata(
-            accumulatedReplayState,
-            attempt.replayMetadata,
-          );
           const formattedAssistantErrorText = sessionAssistantForCandidate
             ? formatAssistantErrorText(sessionAssistantForCandidate, {
                 cfg: params.config,
@@ -3985,6 +4159,34 @@ async function runEmbeddedAgentInternal(
                 attempt,
               });
           if (
+            !emptyAssistantReplyIsSilent &&
+            !messageToolOnlyFinalizeContinuationActive &&
+            shouldRunMessageToolOnlyFinalizeContinuation({
+              payloadCount,
+              aborted,
+              externalAbort,
+              timedOut,
+              promptError,
+              sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
+              priorConversationTerminalActivity,
+              attempt,
+            })
+          ) {
+            messageToolOnlyFinalizeContinuationActive = true;
+            messageToolOnlyFinalizeHistoricalReplayToolNames =
+              collectFinalizationHistoricalReplayToolNames(attempt.messagesSnapshot);
+            suppressNextUserMessagePersistence = true;
+            reasoningOnlyRetryInstruction = null;
+            emptyResponseRetryInstruction = null;
+            compactionContinuationRetryInstruction = null;
+            log.warn(
+              `message-tool-only finalization continuation: runId=${params.runId} sessionId=${params.sessionId} ` +
+                "attempt=1/1",
+            );
+            continue;
+          }
+          if (
+            !messageToolOnlyFinalizeContinuationActive &&
             nextReasoningOnlyRetryInstruction &&
             reasoningOnlyRetryAttempts < maxReasoningOnlyRetryAttempts
           ) {
@@ -4002,6 +4204,7 @@ async function runEmbeddedAgentInternal(
             reasoningOnlyRetryAttempts >= maxReasoningOnlyRetryAttempts;
           if (
             !emptyAssistantReplyIsSilent &&
+            !messageToolOnlyFinalizeContinuationActive &&
             shouldRetryMissingAssistantTurn({
               payloadCount,
               aborted,
@@ -4019,6 +4222,7 @@ async function runEmbeddedAgentInternal(
             continue;
           }
           if (
+            !messageToolOnlyFinalizeContinuationActive &&
             !nextReasoningOnlyRetryInstruction &&
             nextEmptyResponseRetryInstruction &&
             emptyResponseRetryAttempts < maxEmptyResponseRetryAttempts
@@ -4151,6 +4355,7 @@ async function runEmbeddedAgentInternal(
             };
           }
           if (
+            !messageToolOnlyFinalizeContinuationActive &&
             !nextReasoningOnlyRetryInstruction &&
             nextEmptyResponseRetryInstruction &&
             emptyResponseRetryAttempts >= maxEmptyResponseRetryAttempts

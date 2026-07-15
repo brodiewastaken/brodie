@@ -78,6 +78,8 @@ export type GetReplyOptions = {
   runId?: string;
   /** Stable provider prompt-cache affinity key; distinct from run id/idempotency. */
   promptCacheKey?: string;
+  /** Immutable model selected before durable admission; recovery must not re-resolve it. */
+  runModelOverride?: { provider: string; model: string };
   /** Abort signal for the underlying agent run. */
   abortSignal?: AbortSignal;
   /** Optional inbound images (used for webchat attachments). */

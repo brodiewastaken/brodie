@@ -16,6 +16,7 @@ import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { buildAgentRunTerminalOutcomeFromWaitResult } from "./agent-run-terminal-outcome.js";
 import { removeInternalSessionEffectsTranscript } from "./internal-session-effects.js";
+import type { RunPolicy } from "./run-policy.js";
 import { isRecoverableAgentWaitError, waitForAgentRun } from "./run-wait.js";
 import { type SubagentRunOutcome, withSubagentOutcomeTiming } from "./subagent-announce-output.js";
 import { resolveSubagentConversationRoute } from "./subagent-conversation-route.js";
@@ -121,7 +122,7 @@ export type RegisterSubagentRunParams = {
   expectsCompletionMessage?: boolean;
   spawnMode?: "run" | "session";
   contextMode?: "isolated" | "fork";
-  resolvedRunPolicy?: Record<string, unknown>;
+  resolvedRunPolicy?: RunPolicy;
   deferCompletionWait?: boolean;
   attachmentsDir?: string;
   attachmentsRootDir?: string;

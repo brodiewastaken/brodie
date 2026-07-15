@@ -23,6 +23,24 @@ export const TOOL_SEARCH_CONTROL_ALLOWLIST_NAMES = [
 
 type CollectAllowedToolNamesParams = Parameters<typeof collectAllowedToolNames>[0];
 
+/**
+ * Adds names from a completed prior turn solely to the transcript-replay
+ * allowance. Callers must keep the live tool plan separate.
+ */
+export function mergeHistoricalReplayToolNames(
+  replayAllowedToolNames: Iterable<string>,
+  historicalReplayToolNames?: Iterable<string>,
+): Set<string> {
+  const merged = new Set(replayAllowedToolNames);
+  for (const name of historicalReplayToolNames ?? []) {
+    const normalized = normalizeToolName(name);
+    if (normalized) {
+      merged.add(normalized);
+    }
+  }
+  return merged;
+}
+
 /** Derived tool allowlists used for visible prompt tools, replay tools, and empty-allowlist checks. */
 type ToolSearchRunPlan = {
   visibleAllowedToolNames: Set<string>;

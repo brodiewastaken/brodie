@@ -35,6 +35,7 @@ import {
   wrapStreamFnTrimToolCallNames,
 } from "./attempt.tool-call-normalization.js";
 import { buildEmbeddedAttemptToolRunContext } from "./attempt.tool-run-context.js";
+import { mergeHistoricalReplayToolNames } from "./attempt.tool-search-run-plan.js";
 
 type FakeWrappedStream = {
   result: () => Promise<unknown>;
@@ -2475,6 +2476,43 @@ describe("wrapStreamFnSanitizeMalformedToolCalls", () => {
       },
     ]);
   });
+  it("preserves recorded history through sanitization without adding executable tools", async () => {
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call_1", name: "write", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call_1",
+        toolName: "write",
+        content: [{ type: "text", text: "saved" }],
+        isError: false,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "original request" }],
+      },
+    ];
+    const liveAllowedToolNames = new Set(["message"]);
+    const replayAllowedToolNames = mergeHistoricalReplayToolNames(liveAllowedToolNames, ["write"]);
+    const baseFn = vi.fn((_model, _context) =>
+      createFakeStream({ events: [], resultMessage: { role: "assistant", content: [] } }),
+    );
+
+    const wrapped = wrapStreamFnSanitizeMalformedToolCalls(baseFn as never, replayAllowedToolNames);
+    const stream = wrapped({} as never, { messages } as never, {} as never) as
+      | FakeWrappedStream
+      | Promise<FakeWrappedStream>;
+    await Promise.resolve(stream);
+
+    expect([...liveAllowedToolNames]).toEqual(["message"]);
+    expect(firstBaseContext(baseFn).messages).toEqual(messages);
+    expect(
+      firstBaseContext(baseFn).messages.filter((message) => message.role === "user"),
+    ).toHaveLength(1);
+  });
+
   it("drops replayed tool names that are no longer allowlisted", async () => {
     const messages = [
       {

@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   loadModelsConfig: vi.fn(),
   resolveApiKeyForProvider: vi.fn(),
   scanOpenRouterModels: vi.fn(),
+  updateConfig: vi.fn(),
 }));
 
 vi.mock("./load-config.js", () => ({
@@ -21,6 +22,14 @@ vi.mock("../../agents/model-auth.js", () => ({
 vi.mock("../../agents/model-scan.js", () => ({
   scanOpenRouterModels: mocks.scanOpenRouterModels,
 }));
+
+vi.mock("./shared.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./shared.js")>();
+  return {
+    ...actual,
+    updateConfig: mocks.updateConfig,
+  };
+});
 
 const { modelsScanCommand } = await import("./scan.js");
 
@@ -72,6 +81,43 @@ function withOpenRouterApiKey<T>(apiKey: string | undefined, fn: () => Promise<T
 describe("models scan command", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("preserves the fallback notice policy when applying scan results", async () => {
+    await withOpenRouterApiKey("sk-or-test", async () => {
+      const runtime = createRuntime();
+      let writtenConfig: unknown;
+      mocks.scanOpenRouterModels.mockResolvedValue([
+        scanResult({ tool: { ok: true, latencyMs: 10, skipped: false } }),
+      ]);
+      mocks.updateConfig.mockImplementation(async (update) => {
+        writtenConfig = update({
+          agents: {
+            defaults: {
+              model: {
+                primary: "openai/gpt-5.6-sol",
+                fallbacks: ["anthropic/claude-opus-5"],
+                fallbackNotice: "silent",
+              },
+            },
+          },
+        });
+      });
+
+      await modelsScanCommand({ json: true, setDefault: true }, runtime);
+
+      expect(writtenConfig).toMatchObject({
+        agents: {
+          defaults: {
+            model: {
+              primary: "openrouter/acme/free:free",
+              fallbacks: ["openrouter/acme/free:free"],
+              fallbackNotice: "silent",
+            },
+          },
+        },
+      });
+    });
   });
 
   it("does not load config or resolve secrets for metadata-only scans", async () => {

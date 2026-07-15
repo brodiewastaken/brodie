@@ -188,6 +188,8 @@ export interface SimpleStreamOptions extends StreamOptions {
   reasoning?: ModelThinkingLevel;
   /** Custom token budgets for thinking levels (token-based providers only) */
   thinkingBudgets?: ThinkingBudgets;
+  /** Trusted host correlation metadata for transport-level diagnostics. */
+  traceContext?: Record<string, unknown>;
 }
 
 // Generic StreamFunction with typed options.

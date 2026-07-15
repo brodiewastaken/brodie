@@ -10,6 +10,7 @@ import type {
 type FirstEventStreamOptions = {
   firstEventTimeoutMs?: number;
   onFirstEventTimeout?: (reason: Error) => void;
+  traceContext?: Record<string, unknown>;
 };
 
 export function buildBaseOptions(
@@ -38,6 +39,7 @@ export function buildBaseOptions(
     maxRetries: options?.maxRetries,
     maxRetryDelayMs: options?.maxRetryDelayMs,
     metadata: options?.metadata,
+    traceContext: options?.traceContext,
   };
 }
 

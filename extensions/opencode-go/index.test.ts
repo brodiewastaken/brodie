@@ -8,10 +8,22 @@ import { NON_ENV_SECRETREF_MARKER } from "openclaw/plugin-sdk/provider-auth-runt
 import { clearLiveCatalogCacheForTests } from "openclaw/plugin-sdk/provider-catalog-live-runtime";
 import { expectPassthroughReplayPolicy } from "openclaw/plugin-sdk/provider-test-contracts";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const { resolveProviderRequestHeadersMock } = vi.hoisted(() => ({
+  resolveProviderRequestHeadersMock: vi.fn(
+    (params: { callerHeaders?: Record<string, string> }) => params.callerHeaders,
+  ),
+}));
+
+vi.mock("openclaw/plugin-sdk/provider-http", () => ({
+  resolveProviderRequestHeaders: resolveProviderRequestHeadersMock,
+}));
+
 import plugin from "./index.js";
 import manifest from "./openclaw.plugin.json" with { type: "json" };
 import { buildOpencodeGoLiveProviderConfig } from "./provider-catalog.js";
 import opencodeGoProviderDiscovery from "./provider-discovery.js";
+import { createOpencodeGoAttributionWrapper } from "./stream.js";
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -42,6 +54,8 @@ function requireCatalogEntry(entries: readonly unknown[] | null | undefined, id:
 describe("opencode-go provider plugin", () => {
   beforeEach(() => {
     clearLiveCatalogCacheForTests();
+    resolveProviderRequestHeadersMock.mockReset();
+    resolveProviderRequestHeadersMock.mockImplementation((params) => params.callerHeaders);
   });
 
   it("registers image media understanding through the OpenCode Go plugin", async () => {
@@ -76,6 +90,86 @@ describe("opencode-go provider plugin", () => {
       providerId: "opencode-go",
       modelId: "qwen3-coder",
     });
+  });
+
+  it("adds a Go User-Agent only to native Anthropic Messages routes", () => {
+    resolveProviderRequestHeadersMock.mockReturnValueOnce({
+      "User-Agent": "openclaw/2026.9.11",
+      "X-Caller": "native",
+    });
+    const calls: Array<{ options: Record<string, unknown> | undefined }> = [];
+    const wrapped = createOpencodeGoAttributionWrapper((_, __, options) => {
+      calls.push({ options: options as Record<string, unknown> | undefined });
+      return undefined;
+    });
+    if (!wrapped) {
+      throw new Error("Expected OpenCode Go attribution wrapper");
+    }
+
+    void wrapped(
+      {
+        provider: "opencode-go",
+        id: "qwen3.8-max",
+        api: "anthropic-messages",
+        baseUrl: "https://opencode.ai/zen/go",
+      } as never,
+      {} as never,
+      { headers: { "X-Caller": "native" } } as never,
+    );
+    void wrapped(
+      {
+        provider: "opencode-go",
+        id: "qwen3.8-max",
+        api: "anthropic-messages",
+        baseUrl: "https://proxy.example.com",
+      } as never,
+      {} as never,
+      { headers: { "X-Caller": "proxy" } } as never,
+    );
+
+    expect(calls[0]?.options?.headers).toEqual({
+      "User-Agent": "openclaw/2026.9.11",
+      "X-Caller": "native",
+    });
+    expect(resolveProviderRequestHeadersMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "opencode-go",
+        api: "anthropic-messages",
+        baseUrl: "https://opencode.ai/zen/go",
+      }),
+    );
+    expect(calls[1]?.options?.headers).toEqual({ "X-Caller": "proxy" });
+    expect(resolveProviderRequestHeadersMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("attaches the stable OpenCode session header only to native Go routes", async () => {
+    const provider = await registerSingleProviderPlugin(plugin);
+
+    expect(
+      provider.resolveTransportTurnState?.({
+        model: {
+          provider: "opencode-go",
+          id: "glm-5.3",
+          api: "openai-completions",
+          baseUrl: "https://opencode.ai/zen/go/v1",
+        },
+        sessionId: "conversation-123",
+        turnId: "turn-1",
+      } as never),
+    ).toEqual({ headers: { "x-opencode-session": "conversation-123" } });
+
+    expect(
+      provider.resolveTransportTurnState?.({
+        model: {
+          provider: "opencode-go",
+          id: "glm-5.3",
+          api: "openai-completions",
+          baseUrl: "https://proxy.example.com/v1",
+        },
+        sessionId: "conversation-123",
+        turnId: "turn-1",
+      } as never),
+    ).toBeUndefined();
   });
 
   it("keeps OpenCode Go catalog coverage aligned with upstream", async () => {
@@ -126,6 +220,12 @@ describe("opencode-go provider plugin", () => {
     const deepSeekFlash = requireCatalogEntry(supplemental, "deepseek-v4-flash");
     expect(deepSeekFlash.provider).toBe("opencode-go");
     expect(deepSeekFlash.name).toBe("DeepSeek V4 Flash");
+
+    expect(
+      await provider.augmentModelCatalog?.({
+        config: { models: { providers: { "opencode-go": { models: [] } } } },
+      } as never),
+    ).toEqual([]);
 
     const glm52 = requireMapEntry(models, "glm-5.2");
     expect(glm52.api).toBe("openai-completions");
@@ -277,6 +377,18 @@ describe("opencode-go provider plugin", () => {
     ).resolves.toBeNull();
   });
 
+  it("keeps an explicit OpenCode Go catalog authoritative over stale runtime rows", async () => {
+    const provider = await registerSingleProviderPlugin(plugin);
+    await expect(
+      provider.catalog?.run({
+        config: { models: { providers: { "opencode-go": { models: [{ id: "glm-5.3" }] } } } },
+        env: {},
+        resolveProviderApiKey: () => ({ apiKey: NON_ENV_SECRETREF_MARKER }),
+        resolveProviderAuth: () => ({ apiKey: undefined, mode: "none", source: "none" }),
+      } as never),
+    ).resolves.toBeNull();
+  });
+
   it("does not mix provider-specific runtime auth with shared discovery auth", async () => {
     const provider = await registerSingleProviderPlugin(plugin);
     const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("blocked fetch"));
@@ -392,6 +504,70 @@ describe("opencode-go provider plugin", () => {
       {
         model: "deepseek-v4-flash",
         thinking: { type: "disabled" },
+      },
+    ]);
+  });
+
+  it("normalizes DeepSeek V4.1 Flash reasoning on OpenCode Go", async () => {
+    const provider = await registerSingleProviderPlugin(plugin);
+    const capturedPayloads: Record<string, unknown>[] = [];
+    const baseStreamFn = (_model: unknown, _context: unknown, options: unknown) => {
+      const payload = { model: "deepseek-v4.1-flash", reasoning_effort: "high" };
+      (options as { onPayload?: (payload: Record<string, unknown>) => void })?.onPayload?.(payload);
+      capturedPayloads.push(payload);
+      return {} as never;
+    };
+
+    const streamFn = provider.wrapStreamFn?.({
+      streamFn: baseStreamFn as never,
+      providerId: "opencode-go",
+      modelId: "deepseek-v4.1-flash",
+      thinkingLevel: "high",
+    } as never);
+
+    await streamFn?.(
+      { provider: "opencode-go", id: "deepseek-v4.1-flash" } as never,
+      {} as never,
+      {},
+    );
+
+    expect(capturedPayloads).toEqual([
+      {
+        model: "deepseek-v4.1-flash",
+        reasoning_effort: "high",
+        thinking: { type: "enabled" },
+      },
+    ]);
+  });
+
+  it("uses GLM 5.3 native thinking without clear_thinking", async () => {
+    const provider = await registerSingleProviderPlugin(plugin);
+    const capturedPayloads: Record<string, unknown>[] = [];
+    const baseStreamFn = (_model: unknown, _context: unknown, options: unknown) => {
+      const payload = {
+        model: "glm-5.3",
+        reasoning_effort: "high",
+        clear_thinking: true,
+      };
+      (options as { onPayload?: (payload: Record<string, unknown>) => void })?.onPayload?.(payload);
+      capturedPayloads.push(payload);
+      return {} as never;
+    };
+
+    const streamFn = provider.wrapStreamFn?.({
+      streamFn: baseStreamFn as never,
+      providerId: "opencode-go",
+      modelId: "glm-5.3",
+      thinkingLevel: "high",
+    } as never);
+
+    await streamFn?.({ provider: "opencode-go", id: "glm-5.3" } as never, {} as never, {});
+
+    expect(capturedPayloads).toEqual([
+      {
+        model: "glm-5.3",
+        reasoning_effort: "high",
+        thinking: { type: "enabled" },
       },
     ]);
   });

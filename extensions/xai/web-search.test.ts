@@ -121,6 +121,15 @@ function firstFetchUrl(mockFetch: ReturnType<typeof installXaiWebSearchFetch>) {
   return String(url);
 }
 
+function parseFirstRequestBody(mockFetch: ReturnType<typeof installXaiWebSearchFetch>) {
+  const [, init] = mockFetch.mock.calls[0] ?? [];
+  const requestBody = (init as RequestInit | undefined)?.body;
+  return JSON.parse(typeof requestBody === "string" ? requestBody : "{}") as Record<
+    string,
+    unknown
+  >;
+}
+
 function fetchCallHeader(
   mockFetch: { mock: { calls: unknown[][] } },
   index: number,
@@ -830,6 +839,39 @@ describe("xai web search config resolution", () => {
     expect(firstFetchUrl(mockFetch)).toBe("https://api.x.ai/proxy/v1/responses");
   });
 
+  it("sends configured Grok web search reasoning effort", async () => {
+    const mockFetch = installXaiWebSearchFetch();
+    const provider = createXaiWebSearchProvider();
+    const tool = provider.createTool({
+      config: {
+        plugins: {
+          entries: {
+            xai: {
+              config: {
+                webSearch: {
+                  apiKey: "xai-config-test",
+                  model: "grok-4.6",
+                  reasoningEffort: "low",
+                },
+              },
+            },
+          },
+        },
+      },
+      searchConfig: { provider: "grok" },
+    });
+    if (!tool) {
+      throw new Error("Expected xAI web search tool");
+    }
+
+    await tool.execute({ query: "OpenClaw Grok reasoning effort test" });
+
+    expect(parseFirstRequestBody(mockFetch)).toMatchObject({
+      model: "grok-4.6",
+      reasoning: { effort: "low" },
+    });
+  });
+
   it("reports malformed xAI web search JSON as a provider error", async () => {
     const mockFetch = vi.fn((_input?: unknown, _init?: unknown) =>
       Promise.resolve(
@@ -1019,11 +1061,24 @@ describe("xai web search response parsing", () => {
 describe("xai provider models", () => {
   it("publishes only current selectable chat models newest first", () => {
     expect(buildXaiCatalogModels().map((model) => model.id)).toEqual([
+      "grok-4.6",
+      "grok-4.5",
       "grok-build-0.1",
       "grok-4.3",
       "grok-4.20-beta-latest-reasoning",
       "grok-4.20-beta-latest-non-reasoning",
     ]);
+  });
+
+  it.each(["grok-4.6", "grok-4.5"])("publishes current metadata for %s", (id) => {
+    expectCatalogEntry(id, {
+      id,
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 500_000,
+      maxTokens: 64_000,
+      cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
+    });
   });
 
   it("publishes Grok 4.3 as the default chat model", () => {
@@ -1066,12 +1121,12 @@ describe("xai provider models", () => {
       id: "grok-4.20-beta-latest-reasoning",
       reasoning: true,
       input: ["text", "image"],
-      contextWindow: 2_000_000,
+      contextWindow: 1_000_000,
     });
     expectCatalogEntry("grok-4.20-beta-latest-non-reasoning", {
       id: "grok-4.20-beta-latest-non-reasoning",
       reasoning: false,
-      contextWindow: 2_000_000,
+      contextWindow: 1_000_000,
     });
   });
 
@@ -1085,7 +1140,7 @@ describe("xai provider models", () => {
     expectCatalogEntry("grok-4.20-reasoning", {
       id: "grok-4.20-reasoning",
       reasoning: true,
-      contextWindow: 2_000_000,
+      contextWindow: 1_000_000,
       maxTokens: 30_000,
     });
   });
@@ -1178,12 +1233,13 @@ describe("xai provider models", () => {
     expect(grok43Alias?.baseUrl).toBe("https://api.x.ai/v1");
     expect(grok43Alias?.reasoning).toBe(true);
     expect(grok43Alias?.thinkingLevelMap).toEqual({
-      off: null,
+      off: "none",
       minimal: "low",
       low: "low",
       medium: "medium",
       high: "high",
       xhigh: "high",
+      max: "high",
     });
     expect(grok43Alias?.input).toEqual(["text", "image"]);
     expect(grok43Alias?.contextWindow).toBe(1_000_000);
@@ -1195,7 +1251,7 @@ describe("xai provider models", () => {
     expect(grok420?.baseUrl).toBe("https://api.x.ai/v1");
     expect(grok420?.reasoning).toBe(true);
     expect(grok420?.input).toEqual(["text", "image"]);
-    expect(grok420?.contextWindow).toBe(2_000_000);
+    expect(grok420?.contextWindow).toBe(1_000_000);
     expect(grok420?.maxTokens).toBe(30_000);
 
     expect(grok3Mini?.provider).toBe("xai");

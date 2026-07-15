@@ -409,6 +409,36 @@ describe("buildProviderStreamFamilyHooks", () => {
     expect(OPENROUTER_THINKING_STREAM_HOOKS.wrapStreamFn).toBeTypeOf("function");
     expect(TOOL_STREAM_DEFAULT_ON_HOOKS.wrapStreamFn).toBeTypeOf("function");
   });
+
+  it("removes priority tier at the final OpenAI Responses payload boundary when Fast is locked off", async () => {
+    let finalPayload: Record<string, unknown> | undefined;
+    const baseStreamFn: StreamFn = async (model, _context, options) => {
+      const payload = { model: model.id, service_tier: "priority" };
+      const replacement = await options?.onPayload?.(payload, model);
+      finalPayload = requireRecord(replacement ?? payload, "final payload");
+      return {} as never;
+    };
+    const wrapped = requireStreamFn(
+      requireWrapStreamFn(OPENAI_RESPONSES_STREAM_HOOKS.wrapStreamFn)({
+        streamFn: baseStreamFn,
+        extraParams: { serviceTier: "priority", fastMode: true },
+        config: { agents: { defaults: { fastModeEnforcedOff: true } } },
+      } as never),
+    );
+
+    await wrapped(
+      {
+        api: "openai-responses",
+        provider: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        id: "gpt-6-astra",
+      } as never,
+      {} as never,
+      {},
+    );
+
+    expect(requirePayload(finalPayload)).not.toHaveProperty("service_tier");
+  });
 });
 
 describe("createPlainTextToolCallCompatWrapper", () => {

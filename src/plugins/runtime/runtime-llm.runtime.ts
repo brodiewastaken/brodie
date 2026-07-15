@@ -445,9 +445,16 @@ export function createRuntimeLlm(options: CreateRuntimeLlmOptions = {}): PluginR
         options: {
           maxTokens: finiteOption(params.maxTokens),
           temperature: finiteOption(params.temperature),
+          reasoning: params.reasoning,
           signal: params.signal,
         },
       });
+
+      if (result.stopReason === "error" || result.stopReason === "aborted") {
+        throw new Error(
+          `Plugin LLM completion failed for ${prepared.selection.provider}/${prepared.selection.modelId}: ${result.errorMessage || result.stopReason}`,
+        );
+      }
 
       const text = result.content
         .filter((c): c is { type: "text"; text: string } => c.type === "text")

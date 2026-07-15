@@ -33,6 +33,7 @@ type RunExtraParamsCaseParams<
   applyProvider?: string;
   callerHeaders?: Record<string, string>;
   cfg?: OpenClawConfig;
+  extraParamsOverride?: Record<string, unknown>;
   model: Model<TApi>;
   mockProviderRuntime?: boolean;
   options?: SimpleStreamOptions;
@@ -71,7 +72,7 @@ export function runExtraParamsCase<
       params.cfg,
       params.applyProvider ?? params.model.provider,
       params.applyModelId ?? params.model.id,
-      undefined,
+      params.extraParamsOverride,
       params.thinkingLevel,
     );
   } finally {

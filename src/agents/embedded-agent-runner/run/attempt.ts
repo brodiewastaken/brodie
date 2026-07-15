@@ -484,6 +484,7 @@ import {
 import { buildEmbeddedAttemptToolRunContext } from "./attempt.tool-run-context.js";
 import {
   buildToolSearchRunPlan,
+  mergeHistoricalReplayToolNames,
   TOOL_SEARCH_CONTROL_ALLOWLIST_NAMES,
 } from "./attempt.tool-search-run-plan.js";
 import { resolveAttemptTranscriptPolicy } from "./attempt.transcript-policy.js";
@@ -1916,7 +1917,10 @@ export async function runEmbeddedAttempt(
           : undefined,
       explicitAllowlistSources: explicitToolAllowlistSources,
     });
-    const replayAllowedToolNames = toolSearchRunPlan.replayAllowedToolNames;
+    const replayAllowedToolNames = mergeHistoricalReplayToolNames(
+      toolSearchRunPlan.replayAllowedToolNames,
+      params.historicalReplayToolNames,
+    );
     const liveAllowedToolNames = toolSearchRunPlan.liveAllowedToolNames;
     const capabilityToolNames = toolSearchRunPlan.capabilityToolNames;
     const emptyExplicitToolAllowlistError = buildEmptyExplicitToolAllowlistError({

@@ -16,6 +16,7 @@ type ModelRef = {
 };
 
 const HIGH_SIGNAL_LIVE_MODEL_PRIORITY = [
+  "anthropic/claude-opus-5",
   "anthropic/claude-opus-4-8",
   "anthropic/claude-sonnet-5",
   "anthropic/claude-sonnet-4-6",
@@ -27,6 +28,7 @@ const HIGH_SIGNAL_LIVE_MODEL_PRIORITY = [
   "deepseek/deepseek-v4-flash",
   "deepseek/deepseek-v4-pro",
   "minimax/minimax-m3",
+  "openai/gpt-6-astra",
   "openai/gpt-5.6",
   "openrouter/openai/gpt-5.2-chat",
   "openrouter/minimax/minimax-m2.7",
@@ -55,6 +57,7 @@ export const DEFAULT_HIGH_SIGNAL_LIVE_MODEL_LIMIT = HIGH_SIGNAL_LIVE_MODEL_PRIOR
 export const DEFAULT_SMALL_LIVE_MODEL_LIMIT = SMALL_LIVE_MODEL_PRIORITY.length;
 const DEFAULT_HIGH_SIGNAL_LIVE_EXCLUDED_PROVIDERS = new Set(["codex", "codex-cli"]);
 const DIRECT_OPENAI_HIGH_SIGNAL_LIVE_MODEL_IDS = new Set([
+  "gpt-6-astra",
   "gpt-5.6",
   "gpt-5.6-sol",
   "gpt-5.6-terra",

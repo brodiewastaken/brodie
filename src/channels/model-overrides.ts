@@ -7,6 +7,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import type { AgentDefaultsConfig } from "../config/types.agent-defaults.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   parseRawSessionConversationRef,
@@ -30,11 +31,21 @@ import {
 type ChannelModelOverride = {
   channel: string;
   model: string;
+  thinking?: AgentDefaultsConfig["thinkingDefault"];
+  fastMode?: boolean;
   matchKey?: string;
   matchSource?: ChannelMatchSource;
 };
 
-type ChannelModelByChannelConfig = Record<string, Record<string, string>>;
+type ChannelModelOverrideEntry =
+  | string
+  | {
+      model: string;
+      thinking?: AgentDefaultsConfig["thinkingDefault"];
+      fastMode?: boolean;
+    };
+
+type ChannelModelByChannelConfig = Record<string, Record<string, ChannelModelOverrideEntry>>;
 
 type ChannelModelOverrideParams = {
   cfg: OpenClawConfig;
@@ -50,7 +61,7 @@ type ChannelModelOverrideParams = {
 function resolveProviderEntry(
   modelByChannel: ChannelModelByChannelConfig | undefined,
   channel: string,
-): Record<string, string> | undefined {
+): Record<string, ChannelModelOverrideEntry> | undefined {
   const normalized =
     normalizeMessageChannel(channel) ?? normalizeOptionalLowercaseString(channel) ?? "";
   return (
@@ -63,6 +74,22 @@ function resolveProviderEntry(
       }) ?? ""
     ]
   );
+}
+
+function normalizeChannelModelOverrideEntry(
+  raw: ChannelModelOverrideEntry | undefined,
+): Pick<ChannelModelOverride, "model" | "thinking" | "fastMode"> | null {
+  const model = normalizeOptionalString(typeof raw === "string" ? raw : raw?.model);
+  if (!model) {
+    return null;
+  }
+  return {
+    model,
+    ...(typeof raw === "object" && raw?.thinking ? { thinking: raw.thinking } : {}),
+    ...(typeof raw === "object" && typeof raw.fastMode === "boolean"
+      ? { fastMode: raw.fastMode }
+      : {}),
+  };
 }
 
 function buildChannelCandidates(
@@ -131,7 +158,7 @@ function buildGenericParentOverrideCandidates(sessionKey: string | null | undefi
   return buildChannelKeyCandidates(threadId ? baseSessionKey : raw.rawId);
 }
 
-/** Expand prefixed peer IDs by also trying the raw form after the channel prefix. */
+/** Expand peer IDs into the raw and canonical typed-user forms used by channel configs. */
 function expandPeerIds(
   ids: (string | null | undefined)[],
   channel: string,
@@ -142,7 +169,10 @@ function expandPeerIds(
     if (id != null) {
       expanded.push(id);
       if (id.toLowerCase().startsWith(channelPrefix)) {
-        expanded.push(id.slice(channelPrefix.length));
+        const rawId = id.slice(channelPrefix.length);
+        expanded.push(rawId, `user:${rawId}`);
+      } else if (channel.toLowerCase() === "slack" && !id.includes(":")) {
+        expanded.push(`user:${id}`);
       }
     }
   }
@@ -151,11 +181,16 @@ function expandPeerIds(
 
 function resolveDirectChannelModelMatch(params: {
   channel: string;
-  providerEntries: Record<string, string>;
+  providerEntries: Record<string, ChannelModelOverrideEntry>;
   groupId?: string | null;
   parentSessionKey?: string | null;
   directUserIds?: (string | null | undefined)[];
-}): { model: string; matchKey?: string; matchSource?: ChannelMatchSource } | null {
+}):
+  | (Pick<ChannelModelOverride, "model" | "thinking" | "fastMode"> & {
+      matchKey?: string;
+      matchSource?: ChannelMatchSource;
+    })
+  | null {
   const expandedUserIds = expandPeerIds(params.directUserIds ?? [], params.channel);
   const directKeys = buildChannelKeyCandidates(
     params.groupId,
@@ -173,14 +208,11 @@ function resolveDirectChannelModelMatch(params: {
     normalizeKey: (value) => normalizeOptionalLowercaseString(value) ?? "",
   });
   const raw = match.entry ?? match.wildcardEntry;
-  if (typeof raw !== "string") {
+  const entry = normalizeChannelModelOverrideEntry(raw);
+  if (!entry) {
     return null;
   }
-  const model = normalizeOptionalString(raw);
-  if (!model) {
-    return null;
-  }
-  return { model, matchKey: match.matchKey, matchSource: match.matchSource };
+  return { ...entry, matchKey: match.matchKey, matchSource: match.matchSource };
 }
 
 /** Resolves a channel-scoped model override from direct, parent, and wildcard config entries. */
@@ -216,6 +248,8 @@ export function resolveChannelModelOverride(
     return {
       channel: normalizeMessageChannel(channel) ?? normalizeOptionalLowercaseString(channel) ?? "",
       model: directMatch.model,
+      ...(directMatch.thinking ? { thinking: directMatch.thinking } : {}),
+      ...(typeof directMatch.fastMode === "boolean" ? { fastMode: directMatch.fastMode } : {}),
       matchKey: directMatch.matchKey,
       matchSource: directMatch.matchSource,
     };
@@ -223,12 +257,12 @@ export function resolveChannelModelOverride(
 
   const { keys, parentKeys } = buildChannelCandidates(params);
   if (keys.length === 0 && parentKeys.length === 0) {
-    const wildcardModel = normalizeOptionalString(providerEntries["*"]);
-    if (wildcardModel) {
+    const wildcardEntry = normalizeChannelModelOverrideEntry(providerEntries["*"]);
+    if (wildcardEntry) {
       return {
         channel:
           normalizeMessageChannel(channel) ?? normalizeOptionalLowercaseString(channel) ?? "",
-        model: wildcardModel,
+        ...wildcardEntry,
         matchKey: "*",
         matchSource: "wildcard",
       };
@@ -243,17 +277,14 @@ export function resolveChannelModelOverride(
     normalizeKey: (value) => normalizeOptionalLowercaseString(value) ?? "",
   });
   const raw = match.entry ?? match.wildcardEntry;
-  if (typeof raw !== "string") {
-    return null;
-  }
-  const model = normalizeOptionalString(raw);
-  if (!model) {
+  const entry = normalizeChannelModelOverrideEntry(raw);
+  if (!entry) {
     return null;
   }
 
   return {
     channel: normalizeMessageChannel(channel) ?? normalizeOptionalLowercaseString(channel) ?? "",
-    model,
+    ...entry,
     matchKey: match.matchKey,
     matchSource: match.matchSource,
   };

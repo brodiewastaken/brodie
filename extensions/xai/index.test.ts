@@ -147,6 +147,20 @@ describe("xai provider plugin", () => {
       Response.json({
         data: [
           {
+            id: "grok-4.6",
+            model: "grok-4.6",
+            name: "Grok 4.6",
+            api_backend: "responses",
+            context_window: 500_000,
+          },
+          {
+            id: "grok-4.5",
+            model: "grok-4.5",
+            name: "Grok 4.5",
+            api_backend: "responses",
+            context_window: 500_000,
+          },
+          {
             id: "grok-composer-2.5-fast",
             model: "grok-composer-2.5-fast",
             name: "Composer 2.5",
@@ -197,9 +211,17 @@ describe("xai provider plugin", () => {
     expect(result.provider.auth).toBe("oauth");
     expect(result.provider.apiKey).toBeUndefined();
     expect(result.provider.models.map((model) => model.id)).toEqual([
+      "grok-4.6",
+      "grok-4.5",
       "grok-composer-2.5-fast",
       "grok-build",
     ]);
+    for (const id of ["grok-4.6", "grok-4.5"]) {
+      const model = result.provider.models.find((candidate) => candidate.id === id);
+      expect(model?.reasoning).toBe(true);
+      expect(model?.input).toEqual(["text", "image"]);
+      expect(model?.contextWindow).toBe(500_000);
+    }
     const composer = result.provider.models.find((model) => model.id === "grok-composer-2.5-fast");
     if (!composer) {
       throw new Error("expected OAuth Composer model");
@@ -578,12 +600,13 @@ describe("xai provider plugin", () => {
       model: createProviderModel({ id: "grok-4.3" }),
     } as never);
     expect(normalized?.thinkingLevelMap).toEqual({
-      off: null,
+      off: "none",
       minimal: "low",
       low: "low",
       medium: "medium",
       high: "high",
       xhigh: "high",
+      max: "high",
     });
     const olderReasoningModel = provider.normalizeResolvedModel?.({
       provider: "xai",
@@ -597,6 +620,7 @@ describe("xai provider plugin", () => {
       medium: null,
       high: null,
       xhigh: null,
+      max: null,
     });
     const normalizedCompat = normalized?.compat as
       | {

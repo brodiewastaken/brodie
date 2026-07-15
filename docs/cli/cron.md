@@ -184,7 +184,7 @@ Isolated cron resolves the active model in this order:
 
 ### Fast mode
 
-Isolated cron fast mode follows the resolved live model selection. Model config `params.fastMode` applies by default, but a stored session `fastMode` override still wins over config. When the resolved mode is `auto`, the cutoff uses the selected model's `params.fastAutoOnSeconds` value, defaulting to 60 seconds.
+Isolated cron fast mode accepts explicit `true` or `false`. Omission inherits the resolved session, agent, then model policy. The former `"auto"` payload value is rejected.
 
 ### Live model switch retries
 

@@ -21,6 +21,7 @@ import {
   createOpenRouterWrapper,
   isProxyReasoningUnsupported,
 } from "../llm/providers/stream-wrappers/proxy.js";
+import { streamWithPayloadPatch } from "../llm/providers/stream-wrappers/stream-payload-utils.js";
 import type { ProviderPlugin } from "../plugins/types.js";
 import type { ProviderWrapStreamFnContext } from "./plugin-entry.js";
 import {
@@ -83,6 +84,30 @@ function resolveBooleanFastMode(
   return typeof raw === "boolean" ? raw : undefined;
 }
 
+function isFastModeEnforcedOff(config: ProviderWrapStreamFnContext["config"]): boolean {
+  return config?.agents?.defaults?.fastModeEnforcedOff === true;
+}
+
+function createFastModeEnforcedOffPayloadWrapper(
+  baseStreamFn: ProviderWrapStreamFnContext["streamFn"],
+): ProviderWrapStreamFnContext["streamFn"] {
+  if (!baseStreamFn) {
+    return baseStreamFn;
+  }
+  return (model, context, options) =>
+    streamWithPayloadPatch(baseStreamFn, model, context, options, (payload) => {
+      if (payload.serviceTier === "priority") {
+        delete payload.serviceTier;
+      }
+      if (payload.service_tier === "priority") {
+        delete payload.service_tier;
+      }
+      if (payload.speed === "fast") {
+        delete payload.speed;
+      }
+    });
+}
+
 /** Builds provider hook objects for one supported stream-wrapper family. */
 export function buildProviderStreamFamilyHooks(
   /**
@@ -122,7 +147,9 @@ export function buildProviderStreamFamilyHooks(
     case "minimax-fast-mode":
       return {
         wrapStreamFn: (ctx: ProviderWrapStreamFnContext) =>
-          createMinimaxFastModeWrapper(ctx.streamFn, () => resolveBooleanFastMode(ctx.extraParams)),
+          createMinimaxFastModeWrapper(ctx.streamFn, () =>
+            isFastModeEnforcedOff(ctx.config) ? false : resolveBooleanFastMode(ctx.extraParams),
+          ),
       };
     case "openai-responses-defaults":
       return {
@@ -131,13 +158,16 @@ export function buildProviderStreamFamilyHooks(
           // before payload-shape and context-management compatibility rewrites.
           let nextStreamFn = createOpenAIAttributionHeadersWrapper(ctx.streamFn);
 
+          const fastModeEnforcedOff = isFastModeEnforcedOff(ctx.config);
           if (hasFastModeParam(ctx.extraParams)) {
             nextStreamFn = createOpenAIFastModeWrapper(nextStreamFn, () =>
-              resolveOpenAIFastMode(ctx.extraParams),
+              fastModeEnforcedOff ? false : resolveOpenAIFastMode(ctx.extraParams),
             );
           }
 
-          const serviceTier = resolveOpenAIServiceTier(ctx.extraParams);
+          const serviceTier = fastModeEnforcedOff
+            ? undefined
+            : resolveOpenAIServiceTier(ctx.extraParams);
           if (serviceTier) {
             nextStreamFn = createOpenAIServiceTierWrapper(nextStreamFn, serviceTier);
           }
@@ -154,12 +184,13 @@ export function buildProviderStreamFamilyHooks(
             nativeWebSearchAllowedByToolPolicy: ctx.nativeWebSearchAllowedByToolPolicy,
           });
           nextStreamFn = createOpenAIStringContentWrapper(nextStreamFn);
-          return createOpenAIResponsesContextManagementWrapper(
+          const wrapped = createOpenAIResponsesContextManagementWrapper(
             createOpenAIReasoningCompatibilityWrapper(
               createOpenAIThinkingLevelWrapper(nextStreamFn, ctx.thinkingLevel),
             ),
             ctx.extraParams,
           );
+          return fastModeEnforcedOff ? createFastModeEnforcedOffPayloadWrapper(wrapped) : wrapped;
         },
       };
     case "openrouter-thinking":

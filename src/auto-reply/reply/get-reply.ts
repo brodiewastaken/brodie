@@ -624,8 +624,18 @@ export async function getReplyFromConfig(
           aliasIndex,
         })
       : null;
-  const primaryProvider = resolvedChannelModelOverride?.ref.provider ?? defaultProvider;
-  const primaryModel = resolvedChannelModelOverride?.ref.model ?? defaultModel;
+  const acceptedRunProvider = normalizeOptionalString(opts?.runModelOverride?.provider);
+  const acceptedRunModel = normalizeOptionalString(opts?.runModelOverride?.model);
+  const acceptedRunModelOverride =
+    acceptedRunProvider && acceptedRunModel
+      ? { provider: acceptedRunProvider, model: acceptedRunModel }
+      : undefined;
+  const primaryProvider =
+    acceptedRunModelOverride?.provider ??
+    resolvedChannelModelOverride?.ref.provider ??
+    defaultProvider;
+  const primaryModel =
+    acceptedRunModelOverride?.model ?? resolvedChannelModelOverride?.ref.model ?? defaultModel;
   const hasSessionModelOverride = Boolean(
     normalizeOptionalString(sessionEntry.modelOverride) ||
     normalizeOptionalString(sessionEntry.providerOverride),
@@ -654,6 +664,7 @@ export async function getReplyFromConfig(
     storedModelOverride?.source === "session" && hasLegacyAutoFallbackWithoutOrigin(sessionEntry);
   if (
     storedModelOverride?.model &&
+    !acceptedRunModelOverride &&
     !hasResolvedHeartbeatModelOverride &&
     !staleHeartbeatAutoFallbackOverride &&
     !staleLegacyAutoFallbackWithoutOrigin
@@ -662,7 +673,9 @@ export async function getReplyFromConfig(
     model = storedModelOverride.model;
   }
   const canApplyAutoFallbackPrimaryProbe =
-    !hasResolvedHeartbeatModelOverride && !staleHeartbeatAutoFallbackOverride;
+    !acceptedRunModelOverride &&
+    !hasResolvedHeartbeatModelOverride &&
+    !staleHeartbeatAutoFallbackOverride;
   const autoFallbackPrimaryProbe = canApplyAutoFallbackPrimaryProbe
     ? resolveAutoFallbackPrimaryProbe({
         entry: sessionEntry,
@@ -677,11 +690,16 @@ export async function getReplyFromConfig(
     !staleLegacyAutoFallbackWithoutOrigin;
   if (
     !hasResolvedHeartbeatModelOverride &&
+    !acceptedRunModelOverride &&
     !hasEffectiveSessionModelOverride &&
     resolvedChannelModelOverride
   ) {
     provider = resolvedChannelModelOverride.ref.provider;
     model = resolvedChannelModelOverride.ref.model;
+  }
+  if (acceptedRunModelOverride) {
+    provider = acceptedRunModelOverride.provider;
+    model = acceptedRunModelOverride.model;
   }
   if (
     shouldUseReplyFastDirectiveExecution({
@@ -791,6 +809,8 @@ export async function getReplyFromConfig(
       aliasIndex,
       provider,
       model,
+      channelThinkingDefault: channelModelOverride?.thinking,
+      channelFastModeDefault: channelModelOverride?.fastMode,
       hasResolvedHeartbeatModelOverride,
       typing,
       opts: withExtractedFileImages(resolvedOpts, extractedFileImages),
@@ -952,7 +972,8 @@ export async function getReplyFromConfig(
     const hasTurnOrSessionThinkLevel =
       thinkingLevelOverride !== undefined ||
       directives.thinkLevel !== undefined ||
-      (!directives.clearThinkLevel && sessionEntry.thinkingLevel !== undefined);
+      (!directives.clearThinkLevel && sessionEntry.thinkingLevel !== undefined) ||
+      channelModelOverride?.thinking !== undefined;
     const hasExplicitThinkLevel =
       hasTurnOrSessionThinkLevel ||
       configuredThinkingDefault !== undefined ||
@@ -1044,6 +1065,14 @@ export async function getReplyFromConfig(
     );
   }
 
+  const runPolicyReasoningOverride =
+    channelModelOverride?.thinking !== undefined &&
+    normalizeThinkLevel(resolvedOpts?.thinkingLevelOverride) === undefined &&
+    directives.thinkLevel === undefined &&
+    (directives.clearThinkLevel || sessionEntry.thinkingLevel === undefined)
+      ? resolvedThinkLevel
+      : undefined;
+
   logResolverTiming("milestone", "before_run_prepared_reply");
   const replyResult = await traceGetReplyPhase("reply.run_prepared_reply", () =>
     runPreparedReply({
@@ -1061,6 +1090,7 @@ export async function getReplyFromConfig(
       directives,
       defaultActivation,
       resolvedThinkLevel,
+      runPolicyReasoningOverride,
       resolvedFastMode,
       resolvedFastModeAutoOnSeconds,
       resolvedFastModeOverride,

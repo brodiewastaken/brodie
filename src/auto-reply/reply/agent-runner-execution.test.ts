@@ -272,6 +272,8 @@ vi.mock("./agent-runner-utils.js", () => ({
     run: {
       provider?: string;
       thinkLevel?: string;
+      fastMode?: boolean;
+      fastModeAutoOnSeconds?: number;
       authProfileId?: string;
       authProfileIdSource?: "auto" | "user";
       agentAccountId?: string;
@@ -300,6 +302,8 @@ vi.mock("./agent-runner-utils.js", () => ({
       provider: params.provider,
       model: params.model,
       thinkLevel: params.run.thinkLevel,
+      fastMode: params.run.fastMode,
+      fastModeAutoOnSeconds: params.run.fastModeAutoOnSeconds,
       authProfileId: params.provider === params.run.provider ? params.run.authProfileId : undefined,
       authProfileIdSource:
         params.provider === params.run.provider ? params.run.authProfileIdSource : undefined,
@@ -1434,6 +1438,116 @@ describe("runAgentTurnWithFallback", () => {
       "high",
     ]);
     expect(followupRun.run.thinkLevel).toBe("ultra");
+  });
+
+  it("keeps an explicit queued reasoning override ahead of the main run policy", async () => {
+    const followupRun = createFollowupRun();
+    followupRun.run.provider = "anthropic";
+    followupRun.run.model = "claude-fable-5";
+    followupRun.run.thinkLevel = "low";
+    followupRun.run.runPolicyReasoningOverride = "low";
+    followupRun.run.config = {
+      agents: {
+        defaults: {
+          thinkingDefault: "high",
+        },
+      },
+    };
+    state.runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "ok" }],
+      meta: {},
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    await runAgentTurnWithFallback({
+      ...createMinimalRunAgentTurnParams({ followupRun }),
+    });
+
+    expect(state.runEmbeddedAgentMock).toHaveBeenCalledOnce();
+    expect(state.runEmbeddedAgentMock.mock.calls[0]?.[0]?.thinkLevel).toBe("low");
+  });
+
+  it("keeps Opus Fast off while enabling Fast for the Sol fallback candidate", async () => {
+    const followupRun = createFollowupRun();
+    followupRun.run.provider = "anthropic";
+    followupRun.run.model = "claude-opus-5";
+    followupRun.run.thinkLevel = "high";
+    followupRun.run.config = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-opus-5",
+            fallbacks: ["openai/gpt-5.6-sol"],
+          },
+          models: {
+            "anthropic/claude-opus-5": {
+              params: { fastMode: false },
+              agentRuntime: { id: "openclaw" },
+            },
+            "openai/gpt-5.6-sol": {
+              params: { fastMode: true },
+              agentRuntime: { id: "openclaw" },
+            },
+          },
+        },
+      },
+    };
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      await params.run("anthropic", "claude-opus-5");
+      const result = await params.run("openai", "gpt-5.6-sol");
+      return { result, provider: "openai", model: "gpt-5.6-sol", attempts: [] };
+    });
+    state.runEmbeddedAgentMock.mockResolvedValue({ payloads: [{ text: "ok" }], meta: {} });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    await runAgentTurnWithFallback(createMinimalRunAgentTurnParams({ followupRun }));
+
+    expect(state.runEmbeddedAgentMock.mock.calls.map((call) => call[0]?.fastMode)).toEqual([
+      false,
+      true,
+    ]);
+  });
+
+  it("keeps an explicit channel Fast default across model fallback candidates", async () => {
+    const followupRun = createFollowupRun();
+    followupRun.run.provider = "openai";
+    followupRun.run.model = "gpt-5.6-sol";
+    followupRun.run.fastMode = false;
+    followupRun.run.fastModeOverride = true;
+    followupRun.run.config = {
+      agents: {
+        defaults: {
+          model: {
+            primary: "openai/gpt-5.6-sol",
+            fallbacks: ["anthropic/claude-opus-5"],
+          },
+          models: {
+            "openai/gpt-5.6-sol": {
+              params: { fastMode: true },
+              agentRuntime: { id: "openclaw" },
+            },
+            "anthropic/claude-opus-5": {
+              params: { fastMode: false },
+              agentRuntime: { id: "openclaw" },
+            },
+          },
+        },
+      },
+    };
+    state.runWithModelFallbackMock.mockImplementationOnce(async (params: FallbackRunnerParams) => {
+      await params.run("openai", "gpt-5.6-sol");
+      const result = await params.run("anthropic", "claude-opus-5");
+      return { result, provider: "anthropic", model: "claude-opus-5", attempts: [] };
+    });
+    state.runEmbeddedAgentMock.mockResolvedValue({ payloads: [{ text: "ok" }], meta: {} });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    await runAgentTurnWithFallback(createMinimalRunAgentTurnParams({ followupRun }));
+
+    expect(state.runEmbeddedAgentMock.mock.calls.map((call) => call[0]?.fastMode)).toEqual([
+      false,
+      false,
+    ]);
   });
 
   it("freezes abort ownership only after model fallback settles", async () => {
@@ -5061,6 +5175,79 @@ describe("runAgentTurnWithFallback", () => {
       replayInvalid: true,
     });
     expect(typeof lifecycleData.endedAt).toBe("number");
+  });
+
+  it("settles a successful same-candidate retry instead of its deferred failed attempt", async () => {
+    const agentEvents = await import("../../infra/agent-events.js");
+    const emitAgentEvent = vi.mocked(agentEvents.emitAgentEvent);
+    state.runEmbeddedAgentMock.mockImplementationOnce(async (params: EmbeddedAgentParams) => {
+      await params.onAgentEvent?.({
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 1_000 },
+      });
+      await params.onAgentEvent?.({
+        stream: "lifecycle",
+        data: {
+          phase: "finishing",
+          error: "provider rejected the first attempt",
+          livenessState: "blocked",
+          aborted: false,
+        },
+      });
+      await params.onAgentEvent?.({
+        stream: "lifecycle",
+        data: { phase: "start", startedAt: 2_000 },
+      });
+      await params.onAgentEvent?.({
+        stream: "lifecycle",
+        data: { phase: "finishing", livenessState: "working", aborted: false },
+      });
+      return {
+        payloads: [{ text: "recovered" }],
+        meta: { stopReason: "stop", livenessState: "working", aborted: false },
+      };
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const result = await runAgentTurnWithFallback({
+      commandBody: "hello",
+      followupRun: createFollowupRun(),
+      sessionCtx: {
+        Provider: "whatsapp",
+        MessageSid: "msg",
+      } as unknown as TemplateContext,
+      opts: { runId: "run-recovered" } as GetReplyOptions,
+      typingSignals: createMockTypingSignaler(),
+      blockReplyPipeline: null,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      applyReplyToMode: (payload) => payload,
+      shouldEmitToolResult: () => true,
+      shouldEmitToolOutput: () => false,
+      pendingToolTasks: new Set(),
+      resetSessionAfterRoleOrderingConflict: async () => false,
+      isHeartbeat: false,
+      sessionKey: "main",
+      getActiveSessionEntry: () => undefined,
+      resolvedVerboseLevel: "off",
+    });
+
+    expect(result.kind).toBe("success");
+    const lifecycleEvent = requireRecord(
+      requireMockCallArgWithFields(
+        emitAgentEvent,
+        { runId: "run-recovered", sessionKey: "main", stream: "lifecycle" },
+        "agent event",
+      ),
+      "agent event",
+    );
+    expectRecordFields(requireRecord(lifecycleEvent.data, "lifecycle data"), {
+      phase: "end",
+      startedAt: 2_000,
+      stopReason: "stop",
+      livenessState: "working",
+      aborted: false,
+    });
   });
 
   it("uses a rebound lifecycle generation for embedded terminal events", async () => {
