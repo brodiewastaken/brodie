@@ -54,6 +54,8 @@ function applySupplementalContext(ctx: MsgContext): void {
     ReplyToIdFull: supplemental.quote?.fullId,
     ReplyToBody: supplemental.quote?.body,
     ReplyToSender: supplemental.quote?.sender,
+    ReplyToSenderId: supplemental.quote?.senderId,
+    ReplyToTimestamp: supplemental.quote?.timestamp,
     ReplyToIsQuote: supplemental.quote?.isQuote,
     ForwardedFrom: supplemental.forwarded?.from,
     ForwardedFromType: supplemental.forwarded?.fromType,

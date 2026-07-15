@@ -10,7 +10,7 @@ export type ContextVisibilityDecisionReason =
   | "mode_all"
   /** Sender allowlist includes the item source. */
   | "sender_allowed"
-  /** Quote-only visibility mode permits quoted context even when sender is not allowed. */
+  /** Explicit quoted context is visible regardless of sender allowlist state. */
   | "quote_override"
   /** Context was omitted by visibility mode or sender policy. */
   | "blocked";
@@ -35,11 +35,13 @@ export function evaluateSupplementalContextVisibility(params: {
   if (params.mode === "all") {
     return { include: true, reason: "mode_all" };
   }
+  // A human-authored reply explicitly selects the quoted message as turn context.
+  // Its author does not gain command or trigger authority through that selection.
+  if (params.kind === "quote") {
+    return { include: true, reason: "quote_override" };
+  }
   if (params.senderAllowed) {
     return { include: true, reason: "sender_allowed" };
-  }
-  if (params.mode === "allowlist_quote" && params.kind === "quote") {
-    return { include: true, reason: "quote_override" };
   }
   // Fail closed: unknown or non-matching policy combinations must omit
   // supplemental context rather than leaking sender history/thread data.

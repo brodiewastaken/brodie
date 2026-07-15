@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import type { SubagentRunRecord } from "../../agents/subagent-registry.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionAbortTargetResult } from "../../config/sessions/session-accessor.js";
+import { buildCanonicalConversationSessionKey } from "../../routing/session-key.js";
 import { createSuiteTempRootTracker } from "../../test-helpers/temp-dir.js";
 import {
   testing as abortTesting,
@@ -75,6 +76,7 @@ const acpManagerMocks = vi.hoisted(() => ({
 const runtimeAbortMocks = vi.hoisted(() => ({
   abortEmbeddedAgentRun: vi.fn(() => true),
   resolveActiveEmbeddedRunSessionId: vi.fn(() => undefined as string | undefined),
+  stopRuntimeConversationSchedulerSession: vi.fn(async () => true),
 }));
 
 vi.mock("../../acp/control-plane/manager.js", () => ({
@@ -211,6 +213,8 @@ describe("abort detection", () => {
         subagentRegistryMocks.getLatestSubagentRunByChildSessionKey,
       listSubagentRunsForController: subagentRegistryMocks.listSubagentRunsForRequester,
       markSubagentRunTerminated: subagentRegistryMocks.markSubagentRunTerminated,
+      stopRuntimeConversationSchedulerSession:
+        runtimeAbortMocks.stopRuntimeConversationSchedulerSession,
     });
     queueCleanupTesting.setDepsForTests({
       resolveEmbeddedSessionLane: (key) => `session:${key.trim() || "main"}`,
@@ -230,6 +234,7 @@ describe("abort detection", () => {
     acpManagerMocks.cancelSession.mockReset().mockResolvedValue(undefined);
     runtimeAbortMocks.abortEmbeddedAgentRun.mockReset().mockReturnValue(true);
     runtimeAbortMocks.resolveActiveEmbeddedRunSessionId.mockReset().mockReturnValue(undefined);
+    runtimeAbortMocks.stopRuntimeConversationSchedulerSession.mockReset().mockResolvedValue(true);
     subagentRegistryMocks.getLatestSubagentRunByChildSessionKey.mockReset().mockReturnValue(null);
   });
 
@@ -438,6 +443,28 @@ describe("abort detection", () => {
     expect(runtimeAbortMocks.abortEmbeddedAgentRun).toHaveBeenCalledWith(activeSessionId);
     expect(getFollowupQueueDepth(sessionKey)).toBe(0);
     expectSessionLaneCleared(sessionKey);
+  });
+
+  it("cancels durable scheduler work for the canonical conversation and descendants", async () => {
+    const sessionKey = buildCanonicalConversationSessionKey({
+      agentId: "main",
+      channel: "telegram",
+      accountId: "default",
+      conversationKind: "direct",
+      conversationId: "123",
+    });
+    const { cfg } = await createAbortConfig();
+    const result = await runStopCommand({
+      cfg,
+      sessionKey,
+      from: "telegram:123",
+      to: "telegram:123",
+    });
+    expect(result.handled).toBe(true);
+    expect(runtimeAbortMocks.stopRuntimeConversationSchedulerSession).toHaveBeenCalledWith(
+      sessionKey,
+      { descendants: true },
+    );
   });
 
   it("fast-abort clears queued followups and session lane", async () => {

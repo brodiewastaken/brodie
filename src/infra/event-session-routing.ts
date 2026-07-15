@@ -13,6 +13,7 @@ import {
 import { resolveEventSessionKey, scopedHeartbeatWakeOptions } from "../routing/session-key.js";
 import { resolvePinnedMainDmOwnerFromAllowlist } from "../security/dm-policy-shared.js";
 import { deriveSessionChatTypeFromKey } from "../sessions/session-chat-type-shared.js";
+import { parseCanonicalConversationSessionKey } from "../sessions/session-key-utils.js";
 
 // Event session routing maps cron/heartbeat wakeups back to the right main,
 // direct, or global session key while honoring DM allowlists and route policy.
@@ -71,6 +72,17 @@ export function parseDirectAgentSessionTarget(
 ): DirectSessionTarget | null {
   const { baseSessionKey } = parseThreadSessionSuffix(sessionKey);
   const directSessionKey = baseSessionKey ?? sessionKey;
+  const canonical = parseCanonicalConversationSessionKey(directSessionKey);
+  if (canonical) {
+    return canonical.conversationKind === "direct"
+      ? {
+          agentId: canonical.agentId,
+          channel: canonical.channel,
+          accountId: canonical.accountId,
+          peerId: canonical.conversationId,
+        }
+      : null;
+  }
   const parsed = parseAgentSessionKey(directSessionKey);
   if (!parsed || deriveSessionChatTypeFromKey(directSessionKey) !== "direct") {
     return null;
@@ -185,7 +197,8 @@ export function resolveEventSessionRoutingPolicy(params: {
     channel,
     accountId,
     preserveSessionKey: params.sessionKey
-      ? shouldPreserveDirectSessionKeyFromRoute({
+      ? Boolean(parseCanonicalConversationSessionKey(params.sessionKey)) ||
+        shouldPreserveDirectSessionKeyFromRoute({
           cfg: params.cfg,
           sessionKey: params.sessionKey,
           target,

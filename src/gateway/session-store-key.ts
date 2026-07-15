@@ -11,6 +11,7 @@ import {
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   DEFAULT_AGENT_ID,
+  assertOpaqueSessionKey,
   normalizeAgentId,
   normalizeMainKey,
   parseAgentSessionKey,
@@ -76,7 +77,8 @@ export function resolveSessionStoreKey(params: {
   sessionKey: string;
   storeAgentId?: string;
 }): string {
-  const raw = normalizeOptionalString(params.sessionKey) ?? "";
+  const rawInput = normalizeOptionalString(params.sessionKey) ?? "";
+  const raw = rawInput ? assertOpaqueSessionKey(rawInput) : "";
   if (!raw) {
     return raw;
   }
@@ -128,7 +130,8 @@ export function resolveStoredSessionKeyForAgentStore(params: {
   agentId: string;
   sessionKey: string;
 }): string {
-  const raw = normalizeOptionalString(params.sessionKey) ?? "";
+  const rawInput = normalizeOptionalString(params.sessionKey) ?? "";
+  const raw = rawInput ? assertOpaqueSessionKey(rawInput) : "";
   if (!raw) {
     return raw;
   }

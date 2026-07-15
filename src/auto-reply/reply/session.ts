@@ -60,6 +60,7 @@ import {
   isAcpSessionKey,
   normalizeMainKey,
 } from "../../routing/session-key.js";
+import { stopRuntimeConversationSchedulerSession } from "../../scheduler/runtime-conversation-scheduler.js";
 import { isInterSessionInputProvenance } from "../../sessions/input-provenance.js";
 import {
   SESSION_WORK_ADMISSION_DRAIN_TIMEOUT_MS,
@@ -94,6 +95,7 @@ import { buildSessionEndHookPayload, buildSessionStartHookPayload } from "./sess
 import { prepareReplySessionParentFork } from "./session-parent-fork-prepare.js";
 import { clearSessionResetRuntimeState } from "./session-reset-cleanup.js";
 
+const RESET_SCHEDULER_STOP_OPTIONS = { descendants: false } as const;
 const log = createSubsystemLogger("session-init");
 
 function stripThreadFromSessionRoute(route: SessionEntry["route"]): SessionEntry["route"] {
@@ -668,6 +670,8 @@ async function initSessionStateAttemptLocked(
         entry,
         freshness: entryFreshness,
       });
+  const resetReturnsToConfiguredDefaults =
+    resetTriggered && matchedResetTriggerLower === "/reset";
   const lifecycleMutationMatches = Boolean(
     previousSessionEntry &&
     lifecycleMutationIdentity?.sessionKey === sessionKey &&
@@ -685,6 +689,7 @@ async function initSessionStateAttemptLocked(
     previousSessionId: previousSessionEntry?.sessionId,
   });
   if (previousSessionEntry) {
+    await stopRuntimeConversationSchedulerSession(sessionKey, RESET_SCHEDULER_STOP_OPTIONS);
     clearSessionResetRuntimeState([sessionKey, previousSessionEntry.sessionId], {
       activeReplySessionId: previousSessionEntry.sessionId,
     });
@@ -728,7 +733,7 @@ async function initSessionStateAttemptLocked(
     // dropped on the next turn (the rollover took this branch with
     // resetTriggered === false), reverting the session to the default model
     // despite the `Model set to ... for this session` ack (#90119, #69301).
-    if (entry) {
+    if (entry && !resetReturnsToConfiguredDefaults) {
       const preservedSelection = resolveResetPreservedSelection({ entry });
       persistedModelOverride = preservedSelection.modelOverride;
       persistedProviderOverride = preservedSelection.providerOverride;
@@ -764,6 +769,7 @@ async function initSessionStateAttemptLocked(
       persistedSpawnDepth = entry.spawnDepth;
       persistedSubagentRole = entry.subagentRole;
       persistedSubagentControlScope = entry.subagentControlScope;
+      persistedDisplayName = entry.displayName;
     }
   }
 
@@ -1160,3 +1166,7 @@ async function initSessionStateAttemptLocked(
     },
   };
 }
+
+export const testing = {
+  resetSchedulerStopOptions: RESET_SCHEDULER_STOP_OPTIONS,
+};

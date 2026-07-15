@@ -91,7 +91,7 @@ function commandGate(params: {
       reasonCode: "command_authorized",
     };
   }
-  const useAccessGroups = command.useAccessGroups ?? true;
+  const useAccessGroups = true;
   // Command authorization combines owner and group allowlists after mutable-id policy so
   // command control cannot be granted by identifiers the current policy rejects.
   const owner = applyMutableIdentifierPolicy(params.state.allowlists.commandOwner, params.policy);
@@ -99,12 +99,12 @@ function commandGate(params: {
   const authorized = resolveCommandAuthorizedFromAuthorizers({
     useAccessGroups,
     modeWhenAccessGroupsOff: command.modeWhenAccessGroupsOff,
-    authorizers: [
-      { configured: owner.hasConfiguredEntries, allowed: owner.match.matched },
-      { configured: group.hasConfiguredEntries, allowed: group.match.matched },
-    ],
+    authorizers: [{ configured: owner.hasConfiguredEntries, allowed: owner.match.matched }],
   });
-  const shouldBlock = command.allowTextCommands && command.hasControlCommand && !authorized;
+  // Command-shaped text from a non-owner remains admissible conversation.
+  // The centralized invocation classifier wraps it in the configured trusted
+  // envelope and forces a normal turn, so ingress must not drop it here.
+  const shouldBlock = false;
   return {
     id: "command",
     phase: "command",

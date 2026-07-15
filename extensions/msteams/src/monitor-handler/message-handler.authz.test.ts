@@ -941,7 +941,7 @@ describe("msteams monitor handler authz", () => {
     });
   });
 
-  it("drops quote context when attachment metadata disagrees with a blocked parent sender", async () => {
+  it("keeps explicit quote context when the parent sender is outside the allowlist", async () => {
     const ctxPayload = await dispatchQuoteContextWithParent(
       createThreadMessage({
         id: "parent-msg",
@@ -951,7 +951,11 @@ describe("msteams monitor handler authz", () => {
     );
 
     const ctx = recordFromMockCall(ctxPayload);
-    expect(ctx.SupplementalContext).toEqual({});
-    expect(ctx.BodyForAgent).toBe("Current message");
+    expect(ctx.SupplementalContext).toMatchObject({
+      quote: {
+        body: "Quoted body",
+        sender: "Alice",
+      },
+    });
   });
 });

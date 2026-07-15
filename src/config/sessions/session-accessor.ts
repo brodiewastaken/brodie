@@ -2254,13 +2254,25 @@ export async function commitReplySessionInitialization(params: {
             sessionEntry: params.sessionEntry,
           })
         : params.sessionEntry;
-      const sessionEntry = resolveInitializedReplySessionEntry({
+      const initializedSessionEntry = resolveInitializedReplySessionEntry({
         agentId: params.agentId,
         ...(currentEntry ? { currentEntry } : {}),
         fallbackSessionFile: params.fallbackSessionFile,
         sessionEntry: preparedSessionEntry,
         storePath: params.storePath,
       });
+      const transcript = ensureCreatedSessionTranscript({
+        agentId: params.agentId,
+        entry: initializedSessionEntry,
+        storePath: params.storePath,
+      });
+      if (!transcript.ok) {
+        throw new Error(`failed to initialize canonical session transcript: ${transcript.error}`);
+      }
+      const sessionEntry = {
+        ...initializedSessionEntry,
+        sessionFile: transcript.sessionFile,
+      };
       // The identity-only guard allows commits when background activity touched
       // non-identity metadata after the snapshot. Merge only the fields that
       // actually changed since the snapshot so heartbeat/delivery/context

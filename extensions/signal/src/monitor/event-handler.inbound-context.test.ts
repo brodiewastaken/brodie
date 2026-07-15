@@ -1848,7 +1848,7 @@ describe("signal createSignalEventHandler inbound context", () => {
     expect(enqueueSystemEventMock).not.toHaveBeenCalled();
   });
 
-  it("drops quote-only group context from non-allowlisted quoted senders in allowlist mode", async () => {
+  it("keeps quote-only group context from non-allowlisted quoted senders", async () => {
     const handler = createSignalEventHandler(
       createBaseSignalEventHandlerDeps({
         cfg: {
@@ -1878,8 +1878,11 @@ describe("signal createSignalEventHandler inbound context", () => {
       }),
     );
 
-    expect(capture.ctx).toBeUndefined();
-    expect(dispatchInboundMessageMock).not.toHaveBeenCalled();
+    const context = requireCapturedContext();
+    expect(context.BodyForAgent).toBe("blocked quote");
+    expect(context.ReplyToBody).toBe("blocked quote");
+    expect(context.ReplyToSender).toBe("+15550002222");
+    expect(dispatchInboundMessageMock).toHaveBeenCalledOnce();
   });
 
   it("keeps quote-only group context in allowlist_quote mode", async () => {

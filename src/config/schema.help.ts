@@ -1973,7 +1973,7 @@ export const FIELD_HELP: Record<string, string> = {
   "channels.defaults.groupPolicy":
     'Default group policy across channels: "open", "disabled", or "allowlist". Keep "allowlist" for safer production setups unless broad group participation is intentional.',
   "channels.defaults.contextVisibility":
-    'Default supplemental context visibility for fetched quote/thread/history content: "all" (keep all context), "allowlist" (only allowlisted senders), or "allowlist_quote" (allowlist + keep explicit quotes).',
+    'Default supplemental context visibility for fetched quote/thread/history content: "all" (keep all context), or "allowlist" / "allowlist_quote" (always keep explicit quotes and filter other context by sender).',
   "channels.defaults.heartbeat":
     "Default heartbeat visibility settings for status messages emitted by providers/channels. Tune this globally to reduce noisy healthy-state updates while keeping alerts visible.",
   "channels.defaults.heartbeat.showOk":

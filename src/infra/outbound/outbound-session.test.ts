@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChannelPlugin } from "../../channels/plugins/types.plugin.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import { parseCanonicalConversationSessionKey } from "../../routing/session-key.js";
 import { createChannelTestPluginBase } from "../../test-utils/channel-plugins.js";
 import { ensureOutboundSessionEntry, resolveOutboundSessionRoute } from "./outbound-session.js";
 import { setMinimalOutboundSessionPluginRegistryForTests } from "./outbound-session.test-helpers.js";
@@ -115,7 +116,14 @@ describe("resolveOutboundSessionRoute", () => {
       replyToId: params.replyToId,
       threadId: params.threadId,
     });
-    expect(route?.sessionKey).toBe(params.expected.sessionKey);
+    const canonical = parseCanonicalConversationSessionKey(route?.sessionKey);
+    expect(canonical).toMatchObject({
+      agentId: "main",
+      channel: params.channel,
+      accountId: "default",
+      conversationKind: route?.chatType,
+    });
+    expect(canonical?.baseSessionKey).toBe(route?.baseSessionKey);
     if (params.expected.from !== undefined) {
       expect(route?.from).toBe(params.expected.from);
     }
@@ -526,8 +534,19 @@ describe("resolveOutboundSessionRoute", () => {
     });
 
     for (const [key, value] of Object.entries(expected)) {
+      if (key === "sessionKey" || key === "baseSessionKey") {
+        continue;
+      }
       expect((route as Record<string, unknown>)[key]).toEqual(value);
     }
+    const canonical = parseCanonicalConversationSessionKey(route?.sessionKey);
+    expect(canonical).toMatchObject({
+      agentId: "main",
+      channel,
+      accountId: "default",
+      conversationKind: route?.chatType,
+    });
+    expect(canonical?.baseSessionKey).toBe(route?.baseSessionKey);
   });
 
   it("rejects bare numeric GuildChat targets when the caller has no kind hint", async () => {

@@ -219,7 +219,7 @@ describe("imessage monitor gating + envelope builders", () => {
     expect(ctxPayload.Body ?? "").toContain("original message");
   });
 
-  it("drops group reply context from non-allowlisted senders in allowlist mode", async () => {
+  it("keeps group reply context from non-allowlisted senders", async () => {
     const cfg = baseCfg();
     cfg.channels ??= {};
     cfg.channels.imessage ??= {};
@@ -252,10 +252,10 @@ describe("imessage monitor gating + envelope builders", () => {
       groupHistories,
     });
 
-    expect(ctxPayload.ReplyToId).toBeUndefined();
-    expect(ctxPayload.ReplyToBody).toBeUndefined();
-    expect(ctxPayload.ReplyToSender).toBeUndefined();
-    expect(ctxPayload.Body ?? "").not.toContain("[Replying to");
+    expect(ctxPayload.ReplyToId).toBe("9001");
+    expect(ctxPayload.ReplyToBody).toBe("blocked quote");
+    expect(ctxPayload.ReplyToSender).toBe("+15559998888");
+    expect(ctxPayload.Body ?? "").toContain("[Replying to +15559998888 id:9001]");
   });
 
   it("keeps group reply context when the group allowlist matches the chat target", async () => {

@@ -76,6 +76,8 @@ export type ConversationFacts = {
   parentId?: string;
   threadId?: string;
   nativeChannelId?: string;
+  /** Complete native participant count when the channel can prove it. */
+  memberCount?: number;
   routePeer?: {
     kind: "direct" | "group" | "channel";
     id: string;

@@ -608,10 +608,10 @@ Outbound reaction tooling is gated by `channels.matrix.actions.reactions`:
 Matrix supports the shared `contextVisibility` control for supplemental room context such as fetched reply text, thread roots, and pending history.
 
 - `contextVisibility: "all"` is the default. Supplemental context is kept as received.
-- `contextVisibility: "allowlist"` filters supplemental context to senders allowed by the active room/user allowlist checks.
-- `contextVisibility: "allowlist_quote"` behaves like `allowlist`, but still keeps one explicit quoted reply.
+- `contextVisibility: "allowlist"` keeps explicit quotes from any sender and filters other supplemental context to senders allowed by the active room/user allowlist checks.
+- `contextVisibility: "allowlist_quote"` keeps explicit quotes and filters other supplemental context by sender allowlist.
 
-This affects supplemental context visibility only, not whether the inbound message itself can trigger a reply. Trigger authorization still comes from `groupPolicy`, `groups`, `groupAllowFrom`, and DM policy settings.
+This affects supplemental context visibility only, not whether the inbound message itself can trigger a reply. A quote remains untrusted context and gives its author no trigger or command authority. Trigger authorization still comes from `groupPolicy`, `groups`, `groupAllowFrom`, and DM policy settings.
 
 ## DM and room policy
 

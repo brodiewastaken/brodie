@@ -35,6 +35,35 @@ describe("runtime context prompt submission", () => {
     ).toEqual({ prompt: "visible ask" });
   });
 
+  it("preserves a transformed model prompt when it no longer contains the authored text", () => {
+    const provenance = "[Inter-session message] source=agent:main:discord:source";
+    const resetEnvelope = [
+      "[SESSION RESET START]",
+      "Abhay just sent `/new`.",
+      "Reply with one short greeting.",
+      "[SESSION RESET END]",
+    ].join("\n");
+
+    expect(
+      resolveRuntimeContextPromptParts({
+        effectivePrompt: `${provenance}\n\n${resetEnvelope}`,
+        transcriptPrompt: "brodie /new",
+        modelPrompt: resetEnvelope,
+        modelPromptBuildContext: {
+          promptBeforeHooks: resetEnvelope,
+          transcriptPromptBeforeTransforms: "brodie /new",
+          promptBeforeAnnotation: resetEnvelope,
+          prependContext: "",
+          appendContext: "",
+        },
+      }),
+    ).toEqual({
+      prompt: "brodie /new",
+      modelPrompt: resetEnvelope,
+      runtimeContext: provenance,
+    });
+  });
+
   it("moves hidden runtime context out of the visible prompt", () => {
     // Hidden context is provider input, not user-authored transcript text; it
     // must be split before persistence and display.

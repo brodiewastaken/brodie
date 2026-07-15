@@ -192,6 +192,8 @@ describe("finalizeInboundContext supplemental projection", () => {
           fullId: "room/reply-1",
           body: "quoted",
           sender: "Alice",
+          senderId: "alice-native",
+          timestamp: 1_700_000_123_000,
           isQuote: true,
         },
         forwarded: {
@@ -215,6 +217,8 @@ describe("finalizeInboundContext supplemental projection", () => {
       ReplyToIdFull: "room/reply-1",
       ReplyToBody: "quoted",
       ReplyToSender: "Alice",
+      ReplyToSenderId: "alice-native",
+      ReplyToTimestamp: 1_700_000_123_000,
       ReplyToIsQuote: true,
       ForwardedFrom: "Bob",
       ForwardedFromType: "user",

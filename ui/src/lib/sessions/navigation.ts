@@ -11,6 +11,7 @@ import {
   isUiGlobalSessionKey,
   isSessionKeyTiedToAgent,
   isSubagentSessionKey,
+  migrateLegacyCanonicalConversationSessionKey,
   normalizeAgentId,
   parseAgentSessionKey,
   resolveUiDefaultAgentId,
@@ -74,7 +75,7 @@ export function resolveSessionKey(
   sessionKey: string | undefined | null,
   hello: GatewayHelloOk | null | undefined,
 ): string {
-  const raw = normalizeOptionalString(sessionKey) ?? "";
+  const raw = migrateLegacyCanonicalConversationSessionKey(sessionKey);
   const defaults = readSessionDefaults({ hello });
   const mainSessionKey = normalizeOptionalString(defaults?.mainSessionKey);
   if (!mainSessionKey) {

@@ -208,6 +208,9 @@ export function parseSessionKeyParts(
   }
   const agentId = rest.slice(0, firstColon);
   const afterAgent = rest.slice(firstColon + 1);
+  if (afterAgent.startsWith("conversation-v1:")) {
+    return null;
+  }
   const secondColon = afterAgent.indexOf(":");
   if (secondColon < 1) {
     return null;

@@ -7,6 +7,7 @@ import {
   resolveAgentRoute,
   resolveInboundLastRouteSessionKey,
 } from "./resolve-route.js";
+import { buildCanonicalConversationSessionKey } from "./session-key.js";
 
 type ResolvedRouteExpectation = {
   agentId: string;
@@ -27,6 +28,22 @@ const resolveRoute = (
     cfg: params.cfg ?? {},
     ...params,
   });
+
+function canonicalSessionKey(params: {
+  agentId?: string;
+  channel: string;
+  accountId?: string;
+  conversationKind: "direct" | "group" | "channel";
+  conversationId: string;
+}) {
+  return buildCanonicalConversationSessionKey({
+    agentId: params.agentId ?? "main",
+    channel: params.channel,
+    accountId: params.accountId ?? "default",
+    conversationKind: params.conversationKind,
+    conversationId: params.conversationId,
+  });
+}
 
 function expectResolvedRoute(
   route: ReturnType<typeof resolveAgentRoute>,
@@ -110,13 +127,17 @@ describe("resolveAgentRoute", () => {
     expectResolvedRoute(route, {
       agentId: "main",
       accountId: "default",
-      sessionKey: "agent:main:main",
-      lastRoutePolicy: "main",
+      sessionKey: canonicalSessionKey({
+        channel: "whatsapp",
+        conversationKind: "direct",
+        conversationId: "+15551234567",
+      }),
+      lastRoutePolicy: "session",
       matchedBy: "default",
     });
   });
 
-  test("uses the configured main session key for shared direct routes", () => {
+  test("keeps direct routes canonical when a custom main session key is configured", () => {
     const route = resolveRoute({
       cfg: { session: { dmScope: "main", mainKey: "work" } },
       channel: "whatsapp",
@@ -127,20 +148,35 @@ describe("resolveAgentRoute", () => {
     expectResolvedRoute(route, {
       agentId: "main",
       accountId: "default",
-      sessionKey: "agent:main:work",
-      lastRoutePolicy: "main",
+      sessionKey: canonicalSessionKey({
+        channel: "whatsapp",
+        conversationKind: "direct",
+        conversationId: "+15551234567",
+      }),
+      lastRoutePolicy: "session",
       matchedBy: "default",
     });
     expect(route.mainSessionKey).toBe("agent:main:work");
   });
 
   test.each([
-    { dmScope: "per-peer" as const, expected: "agent:main:direct:+15551234567" },
+    {
+      dmScope: "per-peer" as const,
+      expected: canonicalSessionKey({
+        channel: "whatsapp",
+        conversationKind: "direct",
+        conversationId: "+15551234567",
+      }),
+    },
     {
       dmScope: "per-channel-peer" as const,
-      expected: "agent:main:whatsapp:direct:+15551234567",
+      expected: canonicalSessionKey({
+        channel: "whatsapp",
+        conversationKind: "direct",
+        conversationId: "+15551234567",
+      }),
     },
-  ])("dmScope=%s controls direct-message session key isolation", ({ dmScope, expected }) => {
+  ])("dmScope=$dmScope preserves canonical direct-message identity", ({ dmScope, expected }) => {
     const cfg: OpenClawConfig = {
       session: { dmScope },
     };
@@ -157,7 +193,7 @@ describe("resolveAgentRoute", () => {
     });
   });
 
-  test("route binding session dmScope isolates selected direct peers without changing agent", () => {
+  test("route binding session dmScope keeps selected direct peers canonical", () => {
     const cfg: OpenClawConfig = {
       session: { dmScope: "main" },
       bindings: [
@@ -193,9 +229,13 @@ describe("resolveAgentRoute", () => {
       }),
       {
         agentId: "main",
-        sessionKey: "agent:main:main",
+        sessionKey: canonicalSessionKey({
+          channel: "discord",
+          conversationKind: "direct",
+          conversationId: "358611388488351744",
+        }),
         matchedBy: "default",
-        lastRoutePolicy: "main",
+        lastRoutePolicy: "session",
       },
     );
 
@@ -208,7 +248,11 @@ describe("resolveAgentRoute", () => {
       }),
       {
         agentId: "main",
-        sessionKey: "agent:main:discord:default:direct:1497598990336790559",
+        sessionKey: canonicalSessionKey({
+          channel: "discord",
+          conversationKind: "direct",
+          conversationId: "1497598990336790559",
+        }),
         matchedBy: "binding.peer",
         lastRoutePolicy: "session",
       },
@@ -223,7 +267,11 @@ describe("resolveAgentRoute", () => {
       }),
       {
         agentId: "main",
-        sessionKey: "agent:main:discord:default:direct:389224669418618880",
+        sessionKey: canonicalSessionKey({
+          channel: "discord",
+          conversationKind: "direct",
+          conversationId: "389224669418618880",
+        }),
         matchedBy: "binding.peer",
         lastRoutePolicy: "session",
       },
@@ -238,7 +286,11 @@ describe("resolveAgentRoute", () => {
       }),
       {
         agentId: "main",
-        sessionKey: "agent:main:discord:channel:1494710434396110868",
+        sessionKey: canonicalSessionKey({
+          channel: "discord",
+          conversationKind: "channel",
+          conversationId: "1494710434396110868",
+        }),
         matchedBy: "default",
         lastRoutePolicy: "session",
       },
@@ -305,16 +357,24 @@ describe("resolveAgentRoute", () => {
       dmScope: "per-peer" as const,
       channel: "telegram" as const,
       peerId: "111111111",
-      expected: "agent:main:direct:alice",
+      expected: canonicalSessionKey({
+        channel: "telegram",
+        conversationKind: "direct",
+        conversationId: "111111111",
+      }),
     },
     {
       dmScope: "per-channel-peer" as const,
       channel: "discord" as const,
       peerId: "222222222222222222",
-      expected: "agent:main:discord:direct:alice",
+      expected: canonicalSessionKey({
+        channel: "discord",
+        conversationKind: "direct",
+        conversationId: "222222222222222222",
+      }),
     },
   ])(
-    "identityLinks applies to direct-message scopes: $channel $dmScope",
+    "legacy identityLinks cannot merge canonical routes: $channel $dmScope",
     ({ dmScope, channel, peerId, expected }) => {
       const cfg: OpenClawConfig = {
         session: {
@@ -359,7 +419,13 @@ describe("resolveAgentRoute", () => {
       },
       expected: {
         agentId: "a",
-        sessionKey: "agent:a:main",
+        sessionKey: canonicalSessionKey({
+          agentId: "a",
+          channel: "whatsapp",
+          accountId: "biz",
+          conversationKind: "direct",
+          conversationId: "+1000",
+        }),
         matchedBy: "binding.peer",
       },
     },
@@ -393,7 +459,12 @@ describe("resolveAgentRoute", () => {
       },
       expected: {
         agentId: "chan",
-        sessionKey: "agent:chan:discord:channel:c1",
+        sessionKey: canonicalSessionKey({
+          agentId: "chan",
+          channel: "discord",
+          conversationKind: "channel",
+          conversationId: "c1",
+        }),
         matchedBy: "binding.peer",
       },
     },
@@ -438,7 +509,13 @@ describe("resolveAgentRoute", () => {
       accountId: "default",
       peer: { kind: "channel", id: 1468834856187203680n as unknown as string },
     });
-    expect(route.sessionKey).toBe("agent:main:discord:channel:1468834856187203680");
+    expect(route.sessionKey).toBe(
+      canonicalSessionKey({
+        channel: "discord",
+        conversationKind: "channel",
+        conversationId: "1468834856187203680",
+      }),
+    );
   });
 
   test("preserves mixed-case Signal group ids in route session keys", () => {
@@ -449,7 +526,13 @@ describe("resolveAgentRoute", () => {
       accountId: null,
       peer: { kind: "group", id: mixedGroupId },
     });
-    expect(route.sessionKey).toBe(`agent:main:signal:group:${mixedGroupId}`);
+    expect(route.sessionKey).toBe(
+      canonicalSessionKey({
+        channel: "signal",
+        conversationKind: "group",
+        conversationId: mixedGroupId,
+      }),
+    );
     expect(route.lastRoutePolicy).toBe("session");
   });
 
@@ -660,7 +743,13 @@ describe("resolveAgentRoute", () => {
       expected: {
         agentId: "home",
         matchedBy: "default",
-        sessionKey: "agent:home:main",
+        sessionKey: canonicalSessionKey({
+          agentId: "home",
+          channel: "whatsapp",
+          accountId: "biz",
+          conversationKind: "direct",
+          conversationId: "+1000",
+        }),
       },
     },
   ] as const)("$name", ({ cfg, channel, accountId, peer, expected }) => {
@@ -680,12 +769,21 @@ test.each([
   {
     name: "isolates DM sessions per account, channel and sender",
     accountId: "tasks",
-    expected: "agent:main:telegram:tasks:direct:7550356539",
+    expected: canonicalSessionKey({
+      channel: "telegram",
+      accountId: "tasks",
+      conversationKind: "direct",
+      conversationId: "7550356539",
+    }),
   },
   {
     name: "uses default accountId when not provided",
     accountId: null,
-    expected: "agent:main:telegram:default:direct:7550356539",
+    expected: canonicalSessionKey({
+      channel: "telegram",
+      conversationKind: "direct",
+      conversationId: "7550356539",
+    }),
   },
 ] as const)("dmScope=per-account-channel-peer $name", ({ accountId, expected }) => {
   const route = resolveAgentRoute({

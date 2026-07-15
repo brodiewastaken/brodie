@@ -5,6 +5,7 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.js";
 import { matchPluginCommand } from "../plugins/commands.js";
+import { resolvePrefixedCommandCandidate } from "./command-invocation.js";
 import { listChatCommands, listChatCommandsForConfig } from "./commands-registry-list.js";
 import { normalizeCommandBody } from "./commands-registry-normalize.js";
 import type { CommandNormalizeOptions } from "./commands-registry.types.js";
@@ -24,7 +25,7 @@ export function hasControlCommand(
   if (!trimmed) {
     return false;
   }
-  const stripped = stripInboundMetadata(trimmed);
+  const stripped = stripInboundMetadata(resolvePrefixedCommandCandidate({ cfg, text: trimmed }));
   if (!stripped) {
     return false;
   }

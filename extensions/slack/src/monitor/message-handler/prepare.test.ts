@@ -696,7 +696,7 @@ describe("slack prepareSlackMessage inbound contract", () => {
     }
     expect(prepared.ctxPayload.ThreadHistoryBody).toContain(starterText);
     expect(prepared.ctxPayload.ThreadHistoryBody).toContain(followUpText);
-    expect(prepared.ctxPayload.ThreadHistoryBody).not.toContain("assistant reply");
+    expect(prepared.ctxPayload.ThreadHistoryBody).toContain("assistant reply");
     expect(prepared.ctxPayload.ThreadHistoryBody).not.toContain("current message");
     expect(replies).toHaveBeenCalledTimes(2);
   }
@@ -1987,7 +1987,7 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     assertPrepared(prepared);
     expect(prepared.ctxPayload.IsFirstThreadTurn).toBe(true);
     expect(prepared.ctxPayload.ThreadHistoryBody).toContain("follow-up question");
-    expect(prepared.ctxPayload.ThreadHistoryBody).not.toContain("assistant reply");
+    expect(prepared.ctxPayload.ThreadHistoryBody).toContain("assistant reply");
     expect(prepared.ctxPayload.ThreadHistoryBody).not.toContain("current message");
     expect(replies).toHaveBeenCalledTimes(2);
   });
@@ -2387,7 +2387,7 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     expect(prepared.ctxPayload.IsFirstThreadTurn).toBe(true);
     expect(prepared.ctxPayload.ThreadStarterBody).toBe("starter");
     expect(prepared.ctxPayload.ThreadHistoryBody).toContain("prior human context");
-    expect(prepared.ctxPayload.ThreadHistoryBody).not.toContain("assistant prior output");
+    expect(prepared.ctxPayload.ThreadHistoryBody).toContain("assistant prior output");
     expect(prepared.ctxPayload.ThreadHistoryBody).not.toContain("current post-reset message");
     expect(prepared.ctxPayload.ParentSessionKey).toBe(route.sessionKey);
     expect(replies).toHaveBeenCalledTimes(2);
@@ -2696,9 +2696,8 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     await saveSessionStore(
       storePath,
       {
-        "agent:main:main": { sessionId: "existing-dm-session", updatedAt: Date.now() },
-        "agent:main:main:thread:650.000": {
-          sessionId: "existing-dm-thread-session",
+        "agent:main:conversation:slack:default:direct:U1": {
+          sessionId: "existing-dm-session",
           updatedAt: Date.now(),
         },
       },
@@ -2720,7 +2719,7 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
       });
     const slackCtx = createInboundSlackCtx({
       cfg: {
-        session: { store: storePath },
+        session: { store: storePath, dmScope: "main" },
         channels: { slack: { enabled: true, replyToMode: "all" } },
       } as OpenClawConfig,
       appClient: { conversations: { replies } } as unknown as App["client"],
@@ -2739,7 +2738,7 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     );
 
     assertPrepared(prepared);
-    expect(prepared.ctxPayload.SessionKey).toBe("agent:main:main");
+    expect(prepared.ctxPayload.SessionKey).toBe("agent:main:conversation:slack:default:direct:U1");
     expect(prepared.ctxPayload.MessageThreadId).toBeUndefined();
     expect(prepared.ctxPayload.ThreadStarterBody).toBeUndefined();
     expect(prepared.ctxPayload.ThreadHistoryBody).toContain("starter topic");

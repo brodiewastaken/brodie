@@ -1,6 +1,7 @@
 // Covers event session routing policy resolution.
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
+import { buildCanonicalConversationSessionKey } from "../routing/session-key.js";
 import {
   parseDirectAgentSessionTarget,
   resolveEventSessionKeyForPolicy,
@@ -118,9 +119,22 @@ describe("event session routing", () => {
         },
       ],
     } as unknown as OpenClawConfig;
-    const sessionKey = "agent:main:telegram:work:direct:123";
+    const sessionKey = buildCanonicalConversationSessionKey({
+      agentId: "main",
+      channel: "telegram",
+      accountId: "work",
+      conversationKind: "direct",
+      conversationId: "123",
+    });
     const policy = resolveEventSessionRoutingPolicy({ cfg, sessionKey });
-    const threadSessionKey = `${sessionKey}:thread:1712345678.123`;
+    const threadSessionKey = buildCanonicalConversationSessionKey({
+      agentId: "main",
+      channel: "telegram",
+      accountId: "work",
+      conversationKind: "direct",
+      conversationId: "123",
+      threadId: "1712345678.123",
+    });
     const threadPolicy = resolveEventSessionRoutingPolicy({ cfg, sessionKey: threadSessionKey });
 
     expect(policy.preserveSessionKey).toBe(true);

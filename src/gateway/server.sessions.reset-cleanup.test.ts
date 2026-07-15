@@ -168,12 +168,7 @@ test("sessions.reset aborts active runs and clears queues", async () => {
   expect(peekSystemEvents("sess-main")).toStrictEqual([]);
   expect(bundleMcpRuntimeMocks.disposeSessionMcpRuntime).toHaveBeenCalledWith("sess-main");
   expect(waitCallCountAtSnapshotClear).toEqual([1]);
-  expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).toHaveBeenCalledTimes(1);
-  const closeTabsCall = browserSessionTabMocks.closeTrackedBrowserTabsForSessions.mock
-    .calls[0] as unknown as [{ sessionKeys?: string[]; onWarn?: unknown }] | undefined;
-  const closeTabsParams = closeTabsCall?.[0];
-  expect(closeTabsParams?.sessionKeys).toEqual(["main", "agent:main:main", "sess-main"]);
-  expect(typeof closeTabsParams?.onWarn).toBe("function");
+  expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
   expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledTimes(1);
   expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledWith(
     {

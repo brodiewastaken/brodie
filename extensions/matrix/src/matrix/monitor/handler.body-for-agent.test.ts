@@ -323,7 +323,7 @@ describe("createMatrixRoomMessageHandler inbound body formatting", () => {
     expect(getMemberDisplayName).toHaveBeenCalledTimes(2);
   });
 
-  it("drops thread and reply context fetched from non-allowlisted room senders", async () => {
+  it("filters thread context but keeps an explicit reply from a non-allowlisted sender", async () => {
     const { handler, finalizeInboundContext } = createMatrixHandlerTestHarness({
       client: {
         getEvent: async () =>
@@ -366,18 +366,18 @@ describe("createMatrixRoomMessageHandler inbound body formatting", () => {
 
     const finalized = latestFinalizedReplyContext(finalizeInboundContext);
     expect(finalized.ThreadStarterBody).toBeUndefined();
-    expect(finalized.ReplyToBody).toBeUndefined();
-    expect(finalized.ReplyToSender).toBeUndefined();
+    expect(finalized.ReplyToBody).toBe("Malicious root topic");
+    expect(finalized.ReplyToSender).toBe("Mallory");
   });
 
-  it("drops quoted reply context fetched from non-allowlisted room senders", async () => {
+  it("keeps quoted reply context fetched from non-allowlisted room senders", async () => {
     const { handler, finalizeInboundContext } = createQuotedReplyVisibilityHarness("allowlist");
 
     await sendQuotedReply(handler);
 
     const finalized = latestFinalizedReplyContext(finalizeInboundContext);
-    expect(finalized.ReplyToBody).toBeUndefined();
-    expect(finalized.ReplyToSender).toBeUndefined();
+    expect(finalized.ReplyToBody).toBe("Quoted payload");
+    expect(finalized.ReplyToSender).toBe("Mallory");
   });
 
   it("keeps quoted reply context in allowlist_quote mode", async () => {
