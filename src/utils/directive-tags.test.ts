@@ -41,6 +41,11 @@ describe("stripInlineDirectiveTagsForDisplay", () => {
     expect(result.text).toBe("ok");
   });
 
+  test("preserves a word boundary around adjacent retired directives", () => {
+    const result = stripInlineDirectiveTagsForDisplay("see[[reply_to_current]]now");
+    expect(result).toEqual({ changed: true, text: "see now" });
+  });
+
   test("does not mutate plain text", () => {
     const input = "  keep leading and trailing whitespace  ";
     const result = stripInlineDirectiveTagsForDisplay(input);

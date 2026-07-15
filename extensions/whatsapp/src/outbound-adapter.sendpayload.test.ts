@@ -201,6 +201,25 @@ describe("whatsappOutbound sendPayload", () => {
     expect(sendWhatsApp).not.toHaveBeenCalled();
   });
 
+  it("delivers marked terminal agent-run failures", async () => {
+    const sendWhatsApp = vi.fn(async () => ({ messageId: "wa-failure", toJid: "jid" }));
+
+    const result = await whatsappOutbound.sendPayload!({
+      cfg: {},
+      to: "5511999999999@c.us",
+      text: "",
+      payload: {
+        text: "Something went wrong while processing your request.",
+        isError: true,
+        isAgentRunFailure: true,
+      },
+      deps: { sendWhatsApp },
+    });
+
+    expect(result).toEqual({ channel: "whatsapp", messageId: "wa-failure", toJid: "jid" });
+    expect(sendWhatsApp).toHaveBeenCalledOnce();
+  });
+
   it("sanitizes HTML-only text to whitespace-only payload", () => {
     expect(
       whatsappOutbound

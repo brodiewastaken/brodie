@@ -753,8 +753,16 @@ export async function runPreparedCliAgent(
         },
       },
       didSendViaMessagingTool: true,
+      ...(evidence.messageToolDeliveryState
+        ? { messageToolDeliveryState: evidence.messageToolDeliveryState }
+        : {}),
       ...(evidence.didDeliverSourceReplyViaMessageTool
         ? { didDeliverSourceReplyViaMessageTool: true }
+        : {}),
+      ...(evidence.messageToolSourceReplyDeliveryState
+        ? {
+            messageToolSourceReplyDeliveryState: evidence.messageToolSourceReplyDeliveryState,
+          }
         : {}),
       ...(evidence.messagingToolSentTexts?.length
         ? { messagingToolSentTexts: evidence.messagingToolSentTexts }
@@ -1042,8 +1050,17 @@ export async function runPreparedCliAgent(
         },
       },
       ...(resultParams.output.didSendViaMessagingTool ? { didSendViaMessagingTool: true } : {}),
+      ...(resultParams.output.messageToolDeliveryState
+        ? { messageToolDeliveryState: resultParams.output.messageToolDeliveryState }
+        : {}),
       ...(resultParams.output.didDeliverSourceReplyViaMessageTool
         ? { didDeliverSourceReplyViaMessageTool: true }
+        : {}),
+      ...(resultParams.output.messageToolSourceReplyDeliveryState
+        ? {
+            messageToolSourceReplyDeliveryState:
+              resultParams.output.messageToolSourceReplyDeliveryState,
+          }
         : {}),
       ...(resultParams.output.messagingToolSentTexts?.length
         ? { messagingToolSentTexts: resultParams.output.messagingToolSentTexts }

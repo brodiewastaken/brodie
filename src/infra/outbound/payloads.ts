@@ -1,10 +1,7 @@
 // Outbound payload planning normalizes reply payloads into sendable text,
 // media, presentation, interactive, and mirror projections.
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
-import {
-  mergeReactionDirectiveChannelData,
-  parseReplyDirectives,
-} from "../../auto-reply/reply/reply-directives.js";
+import { copyReplyPayloadMetadata } from "../../auto-reply/reply-payload.js";
 import {
   formatBtwTextForExternalDelivery,
   isRenderablePayload,
@@ -205,31 +202,25 @@ type IndexedPreparedOutboundPayloadPlanEntry = PreparedOutboundPayloadPlanEntry 
 
 function createOutboundPayloadPlanEntry(
   payload: ReplyPayload,
-  context: Pick<OutboundPayloadPlanContext, "extractMarkdownImages"> = {},
+  _context: Pick<OutboundPayloadPlanContext, "extractMarkdownImages"> = {},
 ): PreparedOutboundPayloadPlanEntry | null {
   if (shouldSuppressReasoningPayload(payload)) {
     return null;
   }
-  const parsed = parseReplyDirectives(payload.text ?? "", {
-    extractMarkdownImages: context.extractMarkdownImages,
-  });
-  const explicitMediaUrls = payload.mediaUrls ?? parsed.mediaUrls;
-  const explicitMediaUrl = payload.mediaUrl ?? parsed.mediaUrl;
+  const explicitMediaUrls = payload.mediaUrls;
+  const explicitMediaUrl = payload.mediaUrl;
   const mergedMedia = mergeMediaUrls(
     explicitMediaUrls,
     explicitMediaUrl ? [explicitMediaUrl] : undefined,
   );
-  const strippedText = stripUnsupportedCitationControlMarkers(parsed.text ?? "");
-  const strippedParsed =
-    strippedText === (parsed.text ?? "") ? parsed : parseReplyDirectives(strippedText);
-  const parsedText = strippedParsed.text ?? "";
+  const strippedText = stripUnsupportedCitationControlMarkers(payload.text ?? "");
+  const parsedText = strippedText.trim() ? strippedText : "";
   if (isSuppressedRelayStatusText(parsedText) && mergedMedia.length === 0) {
     return null;
   }
-  const isSilent = strippedParsed.isSilent && mergedMedia.length === 0;
+  const isSilent = false;
   const hasMultipleMedia = (explicitMediaUrls?.length ?? 0) > 1;
   const resolvedMediaUrl = hasMultipleMedia ? undefined : explicitMediaUrl;
-  const channelData = mergeReactionDirectiveChannelData(payload.channelData, parsed.reaction);
   const normalizedPayload: ReplyPayload = {
     ...payload,
     text:
@@ -239,15 +230,15 @@ function createOutboundPayloadPlanEntry(
       }) ?? "",
     mediaUrls: mergedMedia.length ? mergedMedia : undefined,
     mediaUrl: resolvedMediaUrl,
-    replyToId: payload.replyToId ?? parsed.replyToId,
-    replyToTag: payload.replyToTag || parsed.replyToTag,
-    replyToCurrent: payload.replyToCurrent || parsed.replyToCurrent,
-    audioAsVoice: Boolean(payload.audioAsVoice || parsed.audioAsVoice),
-    ...(channelData ? { channelData } : {}),
+    ...(payload.replyToId ? { replyToId: payload.replyToId } : {}),
+    ...(payload.replyToTag ? { replyToTag: true } : {}),
+    ...(payload.replyToCurrent ? { replyToCurrent: true } : {}),
+    audioAsVoice: payload.audioAsVoice === true,
   };
   if (!isRenderablePayload(normalizedPayload) && !isSilent) {
     return null;
   }
+  copyReplyPayloadMetadata(payload, normalizedPayload);
   const hasChannelData = hasReplyChannelData(normalizedPayload.channelData);
   return {
     payload: normalizedPayload,

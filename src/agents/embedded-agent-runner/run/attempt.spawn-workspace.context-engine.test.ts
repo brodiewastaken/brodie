@@ -2927,6 +2927,34 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     ).toBe(false);
   });
 
+  it("skips maintenance after an assistant terminal error", async () => {
+    const afterTurn = vi.fn(async () => {});
+    const assistantError = {
+      role: "assistant",
+      content: [],
+      stopReason: "error",
+      errorMessage: "forced provider failure",
+      timestamp: 2,
+    } as unknown as AgentMessage;
+
+    const result = await createContextEngineAttemptRunner({
+      contextEngine: createTestContextEngine({ afterTurn }),
+      sessionKey,
+      tempPaths,
+      sessionPrompt: async (session) => {
+        session.messages = [...session.messages, assistantError];
+      },
+    });
+
+    expect(result.currentAttemptAssistant?.stopReason).toBe("error");
+    expect(afterTurn).toHaveBeenCalledTimes(1);
+    expect(
+      hoisted.runContextEngineMaintenanceMock.mock.calls.some(
+        ([params]) => requireRecord(params, "maintenance params").reason === "turn",
+      ),
+    ).toBe(false);
+  });
+
   it("runs startup maintenance for existing sessions even without bootstrap()", async () => {
     const { assemble } = createContextEngineBootstrapAndAssemble();
 

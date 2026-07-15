@@ -261,7 +261,7 @@ export function createWhatsAppOutboundBase({
   return {
     ...outbound,
     sendPayload: async (ctx) => {
-      if (ctx.payload.isError === true) {
+      if (ctx.payload.isError === true && ctx.payload.isAgentRunFailure !== true) {
         return { channel: "whatsapp", messageId: "" };
       }
       const payload = normalizeWhatsAppOutboundPayload(ctx.payload, { normalizeText });

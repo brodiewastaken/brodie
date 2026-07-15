@@ -1106,6 +1106,47 @@ describe("agentLoop tool termination", () => {
     expect(events.at(-1)).toMatchObject({ type: "agent_end" });
   });
 
+  it("waits for sibling tool calls before honoring one terminal result", async () => {
+    const executed: string[] = [];
+    let turn = 0;
+    const streamFn: StreamFn = () => {
+      turn += 1;
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        const message = makeAssistantMessage([
+          { type: "toolCall", id: "call-message", name: "message", arguments: {} },
+          { type: "toolCall", id: "call-exec", name: "exec", arguments: {} },
+        ]);
+        stream.push({ type: "done", reason: "toolUse", message });
+        stream.end();
+      });
+      return stream;
+    };
+
+    const stream = agentLoop(
+      [{ role: "user", content: "hello", timestamp: 1 }],
+      {
+        systemPrompt: "",
+        messages: [],
+        tools: [makeTool("message", executed), makeTool("exec", executed)],
+      },
+      {
+        ...config,
+        afterToolCall: async ({ toolCall }) =>
+          toolCall.name === "message" ? { terminate: true } : undefined,
+      },
+      undefined,
+      streamFn,
+    );
+
+    const events = await collectEvents(stream);
+
+    expect(turn).toBe(1);
+    expect(executed).toEqual(["message", "exec"]);
+    expect(events.filter((event) => event.type === "tool_execution_end")).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: "agent_end" });
+  });
+
   it("does not request another model turn after a tool aborts the run", async () => {
     const controller = new AbortController();
     let streamCalls = 0;

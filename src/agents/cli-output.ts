@@ -9,6 +9,8 @@ import type { CliBackendConfig } from "../config/types.js";
 import { extractBalancedJsonFragments } from "../shared/balanced-json.js";
 import { isRecord } from "../utils.js";
 import type {
+  MessageToolDeliveryState,
+  MessageToolSourceReplyDeliveryState,
   MessagingToolSend,
   MessagingToolSourceReplyPayload,
 } from "./embedded-agent-messaging.types.js";
@@ -46,7 +48,9 @@ export type CliOutput = {
   };
   finalPromptText?: string;
   didSendViaMessagingTool?: boolean;
+  messageToolDeliveryState?: MessageToolDeliveryState;
   didDeliverSourceReplyViaMessageTool?: boolean;
+  messageToolSourceReplyDeliveryState?: MessageToolSourceReplyDeliveryState;
   messagingToolSentTexts?: string[];
   messagingToolSentMediaUrls?: string[];
   messagingToolSentTargets?: MessagingToolSend[];

@@ -306,8 +306,9 @@ describe("buildAgentSystemPrompt", () => {
     });
 
     expect(prompt).toContain("Runtime-generated completion events may ask for a user update.");
-    expect(prompt).toContain("Rewrite those in your normal assistant voice");
-    expect(prompt).toContain("do not forward raw internal metadata");
+    expect(prompt).toContain(
+      "Rewrite in your own voice and deliver via `message(action=send)` to the owning conversation only when the update is genuinely useful; otherwise let the completion stay private. Never forward raw internal metadata.",
+    );
   });
 
   it("does not include embed guidance in the default global prompt", () => {
@@ -1144,16 +1145,32 @@ describe("buildAgentSystemPrompt", () => {
         },
       });
 
-      expect(prompt).toContain("use `message(action=send)` for visible source-channel output");
+      expect(prompt).toContain(
+        "Visible source-channel output goes through the `message` tool: `reply` answers the current conversation, `send` is only for a deliberate different route.",
+      );
+      expect(prompt).toContain(
+        "Reply in current session → use `message(action=reply)` for visible output; normal final text stays private. Do not emit visible progress narration between tool calls; for genuinely long work a single short acknowledgment bubble is the maximum.",
+      );
       expect(prompt).toContain(
         "Tool/generated media paths are attachments, not prose; send one with `media`, multiple with `attachments: [{media: ...}]`.",
       );
       expect(prompt).not.toContain("Attach media: `MEDIA:<path-or-url>`");
       expect(prompt).toContain(
-        "Group/channel etiquette: for stale threads, jokes, lightweight acknowledgements, or low-value chatter, prefer a reaction when available or no channel message; when a visible reply is warranted, use `message(action=send)` because final text stays private.",
+        "Group/channel etiquette: for stale threads, jokes, lightweight acknowledgements, or low-value chatter, prefer a native reaction or nothing. When a visible reply is warranted, use `message(action=reply)`.",
       );
-      expect(prompt).toContain("The target defaults to the current source channel");
-      expect(prompt).toContain("do not repeat that visible content in your final answer");
+      expect(prompt).toContain(
+        "Visible output goes through the message tool exactly once; never repeat delivered content in your final answer. Final answers stay private.",
+      );
+      expect(prompt).toContain(
+        "Longer work: keep going without visible narration; background work and sub-agents still fit.",
+      );
+      expect(prompt).toContain(
+        "Runtime-generated completion events may ask for a user update. Rewrite in your own voice and deliver via `message(action=send)` to the owning conversation only when the update is genuinely useful; otherwise let the completion stay private. Never forward raw internal metadata.",
+      );
+      expect(prompt).not.toContain("The target defaults to the current source channel");
+      expect(prompt).not.toContain(
+        "Brief, high-level status updates between tool calls are visible",
+      );
       expect(prompt).not.toContain("## Silent Replies");
       expect(prompt).not.toContain(SILENT_REPLY_TOKEN);
       expect(prompt).not.toContain(
@@ -1175,9 +1192,11 @@ describe("buildAgentSystemPrompt", () => {
       },
     });
 
-    expect(prompt).toContain("include `target` and `message`; `target` is required for this turn");
     expect(prompt).toContain(
-      "Group/channel etiquette: for stale threads, jokes, lightweight acknowledgements, or low-value chatter, prefer a reaction when available or no channel message; when a visible reply is warranted, use `message(action=send)` because final text stays private.",
+      "Use `action=send` with explicit `channel` and `target` only for a deliberate different route.",
+    );
+    expect(prompt).toContain(
+      "Group/channel etiquette: for stale threads, jokes, lightweight acknowledgements, or low-value chatter, prefer a native reaction or nothing. When a visible reply is warranted, use `message(action=reply)`.",
     );
     expect(prompt).not.toContain("The target defaults to the current source channel");
   });
@@ -1223,7 +1242,7 @@ describe("buildAgentSystemPrompt", () => {
       },
     });
 
-    expect(prompt).toContain("use `message(action=send)` for visible source-channel output");
+    expect(prompt).toContain("use `message(action=reply)` for visible output");
     expect(prompt).not.toContain("Group/channel etiquette");
   });
 

@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   installMessageToolOnlyTerminalHook,
   isDeliveredMessageToolOnlySourceReply,
+  resolveAttemptMessageToolDeliveryState,
+  resolveAttemptMessageToolSourceReplyDeliveryState,
 } from "./message-tool-terminal.js";
 
 describe("message-tool-only source replies", () => {
@@ -186,10 +188,10 @@ describe("message-tool-only source replies", () => {
       details: { rewritten: true },
     });
     expect(previousAfterToolCall).toHaveBeenCalledTimes(1);
-    expect(onDeliveredSourceReply).toHaveBeenCalledTimes(1);
+    expect(onDeliveredSourceReply).toHaveBeenCalledWith("terminal");
   });
 
-  it("records delivery evidence without rewriting the default result", async () => {
+  it("records provisional delivery evidence for endTurn=false sends", async () => {
     const agent = {} as unknown as Agent;
     const onDeliveredSourceReply = vi.fn();
     installMessageToolOnlyTerminalHook({
@@ -202,11 +204,53 @@ describe("message-tool-only source replies", () => {
       agent.afterToolCall?.(
         createAfterToolCallContext({
           toolName: "message",
-          args: { action: "send", message: "visible reply" },
+          args: { action: "send", message: "one sec", endTurn: false },
         }),
       ),
     ).resolves.toBeUndefined();
-    expect(onDeliveredSourceReply).toHaveBeenCalledTimes(1);
+    expect(onDeliveredSourceReply).toHaveBeenCalledWith("provisional");
+  });
+
+  it("records provisional source reply evidence for endTurn=false reply actions", async () => {
+    const agent = {} as unknown as Agent;
+    const onDeliveredSourceReply = vi.fn();
+    installMessageToolOnlyTerminalHook({
+      agent,
+      sourceReplyDeliveryMode: "message_tool_only",
+      onDeliveredSourceReply,
+    });
+
+    const context = createAfterToolCallContext({
+      toolName: "message",
+      args: { action: "reply", message: "one sec", endTurn: false },
+    });
+    context.args = {
+      provider: "whatsapp",
+      to: "source-chat",
+      text: "one sec",
+    };
+
+    await expect(agent.afterToolCall?.(context)).resolves.toBeUndefined();
+    expect(onDeliveredSourceReply).toHaveBeenCalledWith("provisional");
+  });
+
+  it("records terminal delivery evidence for endTurn=true sends", async () => {
+    const agent = {} as unknown as Agent;
+    const onDeliveredSourceReply = vi.fn();
+    installMessageToolOnlyTerminalHook({
+      agent,
+      sourceReplyDeliveryMode: "message_tool_only",
+      onDeliveredSourceReply,
+    });
+
+    await agent.afterToolCall?.(
+      createAfterToolCallContext({
+        toolName: "message",
+        args: { action: "send", message: "done", endTurn: true },
+      }),
+    );
+
+    expect(onDeliveredSourceReply).toHaveBeenCalledWith("terminal");
   });
 
   it("leaves existing after-tool-call output alone when the send failed", async () => {
@@ -239,17 +283,216 @@ describe("message-tool-only source replies", () => {
     expect(onDeliveredSourceReply).not.toHaveBeenCalled();
   });
 
-  it("does not install a wrapper for non-message-tool-only delivery", async () => {
+  it("preserves original endTurn controls when execution args omit them", async () => {
     const previousAfterToolCall = vi.fn(async () => ({
       details: { untouched: true },
     }));
     const agent = { afterToolCall: previousAfterToolCall } as unknown as Agent;
+    const onDeliveredMessageTool = vi.fn();
     installMessageToolOnlyTerminalHook({
       agent,
       sourceReplyDeliveryMode: "automatic",
+      onDeliveredMessageTool,
     });
 
-    expect(agent.afterToolCall).toBe(previousAfterToolCall);
+    const context = createAfterToolCallContext({
+      toolName: "message",
+      args: {
+        action: "send",
+        channel: "discord",
+        target: "channel:brodie-only",
+        message: "one sec",
+        endTurn: false,
+      },
+    });
+    context.args = {
+      provider: "discord",
+      to: "channel:brodie-only",
+      text: "one sec",
+    };
+    context.result = {
+      content: [{ type: "text", text: '{"ok":true}' }],
+      details: { ok: true },
+    };
+
+    await agent.afterToolCall?.(context);
+
+    expect(previousAfterToolCall).toHaveBeenCalledTimes(1);
+    expect(onDeliveredMessageTool).toHaveBeenCalledWith("provisional");
+  });
+
+  it("uses delivery metadata when both authored and execution args omit endTurn", async () => {
+    const agent = {} as unknown as Agent;
+    const onDeliveredMessageTool = vi.fn();
+    installMessageToolOnlyTerminalHook({
+      agent,
+      sourceReplyDeliveryMode: "automatic",
+      onDeliveredMessageTool,
+    });
+
+    const context = createAfterToolCallContext({
+      toolName: "message",
+      args: {
+        provider: "discord",
+        to: "channel:brodie-only",
+        text: "one sec",
+      },
+      result: {
+        content: [{ type: "text", text: '{"status":"sent"}' }],
+        details: {
+          status: "sent",
+          messageToolDeliveryState: "provisional",
+        },
+      },
+    });
+
+    await agent.afterToolCall?.(context);
+
+    expect(onDeliveredMessageTool).toHaveBeenCalledWith("provisional");
+  });
+
+  it("recovers a provisional send from the current-attempt tool result", () => {
+    expect(
+      resolveAttemptMessageToolDeliveryState({
+        messages: [
+          { role: "toolResult", details: { messageToolDeliveryState: "terminal" } },
+          { role: "user", content: "current turn" },
+          {
+            role: "toolResult",
+            details: {
+              status: "sent",
+              messageToolDeliveryState: "provisional",
+            },
+          },
+          {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "provider failed after provisional delivery",
+            content: [],
+          },
+        ],
+        prePromptMessageCount: 1,
+      }),
+    ).toBe("provisional");
+  });
+
+  it("recovers a provisional send from propagated target evidence", () => {
+    expect(
+      resolveAttemptMessageToolDeliveryState({
+        messagingToolSentTargets: [
+          {
+            tool: "message",
+            provider: "discord",
+            to: "channel:brodie-only",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+        messages: [],
+        prePromptMessageCount: 0,
+      }),
+    ).toBe("provisional");
+  });
+
+  it("recovers a normalized provisional send to the canonical conversation source", () => {
+    expect(
+      resolveAttemptMessageToolSourceReplyDeliveryState({
+        sourceReplyDeliveryMode: "message_tool_only",
+        sessionKey: "agent:main:conversation:whatsapp:brodie:group:120363424071859049@g.us",
+        messagingToolSentTargets: [
+          {
+            provider: "whatsapp",
+            to: "120363424071859049@g.us",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+      }),
+    ).toBe("provisional");
+  });
+
+  it("recovers an exact source delivery when automatic delivery owns the turn", () => {
+    expect(
+      resolveAttemptMessageToolSourceReplyDeliveryState({
+        sourceReplyDeliveryMode: "automatic",
+        sessionKey: "agent:main:conversation:whatsapp:brodie:group:120363424071859049@g.us",
+        messagingToolSentTargets: [
+          {
+            provider: "whatsapp",
+            to: "120363424071859049@g.us",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+      }),
+    ).toBe("provisional");
+  });
+
+  it("recovers from the inbound route when the attempt session key is not canonical", () => {
+    expect(
+      resolveAttemptMessageToolSourceReplyDeliveryState({
+        messageChannel: "whatsapp",
+        messageTo: "120363424071859049@g.us",
+        sessionKey: "e17fd21f-48b1-4eab-8127-f7d7602091c0",
+        messagingToolSentTargets: [
+          {
+            provider: "whatsapp",
+            to: "120363424071859049@g.us",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+      }),
+    ).toBe("provisional");
+  });
+
+  it("does not treat a normalized send to another route as a source reply", () => {
+    expect(
+      resolveAttemptMessageToolSourceReplyDeliveryState({
+        sourceReplyDeliveryMode: "message_tool_only",
+        sessionKey: "agent:main:conversation:whatsapp:brodie:group:120363424071859049@g.us",
+        messagingToolSentTargets: [
+          {
+            provider: "whatsapp",
+            to: "120363424071859050@g.us",
+            messageToolDeliveryState: "provisional",
+          },
+        ],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("recovers a provisional send from the current transcript branch when the context snapshot omits it", () => {
+    expect(
+      resolveAttemptMessageToolDeliveryState({
+        messages: [{ role: "user", content: "assembled prompt only" }],
+        prePromptMessageCount: 1,
+        transcriptEntries: [
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              details: { messageToolDeliveryState: "terminal" },
+            },
+          },
+          { type: "message", message: { role: "user", content: "current turn" } },
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              details: {
+                status: "sent",
+                messageToolDeliveryState: "provisional",
+              },
+            },
+          },
+          {
+            type: "message",
+            message: {
+              role: "assistant",
+              stopReason: "error",
+              content: [],
+            },
+          },
+        ],
+      }),
+    ).toBe("provisional");
   });
 });
 

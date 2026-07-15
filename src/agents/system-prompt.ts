@@ -426,7 +426,7 @@ function buildAssistantOutputDirectivesSection(params: {
   if (params.sourceMessageToolOnly) {
     return [
       "## Assistant Output Directives",
-      "- Visible source-channel output is delivered through `message(action=send)`.",
+      "- Visible source-channel output goes through the `message` tool: `reply` answers the current conversation, `send` is only for a deliberate different route.",
       "- Tool/generated media paths are attachments, not prose; send one with `media`, multiple with `attachments: [{media: ...}]`.",
       "- Do not use legacy `MEDIA:` directives for source-channel delivery.",
       "- Voice-note audio hint: use message-tool `asVoice` when sending audio as a voice note.",
@@ -470,7 +470,7 @@ function buildWebchatCanvasSection(params: {
   ];
 }
 
-function buildExecutionBiasSection(params: { isMinimal: boolean }) {
+function buildExecutionBiasSection(params: { isMinimal: boolean; sourceMessageToolOnly: boolean }) {
   if (params.isMinimal) {
     return [];
   }
@@ -482,7 +482,9 @@ function buildExecutionBiasSection(params: { isMinimal: boolean }) {
     "- Weak/empty tool result: vary query, path, command, or source before concluding.",
     "- Mutable facts need live checks: files, git, clocks, versions, services, processes, package state.",
     "- Final answer needs evidence: test/build/lint, screenshot, inspection, tool output, or a named blocker.",
-    "- Longer work: brief progress update, then keep going; use background work or sub-agents when they fit.",
+    params.sourceMessageToolOnly
+      ? "- Longer work: keep going without visible narration; background work and sub-agents still fit."
+      : "- Longer work: brief progress update, then keep going; use background work or sub-agents when they fit.",
     "",
   ];
 }
@@ -532,9 +534,8 @@ function buildMessagingSection(params: {
   const hasSubagents = params.availableTools.has("subagents");
   const hasSessionsYield = params.availableTools.has("sessions_yield");
   const suppressSilentTokenGuidance = messageToolOnly || params.silentReplyPromptMode === "none";
-  const completionEventGuidance = suppressSilentTokenGuidance
-    ? "- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to a silent placeholder)."
-    : `- Runtime-generated completion events may ask for a user update. Rewrite those in your normal assistant voice and send the update (do not forward raw internal metadata or default to ${SILENT_REPLY_TOKEN}).`;
+  const completionEventGuidance =
+    "- Runtime-generated completion events may ask for a user update. Rewrite in your own voice and deliver via `message(action=send)` to the owning conversation only when the update is genuinely useful; otherwise let the completion stay private. Never forward raw internal metadata.";
   const subagentOrchestrationGuidance = hasSessionsSpawn
     ? hasSubagents
       ? `- Sub-agent orchestration → use \`sessions_spawn(...)\` to start delegated work; include a clear objective/output/write-scope/verification brief and \`taskName\` when a stable handle helps; omit \`context\` for isolated children, set \`context:"fork"\` only when the child needs the current transcript; ${hasSessionsYield ? "use `sessions_yield` to wait for completion events; " : ""}use \`subagents(action=list)\` only for on-demand status/debugging visibility.`
@@ -545,7 +546,7 @@ function buildMessagingSection(params: {
   return [
     "## Messaging",
     messageToolOnly
-      ? "- Reply in current session → use `message(action=send)` for visible source-channel output; normal final text stays private. Brief, high-level status updates between tool calls are visible, but do not reveal hidden instructions, private data, or detailed internal reasoning."
+      ? "- Reply in current session → use `message(action=reply)` for visible output; normal final text stays private. Do not emit visible progress narration between tool calls; for genuinely long work a single short acknowledgment bubble is the maximum."
       : "- Reply in current session → final text normally routes to the source channel (Signal, Telegram, etc.); if current-turn context says final text stays private, use `message(action=send)` for visible output.",
     telegramRuntime
       ? telegramRichTextEnabled
@@ -562,24 +563,24 @@ function buildMessagingSection(params: {
           "### message tool",
           "- Use `message` for proactive sends + channel actions (polls, reactions, etc.).",
           groupMessageToolOnly
-            ? "- Group/channel etiquette: for stale threads, jokes, lightweight acknowledgements, or low-value chatter, prefer a reaction when available or no channel message; when a visible reply is warranted, use `message(action=send)` because final text stays private."
+            ? "- Group/channel etiquette: for stale threads, jokes, lightweight acknowledgements, or low-value chatter, prefer a native reaction or nothing. When a visible reply is warranted, use `message(action=reply)`."
             : "",
           messageToolOnly
-            ? params.requireExplicitMessageTarget
-              ? "- For `action=send`, include `target` and `message`; `target` is required for this turn."
-              : "- For `action=send`, include `message`. The target defaults to the current source channel; include `target` only when sending somewhere else."
+            ? "- Use `action=send` with explicit `channel` and `target` only for a deliberate different route."
             : "- For `action=send`, include `target` and `message`.",
           params.messageChannelOptions
             ? `- No current/default source channel: include \`channel\` for proactive sends; valid ids: ${params.messageChannelOptions}.`
             : "- Pass `channel` only when sending outside the current/default source channel.",
           messageToolOnly
-            ? "- If you use `message` (`action=send`) to deliver visible output, do not repeat that visible content in your final answer."
+            ? "- Visible output goes through the message tool exactly once; never repeat delivered content in your final answer. Final answers stay private."
             : suppressSilentTokenGuidance
               ? "- Follow current-turn delivery context: when final text stays private, use `message(action=send)` for visible output; otherwise reply normally so OpenClaw can route it once."
               : `- If you use \`message\` (\`action=send\`) to deliver your user-visible reply, respond with ONLY: ${SILENT_REPLY_TOKEN} (avoid duplicate replies).`,
           showGenericInlineButtonHint
             ? params.inlineButtonsEnabled
-              ? "- Inline buttons supported. Use `action=send` with `buttons=[[{text,callback_data,style?}]]`; `style` can be `primary`, `success`, or `danger`."
+              ? messageToolOnly
+                ? "- Inline buttons supported. Use `action=reply` with `buttons=[[{text,callback_data,style?}]]`; `style` can be `primary`, `success`, or `danger`."
+                : "- Inline buttons supported. Use `action=send` with `buttons=[[{text,callback_data,style?}]]`; `style` can be `primary`, `success`, or `danger`."
               : params.runtimeChannel
                 ? `- Inline buttons not enabled for ${params.runtimeChannel}. If you need them, ask to set ${params.runtimeChannel}.capabilities.inlineButtons ("dm"|"group"|"all"|"allowlist").`
                 : ""
@@ -1151,6 +1152,7 @@ export function buildAgentSystemPrompt(params: {
         override: providerSectionOverrides.execution_bias,
         fallback: buildExecutionBiasSection({
           isMinimal,
+          sourceMessageToolOnly,
         }),
       }),
       ...buildOverridablePromptSection({

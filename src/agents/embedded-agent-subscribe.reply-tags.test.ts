@@ -1,5 +1,5 @@
-// Reply-tag tests cover streaming directive parsing for reply_to markers across
-// block replies and partial reply chunks.
+// Reply-tag tests cover literal legacy reply_to markers across block replies
+// and partial reply chunks.
 import type { AssistantMessage } from "openclaw/plugin-sdk/llm";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -29,8 +29,7 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
   }
 
   function createBlockReplyHarness() {
-    // Small chunk sizes force directive-only and text chunks through the block
-    // reply path where reply metadata must be preserved.
+    // Small chunk sizes force legacy directive text through the block reply path.
     const { session, emit } = createStubSessionHarness();
     const onBlockReply = vi.fn();
 
@@ -49,7 +48,7 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
     return { emit, onBlockReply };
   }
 
-  it("carries reply_to_current across tag-only block chunks", () => {
+  it("keeps reply_to_current literal across tag-only block chunks", () => {
     const { emit, onBlockReply } = createBlockReplyHarness();
 
     emit({ type: "message_start", message: { role: "assistant" } });
@@ -62,11 +61,12 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
     } as AssistantMessage;
     emit({ type: "message_end", message: assistantMessage });
 
-    expect(onBlockReply).toHaveBeenCalledTimes(1);
-    const payload = replyPayloadAt(onBlockReply, 0);
-    expect(payload.text).toBe("Hello");
-    expect(payload.replyToCurrent).toBe(true);
-    expect(payload.replyToTag).toBe(true);
+    expect(onBlockReply).toHaveBeenCalledTimes(2);
+    expect(replyTexts(onBlockReply)).toEqual(["[[reply_to_current]]", "Hello"]);
+    for (const [payload] of onBlockReply.mock.calls) {
+      expect(payload.replyToCurrent).toBeUndefined();
+      expect(payload.replyToTag).toBe(false);
+    }
   });
 
   it("flushes trailing directive tails on stream end", () => {
@@ -86,9 +86,8 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
     expect(replyTexts(onBlockReply)).toEqual(["Hello", "[["]);
   });
 
-  it("streams partial replies past reply_to tags split across chunks", () => {
-    // Split tags are buffered until complete so partial replies never expose raw
-    // directive syntax.
+  it("streams split legacy reply_to tags as literal text once complete", () => {
+    // Split tags are buffered until complete, then emitted as ordinary text.
     const { session, emit } = createStubSessionHarness();
 
     const onPartialReply = vi.fn();
@@ -105,9 +104,6 @@ describe("subscribeEmbeddedAgentSession reply tags", () => {
     emitAssistantTextDelta({ emit, delta: " world" });
     emitAssistantTextEnd({ emit });
 
-    expect(lastReplyPayload(onPartialReply).text).toBe("Hello world");
-    for (const call of onPartialReply.mock.calls) {
-      expect(call[0]?.text?.includes("[[reply_to")).toBe(false);
-    }
+    expect(lastReplyPayload(onPartialReply).text).toBe("[[reply_to:1897]] Hello world");
   });
 });

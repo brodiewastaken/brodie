@@ -53,6 +53,7 @@ function normalizeMockProviderId(providerId?: string): string {
 }
 
 type SessionManagerMocks = {
+  getBranch: Mock<() => unknown[]>;
   getLeafEntry: UnknownMock;
   branch: UnknownMock;
   resetLeaf: UnknownMock;
@@ -121,6 +122,9 @@ function createSubscriptionMock(): SubscriptionMock {
     getMessagingToolSentMediaUrls: () => [] as string[],
     getMessagingToolSentTargets: () => [] as MessagingToolSend[],
     getMessagingToolSourceReplyPayloads: () => [] as MessagingToolSourceReplyPayload[],
+    getMessageToolDeliveryState: () => undefined,
+    didDeliverSourceReplyViaMessageTool: () => false,
+    getMessageToolSourceReplyDeliveryState: () => undefined,
     getHeartbeatToolResponse: () => undefined,
     getPendingToolMediaReply: () => null,
     hasToolMediaBlockReply: () => false,
@@ -208,6 +212,7 @@ const hoisted = vi.hoisted((): AttemptSpawnWorkspaceHoisted => {
   const systemPromptTexts: string[] = [];
   const embeddedSystemPromptInputs: unknown[] = [];
   const sessionManager = {
+    getBranch: vi.fn(() => []),
     getLeafEntry: vi.fn(() => null),
     branch: vi.fn(),
     resetLeaf: vi.fn(),
@@ -1049,6 +1054,7 @@ export function resetEmbeddedAttemptHarness(
   hoisted.compactionReserveTokens = 0;
   hoisted.systemPromptTexts.length = 0;
   hoisted.embeddedSystemPromptInputs.length = 0;
+  hoisted.sessionManager.getBranch.mockReset().mockReturnValue([]);
   hoisted.sessionManager.getLeafEntry.mockReset().mockReturnValue(null);
   hoisted.sessionManager.branch.mockReset();
   hoisted.sessionManager.resetLeaf.mockReset();

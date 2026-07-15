@@ -248,7 +248,7 @@ export function buildGroupChatContext(params: {
   lines.push(`You are in a ${providerLabel} ${sharedChatNoun}.`);
   if (messageToolOnly) {
     lines.push(
-      `Normal final replies are private and are not automatically sent to ${destinationLabel}. To post visible output here, use the message tool with action=send; the target defaults to ${destinationLabel}.`,
+      "Normal final replies are private and are not automatically posted. To post visible output here, use the message tool with action=reply; the current conversation is already bound.",
     );
   } else {
     lines.push(
@@ -273,9 +273,11 @@ export function buildGroupChatContext(params: {
     !messageToolOnly && params.silentToken && params.silentReplyPolicy !== "disallow";
   if (messageToolOnly) {
     lines.push(
-      `If no visible ${sharedChatNoun === "channel" ? "channel" : "group"} response is needed, do not call message(action=send). Your normal final answer stays private and will not be posted to ${destinationLabel}.`,
+      "If no visible response is needed, use message(action=silence) with the reason in invisibleThinking. Your normal final answer always stays private.",
     );
-    lines.push("Be extremely selective: reply only when directly addressed or clearly helpful.");
+    lines.push(
+      "Be extremely selective: reply only when directly addressed or clearly additive. If a message is addressed to someone else by name, it is theirs to answer; stay out unless invited or correcting a key fact.",
+    );
   }
   if (canUseSilentReply) {
     lines.push(
@@ -306,10 +308,10 @@ export function buildDirectChatContext(params: {
   lines.push(`You are in a ${providerLabel} direct conversation.`);
   if (messageToolOnly) {
     lines.push(
-      "Normal final replies are private and are not automatically sent to this conversation. To post visible output here, use the message tool with action=send; the target defaults to this conversation.",
+      "Normal final replies are private and are not automatically posted. To post visible output here, use the message tool with action=reply; the current conversation is already bound.",
     );
     lines.push(
-      "If no visible direct response is needed, do not call message(action=send). Your normal final answer stays private and will not be posted to the conversation.",
+      "If no visible response is needed, use message(action=silence) with the reason in invisibleThinking. Your normal final answer always stays private.",
     );
     return lines.join(" ");
   }

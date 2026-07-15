@@ -60,6 +60,7 @@ describe("getReplyFromConfig reset-hook fallback", () => {
         sessionKey: "agent:main:telegram:direct:123",
         isNewSession: true,
         resetTriggered: true,
+        resetTriggeredAction: "new",
         sessionScope: "per-sender",
         triggerBodyNormalized: "/new",
         bodyStripped: "",
@@ -79,6 +80,10 @@ describe("getReplyFromConfig reset-hook fallback", () => {
     await getReplyFromConfig(buildNativeResetContext(), undefined, {});
 
     expect(mocks.emitResetCommandHooks).toHaveBeenCalledTimes(1);
+    const [[inlineParams]] = mocks.handleInlineActions.mock.calls as unknown as Array<
+      [{ command: { resetTriggeredAction?: string } }]
+    >;
+    expect(inlineParams.command.resetTriggeredAction).toBe("new");
     const [[hookParams]] = mocks.emitResetCommandHooks.mock.calls as unknown as Array<
       [{ action?: string; sessionKey?: string }]
     >;

@@ -2,6 +2,12 @@
  * Extracts visible delivery evidence from embedded-agent run results.
  */
 import { hasAcceptedSessionSpawn } from "../accepted-session-spawn.js";
+import { isAbortedAgentRunTerminalFailure } from "../agent-run-terminal-outcome.js";
+import {
+  mergeMessageToolDeliveryState,
+  readMessageToolDeliveryState,
+  type MessageToolDeliveryState,
+} from "../embedded-agent-messaging.types.js";
 
 /**
  * Helpers for deciding whether an embedded run produced user-visible or outbound effects.
@@ -30,12 +36,16 @@ type AgentDeliveryEvidence = {
     errorMessage?: unknown;
   };
   didSendViaMessagingTool?: unknown;
+  messageToolDeliveryState?: unknown;
   messagingToolSentTexts?: unknown;
   messagingToolSentMediaUrls?: unknown;
   messagingToolSentTargets?: unknown;
   acceptedSessionSpawns?: unknown;
   successfulCronAdds?: unknown;
   meta?: {
+    aborted?: unknown;
+    stopReason?: unknown;
+    finalAssistantVisibleText?: unknown;
     toolSummary?: {
       calls?: unknown;
     };
@@ -44,6 +54,7 @@ type AgentDeliveryEvidence = {
 
 type SourceReplyDeliveryEvidence = {
   didDeliverSourceReplyViaMessageTool?: unknown;
+  messageToolSourceReplyDeliveryState?: unknown;
   messagingToolSourceReplyPayloads?: unknown;
 };
 
@@ -185,6 +196,7 @@ function hasAgentDeliveryEvidenceShape(value: object): boolean {
     "payloads" in value ||
     "deliveryStatus" in value ||
     "didSendViaMessagingTool" in value ||
+    "messageToolDeliveryState" in value ||
     "messagingToolSentTexts" in value ||
     "messagingToolSentMediaUrls" in value ||
     "messagingToolSentTargets" in value ||
@@ -197,7 +209,11 @@ function hasAgentDeliveryEvidenceShape(value: object): boolean {
 /** Returns whether payload metadata contains visible text, media, presentation, or channel data. */
 export function hasVisibleAgentPayload(
   result: Pick<AgentDeliveryEvidence, "payloads">,
-  options: { includeErrorPayloads?: boolean; includeReasoningPayloads?: boolean } = {},
+  options: {
+    includeErrorPayloads?: boolean;
+    includeReasoningPayloads?: boolean;
+    includeCommentaryPayloads?: boolean;
+  } = {},
 ): boolean {
   const payloads = result.payloads;
   if (!Array.isArray(payloads)) {
@@ -212,6 +228,9 @@ export function hasVisibleAgentPayload(
       return false;
     }
     if (options.includeReasoningPayloads === false && record.isReasoning === true) {
+      return false;
+    }
+    if (options.includeCommentaryPayloads === false && record.isCommentary === true) {
       return false;
     }
     return Boolean(
@@ -270,6 +289,38 @@ function hasGranularMessagingToolDeliveryEvidence(result: AgentDeliveryEvidence)
   );
 }
 
+export function resolveMessageToolDeliveryStateEvidence(
+  result: AgentDeliveryEvidence,
+): MessageToolDeliveryState | undefined {
+  let state: MessageToolDeliveryState | undefined;
+  if (
+    result.messageToolDeliveryState === "provisional" ||
+    result.messageToolDeliveryState === "terminal"
+  ) {
+    state = result.messageToolDeliveryState;
+  }
+  if (!Array.isArray(result.messagingToolSentTargets)) {
+    return state;
+  }
+  for (const target of result.messagingToolSentTargets) {
+    const targetState = readMessageToolDeliveryState(target);
+    if (targetState) {
+      state = mergeMessageToolDeliveryState(state, targetState);
+    }
+  }
+  return state;
+}
+
+/** Returns whether in-envelope message-tool evidence contains a provisional delivery. */
+export function hasProvisionalMessageToolDeliveryEvidence(
+  result: AgentDeliveryEvidence & SourceReplyDeliveryEvidence,
+): boolean {
+  return (
+    resolveMessageToolDeliveryStateEvidence(result) === "provisional" ||
+    result.messageToolSourceReplyDeliveryState === "provisional"
+  );
+}
+
 /** Returns whether a source reply was visibly delivered through the message tool. */
 export function hasCommittedSourceReplyDeliveryEvidence(
   result: SourceReplyDeliveryEvidence,
@@ -280,9 +331,26 @@ export function hasCommittedSourceReplyDeliveryEvidence(
   );
 }
 
+/** Returns whether a source reply committed as the terminal response for its turn. */
+export function hasCommittedTerminalSourceReplyDeliveryEvidence(
+  result: SourceReplyDeliveryEvidence,
+): boolean {
+  if (result.messageToolSourceReplyDeliveryState === "provisional") {
+    return false;
+  }
+  if (result.messageToolSourceReplyDeliveryState === "terminal") {
+    return true;
+  }
+  // Older run evidence had no state. Preserve its historical terminal meaning.
+  return hasCommittedSourceReplyDeliveryEvidence(result);
+}
+
 /** Returns whether outbound metadata proves a visible message, spawn, or cron side effect. */
 export function hasVisibleOutboundDeliveryEvidence(result: AgentDeliveryEvidence): boolean {
+  const messageToolDeliveryState = resolveMessageToolDeliveryStateEvidence(result);
   return (
+    messageToolDeliveryState === "provisional" ||
+    messageToolDeliveryState === "terminal" ||
     hasVisibleCommittedMessagingToolDeliveryEvidence(result) ||
     // The coarse flag is the only evidence available for older callers. Once detailed
     // metadata exists, it owns visibility so blank sends cannot suppress recovery.
@@ -292,6 +360,58 @@ export function hasVisibleOutboundDeliveryEvidence(result: AgentDeliveryEvidence
       hasAcceptedSessionSpawn(result.acceptedSessionSpawns)) ||
     hasPositiveNumber(result.successfulCronAdds)
   );
+}
+
+/**
+ * Returns whether outbound metadata proves terminal visible delivery.
+ *
+ * A provisional source reply is also present in generic messaging-tool evidence, so its explicit
+ * state owns that evidence. Independent sends, accepted spawns, and cron side effects stay terminal.
+ */
+export function hasVisibleTerminalOutboundDeliveryEvidence(
+  result: AgentDeliveryEvidence & SourceReplyDeliveryEvidence,
+): boolean {
+  const messageToolDeliveryState = resolveMessageToolDeliveryStateEvidence(result);
+  const hasTerminalSourceReply =
+    result.messageToolSourceReplyDeliveryState === "terminal" ||
+    (result.messageToolSourceReplyDeliveryState !== "provisional" &&
+      messageToolDeliveryState !== "provisional" &&
+      hasCommittedSourceReplyDeliveryEvidence(result));
+  const hasExplicitGenericState =
+    messageToolDeliveryState === "provisional" || messageToolDeliveryState === "terminal";
+  const hasLegacyGenericDelivery =
+    !hasExplicitGenericState &&
+    result.messageToolSourceReplyDeliveryState !== "provisional" &&
+    (hasVisibleCommittedMessagingToolDeliveryEvidence(result) ||
+      (result.didSendViaMessagingTool === true &&
+        !hasGranularMessagingToolDeliveryEvidence(result)));
+  return (
+    hasTerminalSourceReply ||
+    messageToolDeliveryState === "terminal" ||
+    hasLegacyGenericDelivery ||
+    (Array.isArray(result.acceptedSessionSpawns) &&
+      hasAcceptedSessionSpawn(result.acceptedSessionSpawns)) ||
+    hasPositiveNumber(result.successfulCronAdds)
+  );
+}
+
+/** Returns whether an aborted run has no surviving terminal reply or delivery evidence. */
+export function isAbortedRunTerminalFailure(
+  result: AgentDeliveryEvidence &
+    SourceReplyDeliveryEvidence & { didSendDeterministicApprovalPrompt?: unknown },
+): boolean {
+  return isAbortedAgentRunTerminalFailure({
+    aborted: result.meta?.aborted,
+    stopReason: result.meta?.stopReason,
+    finalAssistantVisibleText: result.meta?.finalAssistantVisibleText,
+    hasValidTerminalPayload: hasVisibleAgentPayload(result, {
+      includeErrorPayloads: false,
+      includeReasoningPayloads: false,
+      includeCommentaryPayloads: false,
+    }),
+    hasVisibleTerminalDelivery: hasVisibleTerminalOutboundDeliveryEvidence(result),
+    didSendDeterministicApprovalPrompt: result.didSendDeterministicApprovalPrompt === true,
+  });
 }
 
 /** Returns whether committed outbound evidence makes replay unsafe. */

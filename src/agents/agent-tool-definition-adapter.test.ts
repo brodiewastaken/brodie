@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AgentTool } from "openclaw/plugin-sdk/agent-core";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createClientToolNameConflictError,
   findClientToolNameConflicts,
@@ -16,6 +16,7 @@ import {
   toToolDefinitions,
 } from "./agent-tool-definition-adapter.js";
 import { wrapToolWithBeforeToolCallHook } from "./agent-tools.before-tool-call.js";
+import { resetAdjustedParamsByToolCallIdForTests } from "./agent-tools.before-tool-call.state.js";
 import { createExecTool } from "./bash-tools.exec.js";
 import type { ClientToolDefinition } from "./embedded-agent-runner/run/params.js";
 
@@ -52,6 +53,10 @@ async function executeTool(tool: AgentTool, callId: string) {
 }
 
 describe("agent tool definition adapter", () => {
+  afterEach(() => {
+    resetAdjustedParamsByToolCallIdForTests();
+  });
+
   it("preserves argument preparation and execution mode contracts", () => {
     const prepareArguments = vi.fn((args: unknown) => args as Record<string, never>);
     const tool = {
