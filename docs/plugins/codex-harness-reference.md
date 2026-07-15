@@ -372,8 +372,8 @@ browser, nodes, gateway, `heartbeat_respond`, and `web_search`, are available
 through Codex tool search under that namespace. This keeps the initial model
 context smaller. A small set of tools stay directly callable regardless of
 `codexDynamicToolsLoading`, because Codex tool search can be unavailable or
-resolve a connector-only universe: `agents_list`, `sessions_spawn`, and
-`sessions_yield`. Developer instructions still steer normal Codex subagents
+resolve a connector-only universe: `agents_list` and `sessions_spawn`.
+Developer instructions still steer normal Codex subagents
 toward native `spawn_agent` for Codex-native subagent work, while
 `sessions_spawn` remains available for explicit OpenClaw or ACP delegation.
 Message-tool-only source replies also stay direct, since that is a

@@ -683,7 +683,7 @@ describe("embedded attempt session lock lifecycle", () => {
     expect(releases).toEqual(["held"]);
   });
 
-  it("defensively releases the coarse attempt lock on sessions_yield abort cleanup", async () => {
+  it("defensively releases the coarse attempt lock before abort cleanup", async () => {
     const events: string[] = [];
     const acquireSessionWriteLockLocal16 = vi
       .fn()
@@ -697,14 +697,14 @@ describe("embedded attempt session lock lifecycle", () => {
 
     await controller.releaseHeldLockForAbort();
     await controller.withSessionWriteLock(async () => {
-      events.push("yield-cleanup-write");
+      events.push("abort-cleanup-write");
     });
 
     expect(acquireSessionWriteLockLocal16).toHaveBeenCalledTimes(2);
-    expect(events).toEqual(["prep-release", "yield-cleanup-write", "cleanup-release"]);
+    expect(events).toEqual(["prep-release", "abort-cleanup-write", "cleanup-release"]);
   });
 
-  it("keeps the session fence active after releasing for sessions_yield abort cleanup", async () => {
+  it("keeps the session fence active after releasing for abort cleanup", async () => {
     const sessionFile = await createTempSessionFile();
     const release = vi.fn(async () => {});
     const acquireSessionWriteLockLocal15 = vi.fn(async () => ({ release }));
@@ -716,7 +716,7 @@ describe("embedded attempt session lock lifecycle", () => {
     await controller.releaseHeldLockForAbort();
     await fs.appendFile(sessionFile, '{"type":"message","id":"abort-takeover"}\n', "utf8");
 
-    await expect(controller.withSessionWriteLock(() => "yield-cleanup")).rejects.toBeInstanceOf(
+    await expect(controller.withSessionWriteLock(() => "abort-cleanup")).rejects.toBeInstanceOf(
       EmbeddedAttemptSessionTakeoverError,
     );
     expect(controller.hasSessionTakeover()).toBe(true);

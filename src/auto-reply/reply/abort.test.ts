@@ -1329,7 +1329,7 @@ describe("abort detection", () => {
     expectSessionLaneCleared(depth2Key);
   });
 
-  it("stops a subagent that is paused after yielding", () => {
+  it("does not stop a completed subagent", () => {
     subagentRegistryMocks.listSubagentRunsForRequester.mockClear();
     subagentRegistryMocks.markSubagentRunTerminated.mockClear();
     const sessionKey = "telegram:yield-parent";
@@ -1342,11 +1342,11 @@ describe("abort detection", () => {
           childSessionKey: childKey,
           requesterSessionKey: sessionKey,
           requesterDisplayKey: sessionKey,
-          task: "paused worker",
+          task: "completed worker",
           cleanup: "keep",
           createdAt: now - 1_000,
           endedAt: now - 500,
-          pauseReason: "sessions_yield",
+          outcome: { status: "ok" },
         },
       ])
       .mockReturnValueOnce([]);
@@ -1356,14 +1356,9 @@ describe("abort detection", () => {
       requesterSessionKey: sessionKey,
     });
 
-    expect(result).toEqual({ stopped: 1 });
-    expectSessionLaneCleared(childKey);
-    expect(subagentRegistryMocks.markSubagentRunTerminated).toHaveBeenCalledWith({
-      runId: "run-yield-child",
-      childSessionKey: childKey,
-      reason: "killed",
-      suppressTaskDelivery: true,
-    });
+    expect(result).toEqual({ stopped: 0 });
+    expect(commandQueueMocks.clearCommandLane).not.toHaveBeenCalledWith(`session:${childKey}`);
+    expect(subagentRegistryMocks.markSubagentRunTerminated).not.toHaveBeenCalled();
   });
 
   it("cascade stop traverses ended depth-1 parents to stop active depth-2 children", async () => {

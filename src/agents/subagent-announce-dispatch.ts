@@ -8,6 +8,7 @@ type SubagentDeliveryPath = "steered" | "direct" | "none";
 /** Stable reasons an announcement delivery can fail without throwing. */
 export type SubagentAnnounceDeliveryFailureReason =
   | "completion_handoff_pending"
+  | "completion_handoff_missing_run_id"
   | "generated_media_missing"
   | "message_tool_delivery_missing"
   | "requester_abandoned"
@@ -17,26 +18,45 @@ type SubagentAnnounceSteerOutcome =
   | { status: "steered"; deliveredAt?: number; enqueuedAt?: number }
   | { status: "none" | "dropped" };
 
-/** Result of trying to deliver a subagent announcement. */
-export type SubagentAnnounceDeliveryResult = {
-  delivered: boolean;
+type SubagentAnnounceDeliveryCommon = {
   path: SubagentDeliveryPath;
-  deliveredAt?: number;
   enqueuedAt?: number;
-  reason?: SubagentAnnounceDeliveryFailureReason;
-  error?: string;
-  terminal?: boolean;
   phases?: SubagentAnnounceDispatchPhaseResult[];
 };
+
+/** Closed result of trying to deliver a subagent announcement. */
+export type SubagentAnnounceDeliveryResult =
+  | (SubagentAnnounceDeliveryCommon & {
+      status: "delivered";
+      deliveredAt?: number;
+    })
+  | (SubagentAnnounceDeliveryCommon & {
+      status: "pending";
+      path: "direct";
+      runCorrelationId: string;
+      reason: "completion_handoff_pending";
+    })
+  | (SubagentAnnounceDeliveryCommon & {
+      status: "unresolved";
+      path: "direct";
+      reason: "completion_handoff_missing_run_id";
+      error: string;
+    })
+  | (SubagentAnnounceDeliveryCommon & {
+      status: "failed" | "terminal_failure";
+      reason?: SubagentAnnounceDeliveryFailureReason;
+      error?: string;
+    });
 
 type SubagentAnnounceDispatchPhase = "steer-primary" | "direct-primary" | "steer-fallback";
 
 type SubagentAnnounceDispatchPhaseResult = {
   phase: SubagentAnnounceDispatchPhase;
-  delivered: boolean;
+  status: SubagentAnnounceDeliveryResult["status"];
   path: SubagentDeliveryPath;
   deliveredAt?: number;
   enqueuedAt?: number;
+  runCorrelationId?: string;
   reason?: SubagentAnnounceDeliveryFailureReason;
   error?: string;
 };
@@ -47,14 +67,14 @@ export function mapSteerOutcomeToDeliveryResult(
 ): SubagentAnnounceDeliveryResult {
   if (outcome.status === "steered") {
     return {
-      delivered: true,
+      status: "delivered",
       path: "steered",
       deliveredAt: outcome.deliveredAt,
       enqueuedAt: outcome.enqueuedAt,
     };
   }
   return {
-    delivered: false,
+    status: "failed",
     path: "none",
   };
 }
@@ -73,12 +93,20 @@ export async function runSubagentAnnounceDispatch(params: {
   ) => {
     phases.push({
       phase,
-      delivered: result.delivered,
+      status: result.status,
       path: result.path,
-      deliveredAt: result.deliveredAt,
-      enqueuedAt: result.enqueuedAt,
-      ...(result.reason ? { reason: result.reason } : {}),
-      error: result.error,
+      ...(result.status === "delivered" && typeof result.deliveredAt === "number"
+        ? { deliveredAt: result.deliveredAt }
+        : {}),
+      ...(typeof result.enqueuedAt === "number" ? { enqueuedAt: result.enqueuedAt } : {}),
+      ...(result.status === "pending" ? { runCorrelationId: result.runCorrelationId } : {}),
+      ...(result.status !== "delivered" && result.reason ? { reason: result.reason } : {}),
+      ...((result.status === "failed" ||
+        result.status === "terminal_failure" ||
+        result.status === "unresolved") &&
+      result.error
+        ? { error: result.error }
+        : {}),
     });
   };
   const withPhases = (result: SubagentAnnounceDeliveryResult): SubagentAnnounceDeliveryResult => ({
@@ -88,7 +116,7 @@ export async function runSubagentAnnounceDispatch(params: {
 
   if (params.signal?.aborted) {
     return withPhases({
-      delivered: false,
+      status: "failed",
       path: "none",
     });
   }
@@ -97,7 +125,7 @@ export async function runSubagentAnnounceDispatch(params: {
     const primarySteerOutcome = await params.steer();
     const primarySteer = mapSteerOutcomeToDeliveryResult(primarySteerOutcome);
     appendPhase("steer-primary", primarySteer);
-    if (primarySteer.delivered) {
+    if (primarySteer.status === "delivered") {
       return withPhases(primarySteer);
     }
     if (primarySteerOutcome.status === "dropped") {
@@ -113,7 +141,12 @@ export async function runSubagentAnnounceDispatch(params: {
   // final visible message wins before falling back to steering.
   const primaryDirect = await params.direct();
   appendPhase("direct-primary", primaryDirect);
-  if (primaryDirect.delivered || primaryDirect.terminal) {
+  if (
+    primaryDirect.status === "delivered" ||
+    primaryDirect.status === "pending" ||
+    primaryDirect.status === "unresolved" ||
+    primaryDirect.status === "terminal_failure"
+  ) {
     return withPhases(primaryDirect);
   }
 
@@ -124,7 +157,7 @@ export async function runSubagentAnnounceDispatch(params: {
   const fallbackSteerOutcome = await params.steer();
   const fallbackSteer = mapSteerOutcomeToDeliveryResult(fallbackSteerOutcome);
   appendPhase("steer-fallback", fallbackSteer);
-  if (fallbackSteer.delivered) {
+  if (fallbackSteer.status === "delivered") {
     return withPhases(fallbackSteer);
   }
 

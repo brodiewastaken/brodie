@@ -8,11 +8,11 @@ import {
   type AgentRunTerminalOutcome,
 } from "../agents/agent-run-terminal-outcome.js";
 import { shouldRouteCompletionThroughRequesterSession } from "../auto-reply/reply/completion-delivery-policy.js";
+import { getRuntimeConfig } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { onAgentEvent } from "../infra/agent-events.js";
+import { admitDurableSystemEventWake } from "../infra/durable-system-event-wake.js";
 import { formatErrorMessage } from "../infra/errors.js";
-import { requestHeartbeat } from "../infra/heartbeat-wake.js";
-import { enqueueSystemEvent } from "../infra/system-events.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
 import { createLazyPromiseLoader } from "../shared/lazy-runtime.js";
@@ -1353,27 +1353,42 @@ function resolveMissingOwnerDeliveryStatus(task: TaskRecord): TaskDeliveryStatus
   return task.scopeKind === "system" ? "not_applicable" : "parent_missing";
 }
 
-function queueTaskSystemEvent(task: TaskRecord, text: string) {
+function resolveTaskWakeGeneration(task: TaskRecord, kind: string, text: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(task.taskId)
+    .update("\0")
+    .update(kind)
+    .update("\0")
+    .update(text)
+    .digest("hex");
+}
+
+async function queueTaskSystemEvent(task: TaskRecord, text: string) {
   const owner = resolveTaskDeliveryOwner(task);
   const ownerKey = owner.sessionKey?.trim();
   if (!ownerKey) {
     return false;
   }
-  enqueueSystemEvent(text, {
-    sessionKey: ownerKey,
+  const systemEvent = {
+    text,
     contextKey: `task:${task.taskId}`,
     deliveryContext: owner.requesterOrigin,
-  });
-  requestHeartbeat({
+  };
+  await admitDurableSystemEventWake({
+    cfg: getRuntimeConfig(),
     source: "background-task",
     intent: "immediate",
     reason: "background-task",
     sessionKey: ownerKey,
+    systemEvent,
+    sourceGeneration: resolveTaskWakeGeneration(task, "terminal", text),
+    producerKind: "system",
   });
   return true;
 }
 
-function queueBlockedTaskFollowup(task: TaskRecord) {
+async function queueBlockedTaskFollowup(task: TaskRecord) {
   const followupText = formatTaskBlockedFollowupMessage(task);
   if (!followupText) {
     return false;
@@ -1383,16 +1398,20 @@ function queueBlockedTaskFollowup(task: TaskRecord) {
   if (!ownerKey) {
     return false;
   }
-  enqueueSystemEvent(followupText, {
-    sessionKey: ownerKey,
+  const systemEvent = {
+    text: followupText,
     contextKey: `task:${task.taskId}:blocked-followup`,
     deliveryContext: owner.requesterOrigin,
-  });
-  requestHeartbeat({
+  };
+  await admitDurableSystemEventWake({
+    cfg: getRuntimeConfig(),
     source: "background-task-blocked",
     intent: "immediate",
     reason: "background-task-blocked",
     sessionKey: ownerKey,
+    systemEvent,
+    sourceGeneration: resolveTaskWakeGeneration(task, "blocked-followup", followupText),
+    producerKind: "system",
   });
   return true;
 }
@@ -1458,9 +1477,9 @@ export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<Ta
     );
     if ((shouldRouteParentReview && !shouldDeliverParentReviewDirect) || !canDeliverDirect) {
       try {
-        queueTaskSystemEvent(latest, sessionEventText);
+        await queueTaskSystemEvent(latest, sessionEventText);
         if (latest.terminalOutcome === "blocked") {
-          queueBlockedTaskFollowup(latest);
+          await queueBlockedTaskFollowup(latest);
         }
         return updateTask(taskId, {
           deliveryStatus:
@@ -1505,13 +1524,14 @@ export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<Ta
       if (!afterSend || !shouldAutoDeliverTaskTerminalUpdate(afterSend)) {
         return afterSend ? cloneTaskRecord(afterSend) : null;
       }
-      if (afterSend.terminalOutcome === "blocked") {
-        queueBlockedTaskFollowup(afterSend);
-      }
-      return updateTask(taskId, {
+      const delivered = updateTask(taskId, {
         deliveryStatus: "delivered",
         lastEventAt: Date.now(),
       });
+      if (delivered && afterSend.terminalOutcome === "blocked") {
+        await queueBlockedTaskFollowup(delivered);
+      }
+      return delivered;
     } catch (error) {
       log.warn("Failed to deliver background task update", {
         taskId,
@@ -1524,9 +1544,9 @@ export async function maybeDeliverTaskTerminalUpdate(taskId: string): Promise<Ta
         return beforeFallback ? cloneTaskRecord(beforeFallback) : null;
       }
       try {
-        queueTaskSystemEvent(beforeFallback, sessionEventText);
+        await queueTaskSystemEvent(beforeFallback, sessionEventText);
         if (beforeFallback.terminalOutcome === "blocked") {
-          queueBlockedTaskFollowup(beforeFallback);
+          await queueBlockedTaskFollowup(beforeFallback);
         }
       } catch (fallbackError) {
         log.warn("Failed to queue background task fallback event", {
@@ -1572,7 +1592,7 @@ export async function maybeDeliverTaskStateChangeUpdate(
       });
     }
     if (!canDeliverTaskToRequesterOrigin(current)) {
-      queueTaskSystemEvent(current, eventText);
+      await queueTaskSystemEvent(current, eventText);
       upsertTaskDeliveryState({
         taskId,
         requesterOrigin: deliveryState?.requesterOrigin,

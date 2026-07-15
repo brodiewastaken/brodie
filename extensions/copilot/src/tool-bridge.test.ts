@@ -692,68 +692,18 @@ describe("createCopilotToolBridge", () => {
       expect(opts.runtimeToolAllowlist).toEqual(["read", "edit"]);
     });
 
-    it("onYield routes to sessionRef.current.abort() and invokes onYieldDetected when the live session is bound", async () => {
+    it("does not propagate the removed sessions_yield callback into wrapped tools", async () => {
       const { createOpenClawCodingTools, getOpts } = captureCall();
-      const abort = vi.fn();
-      const sessionRef: { current: { abort?: () => unknown } | undefined } = {
-        current: undefined,
-      };
-      const onYieldDetected = vi.fn();
 
       await createCopilotToolBridge({
         agentId: "agent-1",
         createOpenClawCodingTools,
         modelId: "gpt-4o",
         modelProvider: "github-copilot",
-        onYieldDetected,
         sessionId: "session-1",
-        sessionRef,
       });
 
-      const onYield = getOpts().onYield as (msg?: string) => void;
-      // No session bound yet: onYield must no-op the abort path
-      // without throwing, but the onYieldDetected notification fires
-      // regardless so a yield before session-bind is still surfaced
-      // to the final attempt result.
-      expect(() => onYield("early yield")).not.toThrow();
-      expect(abort).toHaveBeenCalledTimes(0);
-      expect(onYieldDetected).toHaveBeenCalledTimes(1);
-      expect(onYieldDetected).toHaveBeenCalledWith("early yield");
-
-      // Bind the session after the fact (attempt.ts does this after
-      // createSession/resumeSession resolves) and verify subsequent
-      // yields abort it and continue to notify.
-      sessionRef.current = { abort };
-      onYield("now yield");
-      expect(abort).toHaveBeenCalledTimes(1);
-      expect(onYieldDetected).toHaveBeenCalledTimes(2);
-      expect(onYieldDetected).toHaveBeenLastCalledWith("now yield");
-    });
-
-    it("onYield still aborts the live session when onYieldDetected throws (defense in depth)", async () => {
-      const { createOpenClawCodingTools, getOpts } = captureCall();
-      const abort = vi.fn();
-      const sessionRef: { current: { abort?: () => unknown } | undefined } = {
-        current: { abort },
-      };
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-
-      await createCopilotToolBridge({
-        agentId: "agent-1",
-        createOpenClawCodingTools,
-        modelId: "gpt-4o",
-        modelProvider: "github-copilot",
-        onYieldDetected: () => {
-          throw new Error("handler boom");
-        },
-        sessionId: "session-1",
-        sessionRef,
-      });
-
-      const onYield = getOpts().onYield as (msg?: string) => void;
-      expect(() => onYield("handler-fails-but-abort-must-fire")).not.toThrow();
-      expect(abort).toHaveBeenCalledTimes(1);
-      warn.mockRestore();
+      expect(getOpts()).not.toHaveProperty("onYield");
     });
 
     it("requireExplicitMessageTarget defaults to isSubagentSessionKey(sessionKey) when undefined", async () => {

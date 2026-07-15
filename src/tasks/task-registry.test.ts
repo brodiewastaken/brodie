@@ -72,6 +72,41 @@ import { configureTaskRegistryRuntime } from "./task-registry.store.js";
 import { summarizeTaskRecords } from "./task-registry.summary.js";
 import type { TaskDeliveryState, TaskRecord } from "./task-registry.types.js";
 
+vi.mock("../infra/durable-system-event-wake.js", async () => {
+  const systemEvents = await vi.importActual<typeof import("../infra/system-events.js")>(
+    "../infra/system-events.js",
+  );
+  const heartbeatWake = await vi.importActual<typeof import("../infra/heartbeat-wake.js")>(
+    "../infra/heartbeat-wake.js",
+  );
+  return {
+    admitDurableSystemEventWake: async (options: {
+      sessionKey: string;
+      systemEvent: { text: string; contextKey?: string | null; deliveryContext?: never };
+      source: string;
+      intent: string;
+      reason: string;
+      sourceGeneration: string;
+      producerKind: "system";
+    }) => {
+      systemEvents.enqueueSystemEvent(options.systemEvent.text, {
+        sessionKey: options.sessionKey,
+        contextKey: options.systemEvent.contextKey,
+        deliveryContext: options.systemEvent.deliveryContext,
+      });
+      heartbeatWake.requestHeartbeat({
+        source: options.source as never,
+        intent: options.intent as never,
+        reason: options.reason,
+        sessionKey: options.sessionKey,
+        sourceGeneration: options.sourceGeneration,
+        producerKind: options.producerKind,
+      });
+      return { accepted: false, reason: "disabled" };
+    },
+  };
+});
+
 const DEFAULT_TASK_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const LOST_TASK_RETENTION_MS = 24 * 60 * 60_000;
 

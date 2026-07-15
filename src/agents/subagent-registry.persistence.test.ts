@@ -41,6 +41,11 @@ import type { SubagentRunRecord } from "./subagent-registry.types.js";
 const { announceSpy } = vi.hoisted(() => ({
   announceSpy: vi.fn(async () => true),
 }));
+const admitScheduledEventSpy = vi.fn(async () => ({
+  accepted: true as const,
+  receiptId: "receipt-test",
+  durableAt: 333,
+}));
 vi.mock("./subagent-announce.js", () => ({
   runSubagentAnnounceFlow: announceSpy,
 }));
@@ -204,9 +209,19 @@ describe("subagent registry persistence", () => {
     );
   };
 
+  const useSchedulerAdmissionSpy = () => {
+    testing.setDepsForTest({
+      ...createSubagentRegistryTestDeps(),
+      admitScheduledEvent: admitScheduledEventSpy,
+      persistSubagentRunsToDisk: fastPersistSubagentRunsToDisk,
+      runSubagentAnnounceFlow: announceSpy,
+    });
+  };
+
   beforeEach(() => {
     announceSpy.mockReset();
     announceSpy.mockResolvedValue(true);
+    admitScheduledEventSpy.mockClear();
     testing.setDepsForTest({
       ...createSubagentRegistryTestDeps(),
       persistSubagentRunsToDisk: fastPersistSubagentRunsToDisk,
@@ -614,165 +629,71 @@ describe("subagent registry persistence", () => {
     });
   });
 
-  it("retries cleanup announce after a failed announce", async () => {
+  it("persists scheduler ownership when a restored completion is admitted", async () => {
     const persisted = createPersistedEndedRun({
       runId: "run-3",
       childSessionKey: "agent:main:subagent:three",
-      task: "retry announce",
+      task: "retry scheduled completion",
       cleanup: "keep",
     });
-    const registryPath = await writePersistedRegistry(persisted);
-
-    announceSpy.mockResolvedValueOnce(false);
-    restartRegistry();
-    await waitForRegistryWork(async () => {
-      const afterFirst = await readPersistedRun<{
-        cleanupHandled?: boolean;
-        cleanupCompletedAt?: number;
-      }>(registryPath, "run-3");
-      return (
-        announceSpy.mock.calls.length === 1 &&
-        afterFirst?.cleanupHandled === false &&
-        afterFirst.cleanupCompletedAt === undefined
-      );
+    Object.assign(persisted.runs["run-3"] as Record<string, unknown>, {
+      expectsCompletionMessage: true,
+      outcome: { status: "ok" },
     });
+    const registryPath = await writePersistedRegistry(persisted);
+    useSchedulerAdmissionSpy();
 
-    expect(announceSpy).toHaveBeenCalledTimes(1);
+    restartRegistry();
+    await waitForRegistryWork(() => admitScheduledEventSpy.mock.calls.length === 1);
+
     const afterFirst = await readPersistedRun<{
-      cleanupHandled?: boolean;
-      cleanupCompletedAt?: number;
+      schedulerReceiptId?: string;
+      controllerRoute?: { sessionKey?: string };
     }>(registryPath, "run-3");
-    expect(afterFirst?.cleanupHandled).toBe(false);
-    expect(afterFirst?.cleanupCompletedAt).toBeUndefined();
-
-    announceSpy.mockResolvedValueOnce(true);
-    const beforeRetry = Date.now();
-    restartRegistry();
-    await waitForRegistryWork(async () => {
-      const afterSecond = await readPersistedRun<{
-        cleanupCompletedAt?: number;
-      }>(registryPath, "run-3");
-      return announceSpy.mock.calls.length === 2 && afterSecond?.cleanupCompletedAt != null;
+    expect(afterFirst).toMatchObject({
+      schedulerReceiptId: "receipt-test",
+      controllerRoute: { sessionKey: "agent:main:main" },
     });
-
-    expect(announceSpy).toHaveBeenCalledTimes(2);
-    const afterSecond = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-      runs: Record<string, { cleanupCompletedAt?: number }>;
-    };
-    expect(afterSecond.runs["run-3"].cleanupCompletedAt).toBeGreaterThanOrEqual(beforeRetry);
+    expect(announceSpy).not.toHaveBeenCalled();
   });
 
-  it("retries cleanup announce after announce flow rejects", async () => {
-    const persisted = createPersistedEndedRun({
-      runId: "run-reject",
-      childSessionKey: "agent:main:subagent:reject",
-      task: "reject announce",
-      cleanup: "keep",
-    });
-    const registryPath = await writePersistedRegistry(persisted);
-
-    announceSpy.mockRejectedValueOnce(new Error("announce boom"));
-    restartRegistry();
-    await waitForRegistryWork(async () => {
-      const afterFirst = await readPersistedRun<{
-        cleanupHandled?: boolean;
-        cleanupCompletedAt?: number;
-      }>(registryPath, "run-reject");
-      return (
-        announceSpy.mock.calls.length === 1 &&
-        afterFirst?.cleanupHandled === false &&
-        afterFirst.cleanupCompletedAt === undefined
-      );
-    });
-
-    expect(announceSpy).toHaveBeenCalledTimes(1);
-    const afterFirst = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-      runs: Record<string, { cleanupHandled?: boolean; cleanupCompletedAt?: number }>;
-    };
-    expect(afterFirst.runs["run-reject"].cleanupHandled).toBe(false);
-    expect(afterFirst.runs["run-reject"].cleanupCompletedAt).toBeUndefined();
-
-    announceSpy.mockResolvedValueOnce(true);
-    const beforeRetry = Date.now();
-    restartRegistry();
-    await waitForRegistryWork(async () => {
-      const afterSecond = await readPersistedRun<{
-        cleanupCompletedAt?: number;
-      }>(registryPath, "run-reject");
-      return announceSpy.mock.calls.length === 2 && afterSecond?.cleanupCompletedAt != null;
-    });
-
-    expect(announceSpy).toHaveBeenCalledTimes(2);
-    const afterSecond = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-      runs: Record<string, { cleanupCompletedAt?: number }>;
-    };
-    expect(afterSecond.runs["run-reject"].cleanupCompletedAt).toBeGreaterThanOrEqual(beforeRetry);
-  });
-
-  it("keeps delete-mode runs retryable when announce is deferred", async () => {
-    const persisted = createPersistedEndedRun({
-      runId: "run-4",
-      childSessionKey: "agent:main:subagent:four",
-      task: "deferred announce",
-      cleanup: "delete",
-    });
-    const registryPath = await writePersistedRegistry(persisted);
-
-    announceSpy.mockResolvedValueOnce(false);
-    restartRegistry();
-    await waitForRegistryWork(async () => {
-      const afterFirst = await readPersistedRun<{ cleanupHandled?: boolean }>(
-        registryPath,
-        "run-4",
-      );
-      return announceSpy.mock.calls.length === 1 && afterFirst?.cleanupHandled === false;
-    });
-
-    expect(announceSpy).toHaveBeenCalledTimes(1);
-    const afterFirst = await readPersistedRun<{ cleanupHandled?: boolean }>(registryPath, "run-4");
-    expect(afterFirst?.cleanupHandled).toBe(false);
-
-    announceSpy.mockResolvedValueOnce(true);
-    restartRegistry();
-    await waitForRegistryWork(async () => {
-      const afterSecond = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-        runs?: Record<string, unknown>;
-      };
-      return announceSpy.mock.calls.length === 2 && afterSecond.runs?.["run-4"] === undefined;
-    });
-
-    expect(announceSpy).toHaveBeenCalledTimes(2);
-    const afterSecond = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-      runs?: Record<string, unknown>;
-    };
-    expect(afterSecond.runs?.["run-4"]).toBeUndefined();
-  });
-
-  it("reconciles orphaned restored runs by pruning them from registry", async () => {
+  it("admits restored terminal missing-session runs to the scheduler instead of pruning them", async () => {
     const persisted = createPersistedEndedRun({
       runId: "run-orphan-restore",
       childSessionKey: "agent:main:subagent:ghost-restore",
       task: "orphan restore",
       cleanup: "keep",
     });
+    Object.assign(persisted.runs["run-orphan-restore"] as Record<string, unknown>, {
+      expectsCompletionMessage: true,
+      outcome: { status: "ok" },
+    });
     const registryPath = await writePersistedRegistry(persisted, {
       seedChildSessions: false,
     });
+    useSchedulerAdmissionSpy();
 
     restartRegistry();
-    await waitForRegistryWork(async () => {
-      const after = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-        runs?: Record<string, unknown>;
-      };
-      return after.runs?.["run-orphan-restore"] === undefined;
-    });
+    await waitForRegistryWork(() => admitScheduledEventSpy.mock.calls.length === 1);
 
     expect(announceSpy).not.toHaveBeenCalled();
-    const after = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-      runs?: Record<string, unknown>;
-    };
-    expect(after.runs?.["run-orphan-restore"]).toBeUndefined();
-    expect(listSubagentRunsForRequester("agent:main:main")).toHaveLength(0);
+    expect(admitScheduledEventSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "subagent:run-orphan-restore:completion",
+        producerKind: "subagent_completion",
+        payload: expect.objectContaining({ taskRunId: "run-orphan-restore" }),
+      }),
+    );
+    expect(await readPersistedRun(registryPath, "run-orphan-restore")).toMatchObject({
+      schedulerReceiptId: "receipt-test",
+      completionAdmittedAt: 333,
+    });
+    expect(listSubagentRunsForRequester("agent:main:main")).toEqual([
+      expect.objectContaining({
+        runId: "run-orphan-restore",
+        schedulerReceiptId: "receipt-test",
+      }),
+    ]);
   });
 
   it("preserves restored killed tombstones until bounded reconciliation", async () => {
@@ -817,37 +738,56 @@ describe("subagent registry persistence", () => {
     ]);
   });
 
-  it("reconciles stale unended restored runs that are not restart-recoverable", async () => {
+  it("completes stale unended missing-session runs through lifecycle and scheduler", async () => {
     const now = Date.now();
     const runId = "run-stale-unended-restore";
     const childSessionKey = "agent:main:subagent:stale-unended-restore";
-    const registryPath = await writePersistedRegistry({
-      version: 2,
-      runs: {
-        [runId]: {
-          runId,
-          childSessionKey,
-          requesterSessionKey: "agent:main:main",
-          requesterDisplayKey: "main",
-          task: "stale unended restored work",
-          cleanup: "keep",
-          createdAt: now - 3 * 60 * 60 * 1_000,
-          startedAt: now - 3 * 60 * 60 * 1_000,
+    const registryPath = await writePersistedRegistry(
+      {
+        version: 2,
+        runs: {
+          [runId]: {
+            runId,
+            childSessionKey,
+            requesterSessionKey: "agent:main:main",
+            requesterDisplayKey: "main",
+            task: "stale unended restored work",
+            cleanup: "keep",
+            expectsCompletionMessage: true,
+            createdAt: now - 3 * 60 * 60 * 1_000,
+            startedAt: now - 3 * 60 * 60 * 1_000,
+          },
         },
       },
-    });
+      { seedChildSessions: false },
+    );
+    useSchedulerAdmissionSpy();
 
     restartRegistry();
-    await waitForRegistryWork(async () => {
-      const after = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
-        runs?: Record<string, unknown>;
-      };
-      return after.runs?.[runId] === undefined;
-    });
+    await waitForRegistryWork(() => admitScheduledEventSpy.mock.calls.length === 1);
 
-    expect(callGateway).not.toHaveBeenCalled();
+    expect(callGateway).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "agent.wait",
+        params: expect.objectContaining({ runId }),
+      }),
+    );
     expect(announceSpy).not.toHaveBeenCalled();
-    expect(listSubagentRunsForRequester("agent:main:main")).toHaveLength(0);
+    expect(admitScheduledEventSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: `subagent:${runId}:completion`,
+        producerKind: "subagent_completion",
+        payload: expect.objectContaining({ taskRunId: runId }),
+      }),
+    );
+    expect(await readPersistedRun(registryPath, runId)).toMatchObject({
+      endedAt: 222,
+      outcome: expect.objectContaining({ status: "ok" }),
+      schedulerReceiptId: "receipt-test",
+    });
+    expect(listSubagentRunsForRequester("agent:main:main")).toEqual([
+      expect.objectContaining({ runId, schedulerReceiptId: "receipt-test" }),
+    ]);
   });
 
   it("keeps stale unended restored runs with abortedLastRun for restart recovery", async () => {
@@ -902,7 +842,7 @@ describe("subagent registry persistence", () => {
     ).toBe(true);
   });
 
-  it("removes attachments when pruning orphaned restored runs", async () => {
+  it("removes attachments after lifecycle cleanup of a restored missing-session run", async () => {
     tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
     setTestEnvValue("OPENCLAW_STATE_DIR", tempStateDir);
     const attachmentsRootDir = path.join(tempStateDir, "attachments");
@@ -936,6 +876,7 @@ describe("subagent registry persistence", () => {
     });
 
     await expect(fs.access(attachmentsDir)).rejects.toHaveProperty("code", "ENOENT");
+    expect(announceSpy).toHaveBeenCalledOnce();
     const after = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
       runs?: Record<string, unknown>;
     };
@@ -1034,7 +975,7 @@ describe("subagent registry persistence", () => {
     expect(resolved?.endedAt).toBe(220);
   });
 
-  it("resume guard prunes orphan runs before announce retry", async () => {
+  it("routes a resumed terminal missing-session run through the scheduler instead of pruning it", async () => {
     tempStateDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-subagent-"));
     setTestEnvValue("OPENCLAW_STATE_DIR", tempStateDir);
     const runId = "run-orphan-resume-guard";
@@ -1056,19 +997,30 @@ describe("subagent registry persistence", () => {
       createdAt: now - 50,
       startedAt: now - 25,
       endedAt: now,
+      outcome: { status: "ok" },
+      expectsCompletionMessage: true,
       suppressAnnounceReason: "steer-restart",
       cleanupHandled: false,
     });
     await removeChildSessionEntry(childSessionKey);
+    useSchedulerAdmissionSpy();
 
     const changed = clearSubagentRunSteerRestart(runId);
     expect(changed).toBe(true);
-    await flushQueuedRegistryWork();
+    await waitForRegistryWork(() => admitScheduledEventSpy.mock.calls.length === 1);
 
     expect(announceSpy).not.toHaveBeenCalled();
-    expect(listSubagentRunsForRequester("agent:main:main")).toHaveLength(0);
+    expect(admitScheduledEventSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: `subagent:${runId}:completion`,
+        payload: expect.objectContaining({ taskRunId: runId }),
+      }),
+    );
+    expect(listSubagentRunsForRequester("agent:main:main")).toEqual([
+      expect.objectContaining({ runId, schedulerReceiptId: "receipt-test" }),
+    ]);
     const persisted = loadSubagentRegistryFromDisk();
-    expect(persisted.has(runId)).toBe(false);
+    expect(persisted.get(runId)).toMatchObject({ schedulerReceiptId: "receipt-test" });
   });
 
   it("uses isolated temp state when OPENCLAW_STATE_DIR is unset in tests", () => {

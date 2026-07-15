@@ -468,15 +468,6 @@ export async function runCopilotAttempt(
   let releaseError: Error | undefined;
   let downgradedFromResume = false;
   let resumeFailureRecovered = false;
-  // True when a wrapped tool fired `sessions_yield`. Propagated into
-  // the final attempt result so the parent runner can mark liveness
-  // as paused and stop_reason as `end_turn`, matching the in-tree PI
-  // (`src/agents/pi-embedded-runner/run/attempt.ts:1107-1113`) and
-  // codex (`extensions/codex/src/app-server/run-attempt.ts:539,1739`)
-  // behavior. See `EmbeddedRunAttemptResult.yieldDetected` at
-  // `src/agents/pi-embedded-runner/run/types.ts:139`.
-  let yieldDetected = false;
-
   const markExternalAbort = () => {
     abortRequested = true;
     externalAbort = true;
@@ -610,14 +601,6 @@ export async function runCopilotAttempt(
   const cleanupByokProxy = byokProxy?.close;
   const sessionProvider = byokProxy?.provider ?? poolAcquire.provider;
 
-  // Mutable session holder shared with the tool bridge so onYield
-  // (raised inside wrapped-tool execution) can route to the live SDK
-  // session's abort once it exists. The bridge is constructed before
-  // createSession/resumeSession resolves, so the holder is the only
-  // safe way to defer the binding without creating a circular dep.
-  // See tool-bridge.ts CopilotSessionHolder.
-  const sessionRef: { current: SessionLike | undefined } = { current: undefined };
-
   try {
     let sdkTools: SdkTool[];
     try {
@@ -643,10 +626,6 @@ export async function runCopilotAttempt(
         // channel/routing, model context, run hooks). See
         // tool-bridge.ts buildOpenClawCodingToolsOptions().
         attemptParams: input,
-        sessionRef,
-        onYieldDetected: () => {
-          yieldDetected = true;
-        },
         onToolCompleted: ({ args, error, result, startedAt, toolCallId, toolName }) =>
           runAgentHarnessAfterToolCallHook({
             toolName,
@@ -820,10 +799,6 @@ export async function runCopilotAttempt(
     } else {
       session = (await client.createSession(sessionConfig)) as unknown as SessionLike;
     }
-    // Bind the session holder so the tool bridge's onYield callback
-    // can abort the live SDK session if a wrapped tool yields.
-    sessionRef.current = session;
-
     // After a recovered resume, the prior sdkSessionId no longer exists
     // server-side, so don't fall back to it: only the freshly-created
     // session's id is valid.
@@ -1180,7 +1155,6 @@ export async function runCopilotAttempt(
     timedOutDuringCompaction,
     toolMetas: snap ? [...snap.toolMetas] : [],
     usage: snap?.usage,
-    yieldDetected,
   });
   if (sentTurnStarted) {
     runAgentHarnessLlmOutputHook({
@@ -1236,7 +1210,6 @@ function createResult(
     timedOutDuringCompaction?: boolean;
     toolMetas?: Array<{ meta?: string; toolName: string }>;
     usage?: AssistantUsageSnapshot;
-    yieldDetected?: boolean;
   },
 ): AttemptResultWithSdkSessionId {
   const promptError = state.promptError;
@@ -1278,7 +1251,6 @@ function createResult(
     timedOut,
     timedOutDuringCompaction: state.timedOutDuringCompaction === true,
     toolMetas,
-    yieldDetected: state.yieldDetected === true,
   };
 }
 

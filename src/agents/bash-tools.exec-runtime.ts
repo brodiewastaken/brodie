@@ -1,6 +1,7 @@
 import path from "node:path";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import { getRuntimeConfig } from "../config/io.js";
 import { emitDiagnosticEvent } from "../infra/diagnostic-events.js";
 import {
   type EventSessionRoutingPolicy,
@@ -14,9 +15,11 @@ import {
   type ExecApprovalDecision,
   type ExecTarget,
 } from "../infra/exec-approvals.js";
+import { admitRuntimeHeartbeatWake } from "../infra/heartbeat-runner.js";
 import { requestHeartbeat } from "../infra/heartbeat-wake.js";
 import { findPathKey, mergePathPrepend, removePathPrepend } from "../infra/path-prepend.js";
-import { enqueueSystemEvent } from "../infra/system-events.js";
+import { enqueueSystemEventEntry, normalizeSystemEventEntry } from "../infra/system-events.js";
+import { resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import { isSubagentSessionKey } from "../sessions/session-key-utils.js";
 /**
  * Bash exec runtime.
@@ -313,7 +316,7 @@ export function applyShellPath(env: Record<string, string>, shellPath?: string |
   }
 }
 
-function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "failed") {
+async function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "failed") {
   if (!session.backgrounded || !session.notifyOnExit || session.exitNotified) {
     return;
   }
@@ -341,25 +344,44 @@ function maybeNotifyOnExit(session: ProcessSession, status: "completed" | "faile
     mainKey: session.mainKey,
     sessionScope: session.sessionScope,
   };
-  enqueueSystemEvent(summary, {
-    sessionKey: resolveEventSessionKeyForPolicy(sessionKey, eventRouting),
+  const sourceSessionKey = resolveEventSessionKeyForPolicy(sessionKey, eventRouting);
+  const systemEvent = normalizeSystemEventEntry(summary, {
+    sessionKey: sourceSessionKey,
+    deliveryContext: session.notifyDeliveryContext,
+  });
+  enqueueSystemEventEntry(summary, {
+    sessionKey: sourceSessionKey,
     deliveryContext: session.notifyDeliveryContext,
   });
   // Subagent sessions receive exec results via process poll and announce flow;
   // the heartbeat would fall back to the main session and cause spurious wakes.
   if (!isSubagentSessionKey(sessionKey)) {
-    requestHeartbeat(
-      scopedHeartbeatWakeOptionsForPolicy(
-        sessionKey,
-        {
-          source: "exec-event",
-          intent: "event",
-          reason: "exec-event",
-          coalesceMs: 0,
-        },
-        eventRouting,
-      ),
+    const wake = scopedHeartbeatWakeOptionsForPolicy(
+      sessionKey,
+      {
+        source: "exec-event" as const,
+        intent: "event" as const,
+        reason: "exec-event",
+        sourceGeneration: `${session.id}:${session.startedAt}:${session.pid ?? "spawn"}`,
+        producerKind: "exec_completion" as const,
+        coalesceMs: 0,
+      },
+      eventRouting,
     );
+    const admission = await admitRuntimeHeartbeatWake({
+      cfg: getRuntimeConfig(),
+      agentId: resolveAgentIdFromSessionKey(sourceSessionKey),
+      sessionKey: sourceSessionKey,
+      source: "exec-event",
+      intent: "event",
+      reason: "exec-event",
+      sourceGeneration: `${session.id}:${session.startedAt}:${session.pid ?? "spawn"}`,
+      producerKind: "exec_completion",
+      ...(systemEvent ? { systemEvent } : {}),
+    });
+    if (!admission.accepted) {
+      requestHeartbeat(wake);
+    }
   }
 }
 
@@ -881,7 +903,7 @@ export async function runExecProcess(opts: {
         });
       } catch (retryErr) {
         markExited(session, null, null, "failed");
-        maybeNotifyOnExit(session, "failed");
+        await maybeNotifyOnExit(session, "failed");
         await finalizeSandboxExec({
           status: "failed",
           exitCode: null,
@@ -904,7 +926,7 @@ export async function runExecProcess(opts: {
       }
     } else {
       markExited(session, null, null, "failed");
-      maybeNotifyOnExit(session, "failed");
+      await maybeNotifyOnExit(session, "failed");
       await finalizeSandboxExec({
         status: "failed",
         exitCode: null,
@@ -953,7 +975,7 @@ export async function runExecProcess(opts: {
         exit.reason,
         exit.noOutputTimedOut,
       );
-      maybeNotifyOnExit(session, outcome.status);
+      await maybeNotifyOnExit(session, outcome.status);
       if (!session.child && session.stdin) {
         session.stdin.destroyed = true;
       }
@@ -971,10 +993,10 @@ export async function runExecProcess(opts: {
       });
       return outcome;
     })
-    .catch((err: unknown): ExecProcessOutcome => {
+    .catch(async (err: unknown): Promise<ExecProcessOutcome> => {
       updatesDisabled = true;
       markExited(session, null, null, "failed");
-      maybeNotifyOnExit(session, "failed");
+      await maybeNotifyOnExit(session, "failed");
       const outcome = buildExecRuntimeErrorOutcome({
         error: err,
         aggregated: session.aggregated.trim(),

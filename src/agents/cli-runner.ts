@@ -971,8 +971,7 @@ export async function runPreparedCliAgent(
     const agentSessionId = unflushedCliSessionId
       ? ""
       : (resultParams.effectiveCliSessionId ?? params.sessionId ?? "");
-    const yielded = resultParams.output.yielded === true;
-    const stopReason = yielded ? "end_turn" : "completed";
+    const stopReason = "completed";
 
     return {
       payloads,
@@ -988,7 +987,6 @@ export async function runPreparedCliAgent(
             }
           : {}),
         systemPromptReport: context.systemPromptReport,
-        ...(yielded ? { yielded: true, livenessState: "paused" as const, stopReason } : {}),
         executionTrace: {
           winnerProvider: params.provider,
           winnerModel: context.modelId,
@@ -1007,7 +1005,7 @@ export async function runPreparedCliAgent(
           ...(context.effectiveAuthProfileId ? { authMode: "auth-profile" } : {}),
         },
         completion: {
-          finishReason: yielded ? "end_turn" : "stop",
+          finishReason: "stop",
           stopReason,
           refusal: false,
         },

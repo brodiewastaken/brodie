@@ -192,7 +192,6 @@ function summarizeSubagentRuns(runs: ReturnType<typeof listSubagentRunsForReques
       taskName: run.taskName,
       ended: typeof run.endedAt === "number",
       endedReason: run.endedReason,
-      pauseReason: run.pauseReason,
       outcome: run.outcome?.status,
       outcomeError: run.outcome?.status === "error" ? run.outcome.error : undefined,
       delivery: run.delivery?.status,
@@ -575,7 +574,6 @@ describeLive("subagent announce live", () => {
       });
       const runStateBeforeSteer = summarizeSubagentRuns(listSteeredChildRuns());
       expect(runBeforeSteer.endedAt, runStateBeforeSteer).toBeUndefined();
-      expect(runBeforeSteer.pauseReason, runStateBeforeSteer).toBeUndefined();
       expect(runBeforeSteer.completion?.resultText, runStateBeforeSteer).toBeUndefined();
       console.log(`[subagent-steer] steering active child run; runs=${runStateBeforeSteer}`);
 

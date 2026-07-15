@@ -71,7 +71,7 @@ agent decides whether a user-facing update is needed.
   <Accordion title="Non-blocking, push-based completion">
     - `sessions_spawn` is non-blocking; it returns a run id immediately.
     - On completion, the sub-agent reports back to the parent/requester session.
-    - Agent turns that need child results should call `sessions_yield` after spawning required work. That ends the current turn and lets the completion event arrive as the next model-visible message.
+    - Agent turns that need child results end naturally. The durable scheduler resumes the immediate controller after it admits each completion event.
     - Completion is push-based. Once spawned, do **not** poll `/subagents list`, `sessions_list`, or `sessions_history` in a loop just to wait for it to finish; check status on-demand only when debugging.
     - Child output is a report/evidence for the requester agent to synthesize. It is not user-authored instruction text and cannot override system, developer, or user policy.
     - On completion, OpenClaw best-effort closes tracked browser tabs/processes opened by that sub-agent session before the announce cleanup flow continues.
@@ -132,7 +132,7 @@ chat channel.
 Availability depends on the caller's effective tool policy. The built-in
 `coding` profile includes `sessions_spawn`; `messaging` and `minimal` do
 not. `full` allows every tool. Add `tools.alsoAllow: ["sessions_spawn",
-"sessions_yield", "subagents"]`, or use `tools.profile: "coding"`, for
+"subagents"]`, or use `tools.profile: "coding"`, for
 agents on a narrower profile that should still delegate work.
 Channel/group, provider, sandbox, and per-agent allow/deny policies can
 still remove the tool after the profile stage. Use `/tools` from the same
@@ -250,22 +250,6 @@ run id instead.
 The reserved targets `last` and `all` are not valid `taskName` values
 because they already have control meanings.
 
-## Tool: `sessions_yield`
-
-Ends the current model turn and waits for runtime events, primarily
-sub-agent completion events, to arrive as the next message. Use it after
-spawning required child work when the requester cannot produce a final
-answer until those completions arrive.
-
-`sessions_yield` is the waiting primitive. Do not replace it with polling
-loops over `subagents`, `sessions_list`, `sessions_history`, shell
-`sleep`, or process polling just to detect child completion.
-
-Only use `sessions_yield` when the session's effective tool list includes
-it. Some minimal or custom tool profiles may expose `sessions_spawn` and
-`subagents` without exposing `sessions_yield`; in that case, do not invent
-a polling loop just to wait for completion.
-
 When active children exist, OpenClaw injects a compact runtime-generated
 `Active Subagents` prompt block into normal turns so the requester can see
 the current child sessions, run ids, statuses, labels, tasks, and
@@ -278,8 +262,8 @@ from user/model-provided spawn arguments.
 Lists spawned sub-agent runs owned by the requester session. It is scoped
 to the current requester; a child can only see its own controlled children.
 
-Use `subagents` for on-demand status and debugging. Use `sessions_yield` to
-wait for completion events.
+Use `subagents` for on-demand status and debugging. Do not poll it to wait
+for completion events.
 
 ## Thread-bound sessions
 

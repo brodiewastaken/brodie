@@ -17,17 +17,16 @@ OpenClaw gives agents tools to work across sessions, inspect status, and orchest
 | `sessions_history` | Read the transcript of a specific session                                   |
 | `sessions_send`    | Send a message to another session and optionally wait                       |
 | `sessions_spawn`   | Spawn an isolated sub-agent session for background work                     |
-| `sessions_yield`   | End the current turn and wait for follow-up sub-agent results               |
 | `subagents`        | List spawned sub-agent status for this session                              |
 | `session_status`   | Show a `/status`-style card and optionally set a per-session model override |
 
-These tools are still subject to the active tool profile and allow/deny policy. `tools.profile: "coding"` includes the full session orchestration set, including `sessions_spawn`, `sessions_yield`, and `subagents`. `tools.profile: "messaging"` includes cross-session messaging tools (`sessions_list`, `sessions_history`, `sessions_send`, `session_status`) but does not include sub-agent spawning. To keep a messaging profile and still allow native delegation, add:
+These tools are still subject to the active tool profile and allow/deny policy. `tools.profile: "coding"` includes the full session orchestration set, including `sessions_spawn` and `subagents`. `tools.profile: "messaging"` includes cross-session messaging tools (`sessions_list`, `sessions_history`, `sessions_send`, `session_status`) but does not include sub-agent spawning. To keep a messaging profile and still allow native delegation, add:
 
 ```json5
 {
   tools: {
     profile: "messaging",
-    alsoAllow: ["sessions_spawn", "sessions_yield", "subagents"],
+    alsoAllow: ["sessions_spawn", "subagents"],
   },
 }
 ```
@@ -81,8 +80,6 @@ When route metadata is available, `session_status` also includes a visible `Rout
 - `active` is the current live-run route. It is only reported for the live or current session being handled now.
 - `deliveryContext` is the persisted delivery route stored on the session, which OpenClaw can reuse for later delivery even when the active surface differs.
 
-`sessions_yield` intentionally ends the current turn so the next message can be the follow-up event you are waiting for. Use it after spawning sub-agents when you want completion results to arrive as the next message instead of building poll loops.
-
 `subagents` is the visibility helper for already spawned OpenClaw sub-agents. It supports `action: "list"` to inspect active/recent runs.
 
 ## Spawning sub-agents
@@ -99,7 +96,7 @@ Key options:
 
 Default leaf sub-agents do not get session tools. When `maxSpawnDepth >= 2`, depth-1 orchestrator sub-agents additionally receive `sessions_spawn`, `subagents`, `sessions_list`, and `sessions_history` so they can manage their own children. Leaf runs still do not get recursive orchestration tools.
 
-After completion, an announce step posts the result to the requester's channel. Completion delivery preserves bound thread/topic routing when available, and if the completion origin only identifies a channel, OpenClaw can still reuse the requester session's stored route (`lastChannel` / `lastTo`) for direct delivery.
+After completion, OpenClaw durably admits a typed event to the immediate controller. The controller consumes the child result and decides whether to reply, react, or remain silent. Children never post completion text directly to a human channel.
 
 For ACP-specific behavior, see [ACP Agents](/tools/acp-agents).
 

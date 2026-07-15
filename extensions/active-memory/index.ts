@@ -110,7 +110,6 @@ const ACTIVE_MEMORY_RESERVED_TOOLS_ALLOW = new Set([
   "sessions_list",
   "sessions_send",
   "sessions_spawn",
-  "sessions_yield",
   "subagents",
   "tts",
   "update_plan",
@@ -119,6 +118,7 @@ const ACTIVE_MEMORY_RESERVED_TOOLS_ALLOW = new Set([
   "web_search",
   "write",
 ]);
+const ACTIVE_MEMORY_REMOVED_TOOLS_ALLOW = new Set(["sessions_yield"]);
 const DEFAULT_PARTIAL_TRANSCRIPT_MAX_CHARS = 32_000;
 const DEFAULT_TRANSCRIPT_READ_MAX_LINES = 2_000;
 const DEFAULT_TRANSCRIPT_READ_MAX_BYTES = 50 * 1024 * 1024;
@@ -474,7 +474,11 @@ function normalizeConfiguredToolsAllow(value: unknown): string[] | undefined {
 
 function isReservedActiveMemoryToolsAllowEntry(value: string): boolean {
   const normalized = value.trim().toLowerCase();
-  return normalized.startsWith("group:") || ACTIVE_MEMORY_RESERVED_TOOLS_ALLOW.has(normalized);
+  return (
+    normalized.startsWith("group:") ||
+    ACTIVE_MEMORY_RESERVED_TOOLS_ALLOW.has(normalized) ||
+    ACTIVE_MEMORY_REMOVED_TOOLS_ALLOW.has(normalized)
+  );
 }
 
 function resolveDefaultToolsAllow(cfg: OpenClawConfig | undefined): string[] {

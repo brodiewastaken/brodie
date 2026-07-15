@@ -4,13 +4,11 @@ import { describe, expect, it } from "vitest";
 import { createSubagentsTool } from "./subagents-tool.js";
 
 describe("subagents tool", () => {
-  it("does not advertise sessions_yield as unconditionally available", () => {
-    // sessions_yield is context-dependent; the model-facing description should
-    // not promise it exists in every runtime.
+  it("describes push-based completion without a polling primitive", () => {
     const tool = createSubagentsTool();
 
     expect(tool.description).toBe(
-      "List active and recent subagents for the requester session. If sessions_yield exists, use it for completion; do not poll wait loops.",
+      "List active and recent subagents for on-demand status and debugging. Completion is push-based; do not poll wait loops.",
     );
   });
 

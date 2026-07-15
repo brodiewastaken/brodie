@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { shouldPersistCompletedBootstrapTurn } from "./attempt.thread-helpers.js";
 
 describe("runEmbeddedAttempt bootstrap completion marker", () => {
-  it("keeps marker persistence enabled for clean sessions_yield exits", () => {
+  it("keeps marker persistence enabled for clean exits", () => {
     expect(
       shouldPersistCompletedBootstrapTurn({
         shouldRecordCompletedBootstrapTurn: true,

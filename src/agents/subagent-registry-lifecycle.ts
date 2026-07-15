@@ -9,6 +9,13 @@ import type { cleanupBrowserSessionsForLifecycleEnd } from "../browser-lifecycle
 import type { callGateway as defaultCallGateway } from "../gateway/call.js";
 import { formatErrorMessage, readErrorName } from "../infra/errors.js";
 import { defaultRuntime } from "../runtime.js";
+import type {
+  AdmissionResult,
+  ScheduledEvent,
+  SchedulerDispatchResult,
+  SchedulerProducerKind,
+  SchedulerSettlement,
+} from "../scheduler/conversation-scheduler.js";
 import { emitSessionLifecycleEvent } from "../sessions/session-lifecycle-events.js";
 import { extractTextFromChatContent } from "../shared/chat-content.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
@@ -29,6 +36,7 @@ import {
 import { removeInternalSessionEffectsTranscript } from "./internal-session-effects.js";
 import type { SubagentAnnounceDeliveryResult } from "./subagent-announce-dispatch.js";
 import { type SubagentRunOutcome, withSubagentOutcomeTiming } from "./subagent-announce-output.js";
+import { resolveSubagentConversationRoute } from "./subagent-conversation-route.js";
 import {
   clearDeliveryState,
   ensureCompletionState,
@@ -183,6 +191,9 @@ export function createSubagentRegistryLifecycleController(params: {
   captureSubagentCompletionReply: CaptureSubagentCompletionReply;
   cleanupBrowserSessionsForLifecycleEnd?: typeof cleanupBrowserSessionsForLifecycleEnd;
   runSubagentAnnounceFlow: RunSubagentAnnounceFlow;
+  admitScheduledEvent(event: ScheduledEvent): Promise<AdmissionResult>;
+  retryScheduledReceipt(receiptId: string): Promise<void>;
+  cancelScheduledReceipt(receiptId: string): Promise<boolean>;
   warn(message: string, meta?: Record<string, unknown>): void;
 }) {
   const scheduledResumeTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -262,7 +273,11 @@ export function createSubagentRegistryLifecycleController(params: {
 
   const formatAnnounceDeliveryError = (delivery: SubagentAnnounceDeliveryResult): string => {
     const errors = [
-      delivery.error,
+      delivery.status === "failed" ||
+      delivery.status === "terminal_failure" ||
+      delivery.status === "unresolved"
+        ? delivery.error
+        : undefined,
       ...(delivery.phases ?? []).map((phase) =>
         phase.error ? `${phase.phase}: ${phase.error}` : undefined,
       ),
@@ -282,12 +297,64 @@ export function createSubagentRegistryLifecycleController(params: {
     if (typeof delivery.enqueuedAt === "number") {
       deliveryState.enqueuedAt ??= delivery.enqueuedAt;
     }
-    if (delivery.delivered) {
+    if (delivery.status === "delivered") {
       const deliveredAt =
         typeof delivery.deliveredAt === "number" ? delivery.deliveredAt : Date.now();
       deliveryState.deliveredAt = deliveredAt;
       deliveryState.lastDropReason = undefined;
     }
+  };
+
+  const resolveCompletionProducerKind = (entry: SubagentRunRecord): SchedulerProducerKind => {
+    if (entry.endedReason === SUBAGENT_ENDED_REASON_KILLED) {
+      return "subagent_interruption";
+    }
+    if (entry.outcome?.status === "timeout") {
+      return "subagent_timeout";
+    }
+    if (entry.outcome?.status === "error") {
+      return "subagent_failure";
+    }
+    return "subagent_completion";
+  };
+
+  const admitCompletionBeforeControllerWake = async (entry: SubagentRunRecord): Promise<string> => {
+    entry.controllerRoute ??= resolveSubagentConversationRoute({
+      sessionKey: entry.controllerSessionKey ?? entry.requesterSessionKey,
+      origin: entry.requesterOrigin,
+      internal: (entry.controllerSessionKey ?? entry.requesterSessionKey).includes(":subagent:"),
+    });
+    entry.rootSourceRoute ??= resolveSubagentConversationRoute({
+      sessionKey: entry.requesterSessionKey,
+      origin: entry.requesterOrigin,
+    });
+    entry.completionEventId ??= `subagent:${entry.taskRunId ?? entry.runId}:completion`;
+    params.persist();
+    const admitted = await params.admitScheduledEvent({
+      id: entry.completionEventId,
+      route: entry.controllerRoute,
+      producerKind: resolveCompletionProducerKind(entry),
+      createdAt: entry.endedAt ?? Date.now(),
+      human: false,
+      media: false,
+      payload: {
+        taskRunId: entry.taskRunId ?? entry.runId,
+        childSessionKey: entry.childSessionKey,
+        controllerSessionKey: entry.controllerSessionKey ?? entry.requesterSessionKey,
+        rootSourceSessionKey: entry.rootSourceRoute?.sessionKey ?? entry.requesterSessionKey,
+        task: entry.task,
+        outcome: entry.outcome ?? null,
+        resultText: ensureCompletionState(entry).resultText ?? null,
+        attachmentsDir: entry.attachmentsDir ?? null,
+      },
+    });
+    if (!admitted.accepted) {
+      throw new Error(`subagent completion scheduler admission failed: ${admitted.reason}`);
+    }
+    entry.schedulerReceiptId = admitted.receiptId;
+    entry.completionAdmittedAt = admitted.durableAt;
+    params.persist();
+    return admitted.receiptId;
   };
 
   const hasPriorRequesterDeliveryMirror = async (entry: SubagentRunRecord): Promise<boolean> => {
@@ -493,12 +560,7 @@ export function createSubagentRegistryLifecycleController(params: {
     } catch {
       resultText = null;
     }
-    const liveEntry = params.runs.get(entry.runId);
-    if (
-      entry.pauseReason === "sessions_yield" ||
-      liveEntry?.pauseReason === "sessions_yield" ||
-      newerGenerationOwnsSession(entry)
-    ) {
+    if (newerGenerationOwnsSession(entry)) {
       return false;
     }
     const completion = ensureCompletionState(entry);
@@ -707,6 +769,15 @@ export function createSubagentRegistryLifecycleController(params: {
     entry.endedReason === SUBAGENT_ENDED_REASON_COMPLETE &&
     entry.outcome?.status === "ok";
 
+  const cancelDeleteReceiptBeforeCleanup = async (entry: SubagentRunRecord): Promise<void> => {
+    if (entry.cleanup !== "delete" || !entry.schedulerReceiptId) {
+      return;
+    }
+    if (!(await params.cancelScheduledReceipt(entry.schedulerReceiptId))) {
+      throw new Error(`failed to cancel subagent scheduler receipt for ${entry.runId}`);
+    }
+  };
+
   const finalizeResumedAnnounceGiveUp = async (giveUpParams: {
     runId: string;
     entry: SubagentRunRecord;
@@ -741,6 +812,7 @@ export function createSubagentRegistryLifecycleController(params: {
     completion.fallbackCapturedAt = undefined;
     const shouldDeleteAttachments =
       giveUpParams.entry.cleanup === "delete" || !giveUpParams.entry.retainAttachmentsOnKeep;
+    await cancelDeleteReceiptBeforeCleanup(giveUpParams.entry);
     if (shouldDeleteAttachments) {
       await safeRemoveAttachmentsDir(giveUpParams.entry);
     }
@@ -780,7 +852,6 @@ export function createSubagentRegistryLifecycleController(params: {
   ): boolean =>
     params.runs.get(runId) === entry &&
     entry.cleanupHandled === true &&
-    entry.pauseReason !== "sessions_yield" &&
     cleanupGenerations.get(entry) === generation &&
     !newerGenerationOwnsSession(entry);
 
@@ -807,10 +878,7 @@ export function createSubagentRegistryLifecycleController(params: {
     runId: string,
     entry: SubagentRunRecord,
     generation: number,
-  ): boolean =>
-    params.runs.get(runId) === entry &&
-    entry.pauseReason !== "sessions_yield" &&
-    terminalGenerations.get(entry) === generation;
+  ): boolean => params.runs.get(runId) === entry && terminalGenerations.get(entry) === generation;
 
   const isEndedHookOwnerCurrent = (runId: string, entry: SubagentRunRecord): boolean => {
     const current = params.runs.get(runId);
@@ -960,6 +1028,7 @@ export function createSubagentRegistryLifecycleController(params: {
       skipAnnounce?: boolean;
       skipDeliveryStatus?: boolean;
       skipRequesterDelivery?: boolean;
+      deferDeleteUntilReceiptTerminal?: boolean;
     },
   ) => {
     const entry = params.runs.get(runId);
@@ -1031,8 +1100,14 @@ export function createSubagentRegistryLifecycleController(params: {
       const completion = ensureCompletionState(entry);
       completion.fallbackResultText = undefined;
       completion.fallbackCapturedAt = undefined;
+      if (cleanup === "delete" && options?.deferDeleteUntilReceiptTerminal) {
+        entry.cleanupHandled = false;
+        params.persist();
+        return;
+      }
       const completionReason = resolveCleanupCompletionReason(entry);
       const shouldDeleteAttachments = cleanup === "delete" || !entry.retainAttachmentsOnKeep;
+      await cancelDeleteReceiptBeforeCleanup(entry);
       if (shouldDeleteAttachments) {
         await safeRemoveAttachmentsDir(entry);
       }
@@ -1149,6 +1224,293 @@ export function createSubagentRegistryLifecycleController(params: {
     scheduleResumeSubagentRun(runId, entry, deferredDecision.resumeDelayMs);
   };
 
+  const runScheduledControllerHandoff = async (
+    runId: string,
+    entry: SubagentRunRecord,
+    recordRunCorrelationId?: (runId: string) => void,
+  ): Promise<SchedulerDispatchResult> => {
+    if (entry.expectsCompletionMessage === false || entry.suppressCompletionDelivery === true) {
+      if (!beginSubagentCleanup(runId)) {
+        throw new Error(`subagent completion cleanup is already active for ${runId}`);
+      }
+      const cleanupGeneration = cleanupGenerations.get(entry)!;
+      await finalizeSubagentCleanup(runId, entry.cleanup, true, cleanupGeneration, {
+        skipAnnounce: true,
+        skipDeliveryStatus: true,
+        skipRequesterDelivery: entry.suppressCompletionDelivery === true,
+      });
+      return {
+        outcome: "completed",
+        transcriptEvidence: `controller:${entry.requesterSessionKey}:delivery-not-required`,
+        runCorrelationId: entry.runId,
+      };
+    }
+    if (!beginSubagentCleanup(runId)) {
+      if (
+        entry.cleanupCompletedAt ||
+        entry.delivery?.status === "delivered" ||
+        typeof entry.delivery?.announcedAt === "number"
+      ) {
+        return {
+          outcome: "completed",
+          transcriptEvidence:
+            entry.controllerTranscriptEvidence ?? `controller:${entry.requesterSessionKey}`,
+          runCorrelationId: entry.runId,
+        };
+      }
+      throw new Error(`subagent completion cleanup is already active for ${runId}`);
+    }
+    const cleanup = entry.cleanup;
+    const cleanupGeneration = cleanupGenerations.get(entry)!;
+    const pendingPayload = loadPendingFinalDeliveryPayload(entry);
+    const requesterOrigin = normalizeDeliveryContext(pendingPayload.requesterOrigin);
+    let latestDeliveryError = getDeliveryLastError(entry);
+    let pendingHandoff: Extract<SubagentAnnounceDeliveryResult, { status: "pending" }> | undefined;
+    const finalizeAnnounceCleanup = async (
+      didAnnounce: boolean,
+    ): Promise<{ delivered: boolean; deferredForDescendants: boolean }> => {
+      if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
+        await retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
+        return { delivered: false, deferredForDescendants: false };
+      }
+      const shouldCreditPriorDelivery =
+        !didAnnounce && (await hasPriorRequesterDeliveryMirror(entry));
+      if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
+        await retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
+        return { delivered: false, deferredForDescendants: false };
+      }
+      if (shouldCreditPriorDelivery) {
+        latestDeliveryError = undefined;
+      }
+      if (!didAnnounce && latestDeliveryError) {
+        ensureDeliveryState(entry).lastError = latestDeliveryError;
+      }
+      const delivered = didAnnounce || shouldCreditPriorDelivery;
+      await finalizeSubagentCleanup(runId, cleanup, delivered, cleanupGeneration, {
+        deferDeleteUntilReceiptTerminal:
+          delivered && cleanup === "delete" && Boolean(entry.schedulerReceiptId),
+      });
+      return {
+        delivered,
+        deferredForDescendants: !delivered && entry.wakeOnDescendantSettle === true,
+      };
+    };
+
+    let didAnnounce = false;
+    try {
+      didAnnounce = await params.runSubagentAnnounceFlow({
+        childSessionKey: pendingPayload.childSessionKey,
+        childRunId: pendingPayload.childRunId,
+        requesterSessionKey: pendingPayload.requesterSessionKey,
+        requesterOrigin,
+        requesterDisplayKey: pendingPayload.requesterDisplayKey,
+        task: pendingPayload.task,
+        timeoutMs: params.subagentAnnounceTimeoutMs,
+        cleanup,
+        roundOneReply: pendingPayload.frozenResultText ?? undefined,
+        fallbackReply: pendingPayload.fallbackFrozenResultText ?? undefined,
+        waitForCompletion: false,
+        startedAt: pendingPayload.startedAt,
+        endedAt: pendingPayload.endedAt,
+        label: pendingPayload.label,
+        outcome: pendingPayload.outcome,
+        spawnMode: pendingPayload.spawnMode,
+        expectsCompletionMessage: pendingPayload.expectsCompletionMessage,
+        wakeOnDescendantSettle: pendingPayload.wakeOnDescendantSettle === true,
+        recordRunCorrelationId,
+        onBeforeDeleteChildSession:
+          cleanup === "delete"
+            ? () => {
+                if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
+                  return false;
+                }
+                entry.deleteCleanupDispatchedAt ??= Date.now();
+                params.persist();
+                return true;
+              }
+            : undefined,
+        onDeliveryResult: (delivery) => {
+          if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
+            void retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
+            return;
+          }
+          recordAnnounceDeliveryResult(entry, delivery);
+          if (delivery.status === "delivered") {
+            entry.controllerTranscriptEvidence = `${delivery.path}:${
+              delivery.deliveredAt ?? delivery.enqueuedAt ?? Date.now()
+            }`;
+            const deliveryState = ensureDeliveryState(entry);
+            if (deliveryState.lastError !== undefined) {
+              deliveryState.lastError = undefined;
+              params.persist();
+            }
+            latestDeliveryError = undefined;
+            return;
+          }
+          if (delivery.status === "pending") {
+            pendingHandoff = delivery;
+            latestDeliveryError = undefined;
+            params.persist();
+            return;
+          }
+          if (delivery.path === "none") {
+            ensureDeliveryState(entry).lastDropReason = "sink_unavailable";
+          }
+          latestDeliveryError = formatAnnounceDeliveryError(delivery);
+          if (ensureDeliveryState(entry).lastError !== latestDeliveryError) {
+            ensureDeliveryState(entry).lastError = latestDeliveryError;
+            params.persist();
+          }
+        },
+      });
+    } catch (error) {
+      latestDeliveryError = formatErrorMessage(error);
+      defaultRuntime.log(
+        `[warn] Subagent announce flow failed during cleanup for run ${runId}: ${String(error)}`,
+      );
+    }
+    if (pendingHandoff) {
+      // The scheduler owns this accepted controller run until transcript-backed
+      // reconciliation settles it. Release only the local cleanup lease here.
+      entry.cleanupHandled = false;
+      params.persist();
+      return {
+        outcome: "pending",
+        runCorrelationId: pendingHandoff.runCorrelationId,
+      };
+    }
+    const cleanupResult = await finalizeAnnounceCleanup(didAnnounce);
+    if (cleanupResult.deferredForDescendants) {
+      return {
+        outcome: "deferred",
+        reason: { kind: "pending_descendants", runId: entry.runId },
+        runCorrelationId: entry.runId,
+      };
+    }
+    return cleanupResult.delivered
+      ? {
+          outcome: "completed",
+          transcriptEvidence:
+            entry.controllerTranscriptEvidence ?? `controller:${entry.requesterSessionKey}`,
+          runCorrelationId: entry.runId,
+        }
+      : {
+          outcome: "failed",
+          failure: { kind: "controller_delivery_failed", runId: entry.runId },
+          transcriptEvidence: entry.controllerTranscriptEvidence,
+          runCorrelationId: entry.runId,
+        };
+  };
+
+  const dispatchScheduledCompletion = async (
+    batch: import("../scheduler/conversation-scheduler.js").SchedulerDispatchBatch,
+  ): Promise<SchedulerDispatchResult> => {
+    const results: SchedulerDispatchResult[] = [];
+    for (const event of batch.events) {
+      const payload = event.payload;
+      const taskRunId =
+        payload && !Array.isArray(payload) && typeof payload === "object"
+          ? payload.taskRunId
+          : undefined;
+      if (typeof taskRunId !== "string" || !taskRunId.trim()) {
+        throw new Error(`subagent completion event ${event.id} is missing taskRunId`);
+      }
+      const runEntry = Array.from(params.runs.entries()).find(
+        ([runId, candidate]) => runId === taskRunId || candidate.taskRunId === taskRunId,
+      );
+      if (!runEntry) {
+        throw new Error(`subagent completion event ${event.id} has no durable task run`);
+      }
+      const [runId, entry] = runEntry;
+      if (entry.completionEventId && entry.completionEventId !== event.id) {
+        throw new Error(`subagent completion event ${event.id} does not own task run ${taskRunId}`);
+      }
+      results.push(await runScheduledControllerHandoff(runId, entry, batch.recordRunCorrelationId));
+    }
+    const failed = results.find((result) => result.outcome === "failed");
+    if (failed) {
+      return failed;
+    }
+    const pending = results.find((result) => result.outcome === "pending");
+    if (pending) {
+      return pending;
+    }
+    const deferred = results.find((result) => result.outcome === "deferred");
+    if (deferred) {
+      return deferred;
+    }
+    if (results.length === 1) {
+      return results[0]!;
+    }
+    return {
+      outcome: "completed",
+      transcriptEvidence: results
+        .map((result) =>
+          result.outcome === "pending" || result.outcome === "deferred"
+            ? undefined
+            : result.transcriptEvidence,
+        )
+        .filter((value): value is string => Boolean(value))
+        .join(","),
+      runCorrelationId: batch.attemptId,
+    };
+  };
+
+  const settleScheduledCompletion = async (settlement: SchedulerSettlement): Promise<void> => {
+    const payload = settlement.event.payload;
+    const taskRunId =
+      payload && !Array.isArray(payload) && typeof payload === "object"
+        ? payload.taskRunId
+        : undefined;
+    if (typeof taskRunId !== "string" || !taskRunId.trim()) {
+      throw new Error(`subagent completion event ${settlement.event.id} is missing taskRunId`);
+    }
+    const runEntry = Array.from(params.runs.entries()).find(
+      ([runId, candidate]) => runId === taskRunId || candidate.taskRunId === taskRunId,
+    );
+    if (!runEntry) {
+      return;
+    }
+    const [runId, entry] = runEntry;
+    if (entry.completionEventId && entry.completionEventId !== settlement.event.id) {
+      throw new Error(
+        `subagent completion event ${settlement.event.id} does not own task run ${taskRunId}`,
+      );
+    }
+    if (entry.cleanupCompletedAt) {
+      return;
+    }
+    entry.controllerTranscriptEvidence = settlement.transcriptEvidence;
+    const delivery = ensureDeliveryState(entry);
+    delivery.status = "delivered";
+    delivery.deliveredAt ??= Date.now();
+    delivery.lastError = undefined;
+    params.persist();
+    if (!beginSubagentCleanup(runId)) {
+      if (entry.cleanupCompletedAt) {
+        return;
+      }
+      throw new Error(`subagent completion cleanup is already active for ${runId}`);
+    }
+    const cleanupGeneration = cleanupGenerations.get(entry)!;
+    try {
+      await finalizeSubagentCleanup(runId, entry.cleanup, true, cleanupGeneration, {
+        skipAnnounce: true,
+      });
+    } catch (error) {
+      const current = params.runs.get(runId);
+      if (
+        current &&
+        !current.cleanupCompletedAt &&
+        isCleanupAttemptCurrent(runId, entry, cleanupGeneration)
+      ) {
+        current.cleanupHandled = false;
+        params.persist();
+      }
+      throw error;
+    }
+  };
+
   const startSubagentAnnounceCleanupFlow = (runId: string, entry: SubagentRunRecord): boolean => {
     if (entry.killReconciliation) {
       // Restores and unrelated cleanup retries must not publish a provisional
@@ -1178,11 +1540,27 @@ export function createSubagentRegistryLifecycleController(params: {
       });
       return true;
     }
+    const skipRequesterDelivery = entry.suppressCompletionDelivery === true;
+    if (entry.expectsCompletionMessage !== false && !skipRequesterDelivery) {
+      if (!entry.schedulerReceiptId) {
+        void admitCompletionBeforeControllerWake(entry).catch((error: unknown) => {
+          defaultRuntime.log(
+            `[warn] Subagent completion admission failed during cleanup for run ${runId}: ${String(error)}`,
+          );
+        });
+      } else {
+        void params.retryScheduledReceipt(entry.schedulerReceiptId).catch((error: unknown) => {
+          defaultRuntime.log(
+            `[warn] Subagent completion scheduler retry failed for run ${runId}: ${String(error)}`,
+          );
+        });
+      }
+      return true;
+    }
     if (!beginSubagentCleanup(runId)) {
       return false;
     }
     const cleanupGeneration = cleanupGenerations.get(entry)!;
-    const skipRequesterDelivery = entry.suppressCompletionDelivery === true;
     if (entry.expectsCompletionMessage === false || skipRequesterDelivery) {
       void (async () => {
         // This driver is detached. Yield once so synchronous successor
@@ -1233,113 +1611,6 @@ export function createSubagentRegistryLifecycleController(params: {
       });
       return true;
     }
-    const pendingPayload = loadPendingFinalDeliveryPayload(entry);
-    const requesterOrigin = normalizeDeliveryContext(pendingPayload.requesterOrigin);
-    let latestDeliveryError = getDeliveryLastError(entry);
-    const finalizeAnnounceCleanup = async (didAnnounce: boolean) => {
-      if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
-        await retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
-        return;
-      }
-      const shouldCreditPriorDelivery =
-        !didAnnounce && (await hasPriorRequesterDeliveryMirror(entry));
-      if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
-        await retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
-        return;
-      }
-      if (shouldCreditPriorDelivery) {
-        latestDeliveryError = undefined;
-      }
-      if (!didAnnounce && latestDeliveryError) {
-        ensureDeliveryState(entry).lastError = latestDeliveryError;
-      }
-      void finalizeSubagentCleanup(
-        runId,
-        cleanup,
-        didAnnounce || shouldCreditPriorDelivery,
-        cleanupGeneration,
-      ).catch((err: unknown) => {
-        defaultRuntime.log(`[warn] subagent cleanup finalize failed (${runId}): ${String(err)}`);
-        const current = params.runs.get(runId);
-        if (
-          !current ||
-          current.cleanupCompletedAt ||
-          !isCleanupAttemptCurrent(runId, entry, cleanupGeneration)
-        ) {
-          return;
-        }
-        current.cleanupHandled = false;
-        params.persist();
-      });
-    };
-
-    void params
-      .runSubagentAnnounceFlow({
-        childSessionKey: pendingPayload.childSessionKey,
-        childRunId: pendingPayload.childRunId,
-        requesterSessionKey: pendingPayload.requesterSessionKey,
-        requesterOrigin,
-        requesterDisplayKey: pendingPayload.requesterDisplayKey,
-        task: pendingPayload.task,
-        timeoutMs: params.subagentAnnounceTimeoutMs,
-        cleanup,
-        roundOneReply: pendingPayload.frozenResultText ?? undefined,
-        fallbackReply: pendingPayload.fallbackFrozenResultText ?? undefined,
-        waitForCompletion: false,
-        startedAt: pendingPayload.startedAt,
-        endedAt: pendingPayload.endedAt,
-        label: pendingPayload.label,
-        outcome: pendingPayload.outcome,
-        spawnMode: pendingPayload.spawnMode,
-        expectsCompletionMessage: pendingPayload.expectsCompletionMessage,
-        wakeOnDescendantSettle: pendingPayload.wakeOnDescendantSettle === true,
-        onBeforeDeleteChildSession:
-          cleanup === "delete"
-            ? () => {
-                if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
-                  return false;
-                }
-                // Announce owns delete submission; fence late yields at the
-                // exact handoff instead of when cleanup merely starts.
-                entry.deleteCleanupDispatchedAt ??= Date.now();
-                params.persist();
-                return true;
-              }
-            : undefined,
-        onDeliveryResult: (delivery) => {
-          if (!isCleanupAttemptCurrent(runId, entry, cleanupGeneration)) {
-            void retireSupersededCleanupIfNeeded(runId, entry, cleanupGeneration);
-            return;
-          }
-          recordAnnounceDeliveryResult(entry, delivery);
-          if (delivery.delivered) {
-            const deliveryState = ensureDeliveryState(entry);
-            if (deliveryState.lastError !== undefined) {
-              deliveryState.lastError = undefined;
-              params.persist();
-            }
-            latestDeliveryError = undefined;
-            return;
-          }
-          if (delivery.path === "none") {
-            ensureDeliveryState(entry).lastDropReason = "sink_unavailable";
-          }
-          latestDeliveryError = formatAnnounceDeliveryError(delivery);
-          if (ensureDeliveryState(entry).lastError !== latestDeliveryError) {
-            ensureDeliveryState(entry).lastError = latestDeliveryError;
-            params.persist();
-          }
-        },
-      })
-      .then((didAnnounce) => {
-        void finalizeAnnounceCleanup(didAnnounce);
-      })
-      .catch((error: unknown) => {
-        defaultRuntime.log(
-          `[warn] Subagent announce flow failed during cleanup for run ${runId}: ${String(error)}`,
-        );
-        void finalizeAnnounceCleanup(false);
-      });
     return true;
   };
 
@@ -1556,11 +1827,6 @@ export function createSubagentRegistryLifecycleController(params: {
         entry.endedReason = completionReason;
         mutated = true;
       }
-      if (entry.pauseReason !== undefined) {
-        entry.pauseReason = undefined;
-        mutated = true;
-      }
-
       if (completeParams.completionSnapshot) {
         const completion = ensureCompletionState(entry);
         if (
@@ -1840,6 +2106,13 @@ export function createSubagentRegistryLifecycleController(params: {
       return;
     }
 
+    if (entry.expectsCompletionMessage === true && !entry.schedulerReceiptId) {
+      await admitCompletionBeforeControllerWake(entry);
+      if (!isTerminalCallbackCurrent(completeParams.runId, entry, terminalGeneration)) {
+        return;
+      }
+    }
+
     startSubagentAnnounceCleanupFlow(completeParams.runId, entry);
   };
 
@@ -1847,6 +2120,8 @@ export function createSubagentRegistryLifecycleController(params: {
     clearScheduledResumeTimers,
     completeCleanupBookkeeping,
     completeSubagentRun,
+    dispatchScheduledCompletion,
+    settleScheduledCompletion,
     finalizeResumedAnnounceGiveUp,
     refreshFrozenResultFromSession,
     startSubagentAnnounceCleanupFlow,

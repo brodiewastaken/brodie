@@ -3292,9 +3292,6 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
             evt.resultClassification,
           );
         }
-        if (typeof evt.yieldDetected === "boolean") {
-          spanAttrs["openclaw.harness.yield_detected"] = evt.yieldDetected;
-        }
         if (evt.itemLifecycle) {
           spanAttrs["openclaw.harness.items.started"] = evt.itemLifecycle.startedCount;
           spanAttrs["openclaw.harness.items.completed"] = evt.itemLifecycle.completedCount;

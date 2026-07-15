@@ -1710,7 +1710,7 @@ describe("active-memory plugin", () => {
     expect(runParams.prompt).toContain("Configured memory tools: lcm_grep.");
   });
 
-  it("drops wildcard group and core tools from custom memory tools", async () => {
+  it("drops wildcard groups, core tools, and removed tools from custom memory tools", async () => {
     api.pluginConfig = {
       agents: ["main"],
       toolsAllow: [

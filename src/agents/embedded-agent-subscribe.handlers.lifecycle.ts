@@ -77,7 +77,6 @@ export function handleAgentEnd(
     (payload) => payload.mediaUrls ?? [],
   );
   const hasTerminalOutput = hasAttemptTerminalState({
-    yieldDetected: ctx.state.yielded,
     didSendDeterministicApprovalPrompt: ctx.state.deterministicApprovalPromptSent,
     heartbeatToolResponse: ctx.state.heartbeatToolResponse,
     lastToolError: ctx.state.lastToolError,
@@ -188,7 +187,6 @@ export function handleAgentEnd(
         : undefined;
     const terminalMeta = {
       ...(terminalStopReason ? { stopReason: terminalStopReason } : {}),
-      ...(ctx.state.yielded === true ? { yielded: true } : {}),
       ...(ctx.state.timeoutPhase ? { timeoutPhase: ctx.state.timeoutPhase } : {}),
       ...(typeof ctx.state.providerStarted === "boolean"
         ? { providerStarted: ctx.state.providerStarted }

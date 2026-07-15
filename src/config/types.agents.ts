@@ -141,6 +141,8 @@ export type AgentConfig = {
     model?: AgentModelConfig;
     /** Per-agent default thinking level for spawned sub-agents. */
     thinking?: string;
+    /** Per-agent default Fast policy for spawned sub-agents. */
+    fastMode?: boolean;
     /** Require explicit agentId in sessions_spawn (no default same-as-caller). */
     requireAgentId?: boolean;
   };

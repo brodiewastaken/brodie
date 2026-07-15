@@ -41,8 +41,6 @@ type MockBeforeToolCallHookResult =
 type ScopedToolsCall = {
   sessionKey?: string;
   sessionId?: string;
-  yieldContextCacheKey?: string;
-  onYield?: (message: string) => Promise<void> | void;
   accountId?: string;
   messageProvider?: string;
   currentChannelId?: string;
@@ -879,63 +877,29 @@ describe("mcp loopback server", () => {
     expect(call.inboundEventKind).toBeUndefined();
   });
 
-  it("routes sessions_yield to the current CLI capture", async () => {
-    resolveGatewayScopedToolsMock.mockImplementation((input): MockGatewayScopedTools => {
-      const call = input as ScopedToolsCall;
-      return {
-        agentId: "main",
-        tools: [
-          makeMockTool({
-            name: "sessions_yield",
-            execute: async (_toolCallId, args) => {
-              if (!call.sessionId) {
-                throw new Error("No session context");
-              }
-              if (!call.onYield) {
-                throw new Error("Yield not supported in this context");
-              }
-              const message = (args as { message?: string }).message ?? "Turn yielded.";
-              await call.onYield(message);
-              return {
-                content: [{ type: "text", text: JSON.stringify({ status: "yielded", message }) }],
-              };
-            },
-          }),
-        ],
-      };
-    });
+  it("does not propagate legacy CLI yield callbacks into loopback tool scope", async () => {
     const { runtime } = await startLoopbackServerForTest();
-    const firstYield = vi.fn();
-    const secondYield = vi.fn();
-    const sendYield = async (
-      captureKey: string,
-      message: string,
-      onYield: (message: string) => void,
-    ) => {
-      beginMcpLoopbackToolCallCapture({
-        captureKey,
-        onYield,
-        onToolCallResult: vi.fn(),
-      });
-      return await sendLoopbackToolCall({
-        token: runtime.ownerToken,
-        name: "sessions_yield",
-        args: { message },
-        headers: {
-          "x-session-key": "agent:main:main",
-          "x-openclaw-session-id": "session-reused",
-          "x-openclaw-cli-capture-key": captureKey,
-        },
-      });
+    const captureKey = "legacy-yield-capture";
+    const legacyCapture = {
+      captureKey,
+      onYield: vi.fn(),
+      onToolCallResult: vi.fn(),
     };
+    beginMcpLoopbackToolCallCapture(legacyCapture);
 
-    const captureKey = "capture-reused";
-    expect((await sendYield(captureKey, "first yield", firstYield)).status).toBe(200);
-    expect((await sendYield(captureKey, "second yield", secondYield)).status).toBe(200);
+    const response = await sendLoopbackToolsList({
+      token: runtime.ownerToken,
+      headers: {
+        "x-session-key": "agent:main:main",
+        "x-openclaw-session-id": "session-reused",
+        "x-openclaw-cli-capture-key": captureKey,
+      },
+    });
 
-    expect(firstYield).toHaveBeenCalledWith("first yield");
-    expect(secondYield).toHaveBeenCalledWith("second yield");
-    expect(resolveGatewayScopedToolsMock).toHaveBeenCalledTimes(2);
+    expect(response.status).toBe(200);
+    expect(getScopedToolsCall(0)).not.toHaveProperty("onYield");
+    expect(getScopedToolsCall(0)).not.toHaveProperty("yieldContextCacheKey");
+    expect(legacyCapture.onYield).not.toHaveBeenCalled();
   });
 
   it("keeps loopback tool cache entries separate by inbound event, delivery, audio, and target policy", async () => {

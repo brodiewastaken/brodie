@@ -164,13 +164,7 @@ export function requiresCompletionRequiredAsyncTaskWait(params: {
 export function shouldWaitForCompletionRequiredAsyncTasks(params: {
   sessionKey: string | undefined;
   toolMetas: readonly AsyncStartedToolMeta[];
-  yieldDetected?: boolean;
 }): boolean {
-  if (params.yieldDetected === true) {
-    // sessions_yield pauses the turn so the completion event can wake it later;
-    // waiting here would reuse the internal abort signal and turn the pause into AbortError.
-    return false;
-  }
   return requiresCompletionRequiredAsyncTaskWait({
     sessionKey: params.sessionKey,
     toolMetas: params.toolMetas,

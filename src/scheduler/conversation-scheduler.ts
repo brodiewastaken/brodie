@@ -110,9 +110,10 @@ export interface ConversationScheduler {
     result: Exclude<SchedulerDispatchResult, { outcome: "pending" }>,
   ): Promise<boolean>;
   noteTyping(route: ConversationRoute): Promise<boolean>;
+  cancelReceipt(receiptId: string): Promise<boolean>;
   stopSession(route: ConversationRoute, options: { descendants: boolean }): Promise<void>;
   snapshot(route?: ConversationRoute): Promise<SchedulerSnapshot>;
-  retryFailed(route: ConversationRoute): Promise<void>;
+  retryReceipt(receiptId: string): Promise<void>;
 }
 
 export type SchedulerDispatchBatch = {
@@ -139,6 +140,11 @@ export type SchedulerDispatchBatch = {
 export type SchedulerDispatchResult =
   | {
       outcome: "pending";
+      runCorrelationId: string;
+    }
+  | {
+      outcome: "deferred";
+      reason: JsonValue;
       runCorrelationId: string;
     }
   | {
@@ -186,6 +192,7 @@ type SchedulerOptions = {
   now?: () => number;
   resolveDebounceMs?: (event: ScheduledEvent) => number;
   shouldDispatch?: (event: ScheduledEvent) => boolean;
+  resolveDurableRoute?: (event: ScheduledEvent) => ConversationRoute | undefined;
   dispatch?: (batch: SchedulerDispatchBatch) => Promise<SchedulerDispatchResult>;
   reconcileInterruptedAttempt?: (
     attempt: SchedulerInterruptedAttempt,
@@ -232,6 +239,7 @@ const SUCCESS_OUTCOMES = new Set<SchedulerDispatchResult["outcome"]>([
 ]);
 const DEFAULT_RECONCILE_INTERVAL_MS = 1_000;
 const DISPATCH_PENDING_FAILURE_JSON = JSON.stringify({ kind: "dispatch_pending" });
+const DISPATCH_DEFERRED_KIND = "dispatch_deferred";
 const RECEIPT_LOCAL_PRODUCER_KINDS = new Set<SchedulerProducerKind>([
   "subagent_completion",
   "subagent_interruption",
@@ -317,6 +325,41 @@ function schedulerDatabase(db: DatabaseSync) {
 
 function affectedRows(result: { numAffectedRows?: bigint }): number {
   return Number(result.numAffectedRows ?? 0n);
+}
+
+function isDeferredFailureJson(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return (
+      Boolean(parsed) &&
+      !Array.isArray(parsed) &&
+      typeof parsed === "object" &&
+      (parsed as { kind?: unknown }).kind === DISPATCH_DEFERRED_KIND
+    );
+  } catch {
+    return false;
+  }
+}
+
+function resolveStoredDispatchResult(
+  result: Exclude<SchedulerDispatchResult, { outcome: "pending" }>,
+): { state: "pending" | "delivered" | "failed"; failure: string | null } {
+  if (result.outcome === "deferred") {
+    return {
+      state: "pending",
+      failure: JSON.stringify({
+        kind: DISPATCH_DEFERRED_KIND,
+        reason: normalizeJson(result.reason),
+      }),
+    };
+  }
+  return {
+    state: SUCCESS_OUTCOMES.has(result.outcome) ? "delivered" : "failed",
+    failure: "failure" in result ? JSON.stringify(normalizeJson(result.failure)) : null,
+  };
 }
 
 function queryCapacity(db: DatabaseSync): { rows: number; bytes: number } {
@@ -685,9 +728,7 @@ class SqliteConversationScheduler implements ConversationScheduler {
             return { settled: false, releasedActiveLane: false };
           }
           const now = this.options.now?.() ?? Date.now();
-          const state = SUCCESS_OUTCOMES.has(result.outcome) ? "delivered" : "failed";
-          const failure =
-            "failure" in result ? JSON.stringify(normalizeJson(result.failure)) : null;
+          const { state, failure } = resolveStoredDispatchResult(result);
           const update = executeSqliteQuerySync(
             db,
             kysely
@@ -695,7 +736,8 @@ class SqliteConversationScheduler implements ConversationScheduler {
               .set({
                 state,
                 run_correlation_id: result.runCorrelationId ?? null,
-                transcript_evidence: result.transcriptEvidence ?? null,
+                transcript_evidence:
+                  "transcriptEvidence" in result ? (result.transcriptEvidence ?? null) : null,
                 failure_json: failure,
                 callback_state: state === "delivered" ? "pending" : "settled",
                 revision: sql`revision + 1`,
@@ -735,6 +777,89 @@ class SqliteConversationScheduler implements ConversationScheduler {
     }
     await this.retryPendingCallbacks();
     return true;
+  }
+
+  async cancelReceipt(receiptId: string): Promise<boolean> {
+    const normalizedReceiptId = receiptId.trim();
+    if (!normalizedReceiptId) {
+      return false;
+    }
+    let laneKey: string | undefined;
+    try {
+      const { db } = openOpenClawStateDatabase(this.options.database);
+      laneKey = executeSqliteQueryTakeFirstSync(
+        db,
+        schedulerDatabase(db)
+          .selectFrom("conversation_scheduler_events")
+          .select("lane_key")
+          .where("receipt_id", "=", normalizedReceiptId),
+      )?.lane_key;
+    } catch (error) {
+      this.noteStorageError(error);
+      return false;
+    }
+    if (!laneKey) {
+      return false;
+    }
+    let releasedActiveLane = false;
+    const cancelled = await this.coordinator.run(laneKey, () => {
+      try {
+        return runOpenClawStateWriteTransaction(({ db }) => {
+          const now = this.options.now?.() ?? Date.now();
+          const kysely = schedulerDatabase(db);
+          const row = executeSqliteQueryTakeFirstSync(
+            db,
+            kysely
+              .selectFrom("conversation_scheduler_events")
+              .select(["event_id", "state"])
+              .where("receipt_id", "=", normalizedReceiptId),
+          );
+          if (!row) {
+            return false;
+          }
+          if (row.state === "delivered" || row.state === "cancelled") {
+            return true;
+          }
+          if (ACTIVE_STATES.includes(row.state as (typeof ACTIVE_STATES)[number])) {
+            return false;
+          }
+          const updated = executeSqliteQuerySync(
+            db,
+            kysely
+              .updateTable("conversation_scheduler_events")
+              .set({
+                state: "cancelled",
+                callback_state: "settled",
+                revision: sql`revision + 1`,
+                updated_at: now,
+              })
+              .where("receipt_id", "=", normalizedReceiptId)
+              .where("state", "in", ["pending", "failed", "storage_error"]),
+          );
+          if (affectedRows(updated) !== 1) {
+            return false;
+          }
+          const released = executeSqliteQuerySync(
+            db,
+            kysely
+              .updateTable("conversation_scheduler_lanes")
+              .set({ active_event_id: null, revision: sql`revision + 1`, updated_at: now })
+              .where("lane_key", "=", laneKey)
+              .where("active_event_id", "=", row.event_id),
+          );
+          releasedActiveLane = affectedRows(released) === 1;
+          return true;
+        }, this.options.database);
+      } catch (error) {
+        this.noteStorageError(error);
+        return false;
+      }
+    });
+    if (releasedActiveLane) {
+      this.clearReconciliationTimer(laneKey);
+      this.signalLane(laneKey);
+    }
+    return cancelled;
   }
 
   async stopSession(route: ConversationRoute, options: { descendants: boolean }): Promise<void> {
@@ -828,34 +953,71 @@ class SqliteConversationScheduler implements ConversationScheduler {
     }
   }
 
-  async retryFailed(route: ConversationRoute): Promise<void> {
-    await this.coordinator.run(route.queueLaneKey, () => {
+  async retryReceipt(receiptId: string): Promise<void> {
+    const normalizedReceiptId = receiptId.trim();
+    if (!normalizedReceiptId) {
+      return;
+    }
+    let laneKey: string | undefined;
+    try {
+      const { db } = openOpenClawStateDatabase(this.options.database);
+      laneKey = executeSqliteQueryTakeFirstSync(
+        db,
+        schedulerDatabase(db)
+          .selectFrom("conversation_scheduler_events")
+          .select("lane_key")
+          .where("receipt_id", "=", normalizedReceiptId),
+      )?.lane_key;
+    } catch (error) {
+      this.noteStorageError(error);
+      throw error;
+    }
+    if (!laneKey) {
+      return;
+    }
+    let retried = false;
+    await this.coordinator.run(laneKey, () => {
       try {
         runOpenClawStateWriteTransaction(({ db }) => {
           const now = this.options.now?.() ?? Date.now();
-          executeSqliteQuerySync(
+          const kysely = schedulerDatabase(db);
+          const row = executeSqliteQueryTakeFirstSync(
             db,
-            schedulerDatabase(db)
+            kysely
+              .selectFrom("conversation_scheduler_events")
+              .select(["state", "failure_json"])
+              .where("receipt_id", "=", normalizedReceiptId),
+          );
+          const retryingDeferred =
+            row?.state === "pending" && isDeferredFailureJson(row.failure_json);
+          if (row?.state !== "failed" && !retryingDeferred) {
+            return;
+          }
+          const updated = executeSqliteQuerySync(
+            db,
+            kysely
               .updateTable("conversation_scheduler_events")
               .set({
                 state: "pending",
                 ready_at: now,
                 dispatch_attempt_id: null,
+                ...(retryingDeferred ? { failure_json: null } : {}),
                 revision: sql`revision + 1`,
                 updated_at: now,
               })
-              .where("lane_key", "=", route.queueLaneKey)
-              .where("state", "=", "failed"),
+              .where("receipt_id", "=", normalizedReceiptId)
+              .where("state", "=", row.state),
           );
+          retried = affectedRows(updated) === 1;
         }, this.options.database);
         this.storageHealthy = true;
       } catch (error) {
-        this.noteStorageError(error, route);
+        this.noteStorageError(error);
         throw error;
       }
     });
-    if (this.options.dispatch) {
-      await this.pumpLane(route.queueLaneKey);
+    if (retried && this.options.dispatch) {
+      await this.pumpLane(laneKey);
     }
   }
 
@@ -1221,8 +1383,7 @@ class SqliteConversationScheduler implements ConversationScheduler {
       runOpenClawStateWriteTransaction(({ db }) => {
         const now = this.options.now?.() ?? Date.now();
         const kysely = schedulerDatabase(db);
-        const state = SUCCESS_OUTCOMES.has(result.outcome) ? "delivered" : "failed";
-        const failure = "failure" in result ? JSON.stringify(normalizeJson(result.failure)) : null;
+        const { state, failure } = resolveStoredDispatchResult(result);
         const update = executeSqliteQuerySync(
           db,
           kysely
@@ -1230,7 +1391,8 @@ class SqliteConversationScheduler implements ConversationScheduler {
             .set({
               state,
               run_correlation_id: result.runCorrelationId ?? null,
-              transcript_evidence: result.transcriptEvidence ?? null,
+              transcript_evidence:
+                "transcriptEvidence" in result ? (result.transcriptEvidence ?? null) : null,
               failure_json: failure,
               callback_state: state === "delivered" ? "pending" : "settled",
               revision: sql`revision + 1`,
@@ -1555,11 +1717,107 @@ class SqliteConversationScheduler implements ConversationScheduler {
   }
 
   private shouldDispatchRow(row: EventRow): boolean {
+    if (row.state === "pending" && isDeferredFailureJson(row.failure_json)) {
+      return false;
+    }
     return this.options.shouldDispatch?.(rowToEvent(row)) ?? true;
+  }
+
+  private migrateDurableRoutes(): void {
+    if (!this.options.resolveDurableRoute) {
+      return;
+    }
+    runOpenClawStateWriteTransaction(({ db }) => {
+      const kysely = schedulerDatabase(db);
+      const rows = executeSqliteQuerySync(
+        db,
+        kysely
+          .selectFrom("conversation_scheduler_events")
+          .selectAll()
+          .where("state", "not in", ["delivered", "cancelled"])
+          .orderBy("sequence"),
+      ).rows as EventRow[];
+      const now = this.options.now?.() ?? Date.now();
+      for (const row of rows) {
+        const route = this.options.resolveDurableRoute?.(rowToEvent(row));
+        if (!route || isDeepStrictEqual(route, JSON.parse(row.route_json))) {
+          continue;
+        }
+        if (!route.queueLaneKey.trim() || !route.sessionKey.trim()) {
+          throw new Error("durable scheduler route migration produced an invalid route");
+        }
+        const sourceLane = executeSqliteQueryTakeFirstSync(
+          db,
+          kysely
+            .selectFrom("conversation_scheduler_lanes")
+            .select("active_event_id")
+            .where("lane_key", "=", row.lane_key),
+        );
+        const movingActiveReceipt = sourceLane?.active_event_id === row.event_id;
+        const destinationLane = executeSqliteQueryTakeFirstSync(
+          db,
+          kysely
+            .selectFrom("conversation_scheduler_lanes")
+            .select("active_event_id")
+            .where("lane_key", "=", route.queueLaneKey),
+        );
+        if (
+          movingActiveReceipt &&
+          destinationLane?.active_event_id &&
+          destinationLane.active_event_id !== row.event_id
+        ) {
+          throw new Error(
+            "durable scheduler route migration found two active receipts in one lane",
+          );
+        }
+        executeSqliteQuerySync(
+          db,
+          kysely
+            .insertInto("conversation_scheduler_lanes")
+            .values({
+              lane_key: route.queueLaneKey,
+              revision: 1,
+              ...(movingActiveReceipt ? { active_event_id: row.event_id } : {}),
+              updated_at: now,
+            })
+            .onConflict((conflict) =>
+              conflict.column("lane_key").doUpdateSet({
+                ...(movingActiveReceipt ? { active_event_id: row.event_id } : {}),
+                revision: sql`conversation_scheduler_lanes.revision + 1`,
+                updated_at: now,
+              }),
+            ),
+        );
+        executeSqliteQuerySync(
+          db,
+          kysely
+            .updateTable("conversation_scheduler_events")
+            .set({
+              lane_key: route.queueLaneKey,
+              session_key: route.sessionKey,
+              route_json: JSON.stringify(route),
+              revision: sql`revision + 1`,
+              updated_at: now,
+            })
+            .where("event_id", "=", row.event_id),
+        );
+        if (movingActiveReceipt && row.lane_key !== route.queueLaneKey) {
+          executeSqliteQuerySync(
+            db,
+            kysely
+              .updateTable("conversation_scheduler_lanes")
+              .set({ active_event_id: null, revision: sql`revision + 1`, updated_at: now })
+              .where("lane_key", "=", row.lane_key)
+              .where("active_event_id", "=", row.event_id),
+          );
+        }
+      }
+    }, this.options.database);
   }
 
   private async rehydrate(): Promise<void> {
     try {
+      this.migrateDurableRoutes();
       const { db } = openOpenClawStateDatabase(this.options.database);
       const activeRows = executeSqliteQuerySync(
         db,

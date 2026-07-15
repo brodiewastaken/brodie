@@ -162,7 +162,9 @@ test("sessions.reset aborts active runs and clears queues", async () => {
   expect(reset.ok).toBe(true);
   expect(reset.payload?.key).toBe("agent:main:main");
   expect(reset.payload?.entry.sessionId).not.toBe("sess-main");
-  expectActiveRunCleanup("agent:main:main", ["main", "agent:main:main", "sess-main"], "sess-main");
+  expectActiveRunCleanup("agent:main:main", ["main", "agent:main:main", "sess-main"], "sess-main", {
+    preserveDescendants: true,
+  });
   expect(peekSystemEvents("main")).toStrictEqual([]);
   expect(peekSystemEvents("agent:main:main")).toStrictEqual([]);
   expect(peekSystemEvents("sess-main")).toStrictEqual([]);
@@ -604,7 +606,7 @@ test("sessions.reset preserves a newer session after lifecycle rotation", async 
   expect(store["agent:main:main"]?.sessionId).toBe("new-owner-session");
 });
 
-test("sessions.reset closes child ACP runtime handles spawned from the parent", async () => {
+test("sessions.reset preserves child ACP runtime handles spawned from the parent", async () => {
   const { dir } = await createSessionStoreDir();
   await writeSingleLineSession(dir, "sess-main", "hello");
   installAcpRuntimeBackendWithFreshSession();
@@ -657,18 +659,18 @@ test("sessions.reset closes child ACP runtime handles spawned from the parent", 
   });
   expect(reset.ok).toBe(true);
 
-  // The parent and its spawned ACP child are both closed; without child cleanup
-  // the child's claude-agent-acp process is orphaned on parent reset (#68916).
+  // Reset rotates only the parent. Descendant work survives and may still
+  // complete into the replacement parent session.
   const closedKeys = (
     acpManagerMocks.closeSession.mock.calls as unknown as Array<[{ sessionKey?: string }]>
   ).map((call) => call[0]?.sessionKey);
   expect(closedKeys).toContain("agent:main:main");
-  expect(closedKeys).toContain("agent:main:acp-child-1");
+  expect(closedKeys).not.toContain("agent:main:acp-child-1");
   expect(closedKeys).not.toContain("agent:main:not-acp-child");
   expect(closedKeys).not.toContain("agent:main:unrelated-acp-child");
 });
 
-test("sessions.reset closes a spawned ACP child that lives in a different agent store", async () => {
+test("sessions.reset preserves a spawned ACP child in a different agent store", async () => {
   const stateDir = process.env.OPENCLAW_STATE_DIR;
   if (!stateDir) {
     throw new Error("OPENCLAW_STATE_DIR is required for gateway session tests");
@@ -729,15 +731,13 @@ test("sessions.reset closes a spawned ACP child that lives in a different agent 
   const reset = await directSessionReq<{ ok: true }>("sessions.reset", { key: "main" });
   expect(reset.ok).toBe(true);
 
-  // The child in the codex store is closed even though it is not in the main
-  // (parent) store — cleanup enumerates the combined cross-agent store.
   const closedKeys = (
     acpManagerMocks.closeSession.mock.calls as unknown as Array<[{ sessionKey?: string }]>
   ).map((call) => call[0]?.sessionKey);
-  expect(closedKeys).toContain("agent:codex:acp:cross-store-child");
+  expect(closedKeys).not.toContain("agent:codex:acp:cross-store-child");
 });
 
-test("sessions.reset closes child ACP runtimes concurrently so stuck children do not serialize cleanup", async () => {
+test("sessions.reset preserves ACP descendants across both lineage fields", async () => {
   const { dir } = await createSessionStoreDir();
   await writeSingleLineSession(dir, "sess-main", "hello");
   acpRuntimeMocks.getAcpRuntimeBackend.mockReturnValue({
@@ -765,8 +765,7 @@ test("sessions.reset closes child ACP runtimes concurrently so stuck children do
   await writeSessionStore({
     entries: {
       main: sessionStoreEntry("sess-main"),
-      // Mix the two real lineage fields: ACP spawns record `spawnedBy`,
-      // subagent spawns record `parentSessionKey`; both must be cleaned up.
+      // ACP spawns use `spawnedBy`; subagent spawns use `parentSessionKey`.
       "acp-child-1": sessionStoreEntry("sess-c1", {
         spawnedBy: "agent:main:main",
       }),
@@ -790,40 +789,13 @@ test("sessions.reset closes child ACP runtimes concurrently so stuck children do
     });
   }
 
-  // Parent cancel resolves immediately; child cancels hang until released. With
-  // sequential cleanup only the first child would dispatch; concurrent cleanup
-  // dispatches all three before any resolves.
-  const releaseChildren: Array<() => void> = [];
-  acpManagerMocks.cancelSession.mockImplementation(async (...args: unknown[]) => {
-    const req = args[0] as { sessionKey?: string } | undefined;
-    if (req?.sessionKey === "agent:main:main") {
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      releaseChildren.push(resolve);
-    });
-  });
+  const reset = await directSessionReq<{ ok: true }>("sessions.reset", { key: "main" });
+  expect(reset.ok).toBe(true);
 
-  try {
-    const resetPromise = directSessionReq<{ ok: true }>("sessions.reset", {
-      key: "main",
-    });
-
-    await vi.waitFor(() => {
-      const childCancels = (
-        acpManagerMocks.cancelSession.mock.calls as unknown as Array<[{ sessionKey?: string }]>
-      ).filter((call) => call[0]?.sessionKey?.startsWith("agent:main:acp-child"));
-      expect(childCancels.length).toBe(3);
-    });
-
-    for (const release of releaseChildren) {
-      release();
-    }
-    const reset = await resetPromise;
-    expect(reset.ok).toBe(true);
-  } finally {
-    acpManagerMocks.cancelSession.mockImplementation(async () => {});
-  }
+  const childCancels = (
+    acpManagerMocks.cancelSession.mock.calls as unknown as Array<[{ sessionKey?: string }]>
+  ).filter((call) => call[0]?.sessionKey?.startsWith("agent:main:acp-child"));
+  expect(childCancels).toEqual([]);
 });
 
 test("sessions.reset does not emit lifecycle events when key does not exist", async () => {

@@ -5,6 +5,7 @@
  * message routing, queue settings, hooks, and embedded-run state.
  */
 export { getRuntimeConfig } from "../config/config.js";
+export { getSubagentRunByChildSessionKey } from "./subagent-registry-read.js";
 export {
   loadSessionStore,
   resolveAgentIdFromSessionKey,

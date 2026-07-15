@@ -1272,62 +1272,16 @@ describe("runCopilotAttempt", () => {
         workspaceDir: "C:\\workspace",
       }),
     );
-    // F6: attempt params and sessionRef are threaded through so the
-    // bridge can build PI-parity tool context and wire onYield to the
-    // live SDK session once it exists. See tool-bridge.ts.
+    // F6: attempt params are threaded through so the bridge can build
+    // PI-parity tool context.
     const bridgeCall = (createToolBridge.mock.calls[0] as unknown[] | undefined)?.[0] as {
       attemptParams?: unknown;
-      sessionRef?: { current?: unknown };
     };
     expect(bridgeCall.attemptParams).toBeDefined();
-    expect(bridgeCall.sessionRef).toBeDefined();
     expect(
       ((sdk.createSession.mock.calls[0] as unknown[] | undefined)![0] as { tools?: unknown[] })
         .tools,
     ).toBe(sdkTools);
-  });
-
-  it("F6: sessionRef is populated after createSession so the tool bridge's onYield can abort the live SDK session", async () => {
-    const sdk = makeFakeSdk();
-    const pool = makeFakePool(sdk);
-    let capturedRef: { current: { abort?: () => unknown } | undefined } | undefined;
-    const createToolBridge = vi.fn(
-      async (input: { sessionRef?: { current: { abort?: () => unknown } | undefined } }) => {
-        capturedRef = input.sessionRef;
-        return { sdkTools: [], sourceTools: [] };
-      },
-    );
-
-    await runCopilotAttempt(makeParams(), { createToolBridge, pool });
-
-    expect(capturedRef).toBeDefined();
-    // After createSession resolves, attempt.ts binds the live session
-    // to sessionRef.current so onYield can route to session.abort().
-    expect(capturedRef?.current).toBeDefined();
-    expect(capturedRef?.current).toBe(sdk.sessions[0]);
-  });
-
-  it("F6: sessionRef is populated after a successful resumeSession (resume path)", async () => {
-    const sdk = makeFakeSdk();
-    const pool = makeFakePool(sdk);
-    let capturedRef: { current: { abort?: () => unknown } | undefined } | undefined;
-    const createToolBridge = vi.fn(
-      async (input: { sessionRef?: { current: { abort?: () => unknown } | undefined } }) => {
-        capturedRef = input.sessionRef;
-        return { sdkTools: [], sourceTools: [] };
-      },
-    );
-
-    await runCopilotAttempt(
-      makeParams({
-        initialReplayState: { sdkSessionId: "resume-target" } as never,
-      }),
-      { createToolBridge, pool },
-    );
-
-    expect(sdk.resumeSession).toHaveBeenCalledTimes(1);
-    expect(capturedRef?.current).toBeDefined();
-    expect(capturedRef?.current).toBe(sdk.sessions[0]);
   });
 
   it("F6: attemptParams carries the full input so the bridge can derive PI-parity tool context", async () => {
@@ -1351,33 +1305,9 @@ describe("runCopilotAttempt", () => {
     expect(capturedParams).toBe(params);
   });
 
-  it("F7: result.yieldDetected is true when the tool bridge fires onYieldDetected during the attempt", async () => {
+  it("does not report a removed sessions_yield signal", async () => {
     const sdk = makeFakeSdk();
     const pool = makeFakePool(sdk);
-    const createToolBridge = vi.fn(async (input: { onYieldDetected?: (msg?: string) => void }) => {
-      // Simulate a wrapped tool invoking sessions_yield before the
-      // attempt settles. The bridge is responsible for notifying the
-      // caller via onYieldDetected so the final result can carry the
-      // flag (parent runner uses it to mark liveness paused /
-      // stop_reason end_turn). Mirrors PI/codex parity.
-      input.onYieldDetected?.("paused by tool");
-      return { sdkTools: [], sourceTools: [] };
-    });
-
-    const result = await runCopilotAttempt(makeParams(), {
-      createToolBridge,
-      pool,
-    });
-
-    expect(result.yieldDetected).toBe(true);
-  });
-
-  it("F7: result.yieldDetected is false on a clean attempt (no sessions_yield fired)", async () => {
-    const sdk = makeFakeSdk();
-    const pool = makeFakePool(sdk);
-    // Default createToolBridge in deps falls back to the real one,
-    // which only fires onYieldDetected when a wrapped tool yields. We
-    // pass a bridge that never yields and assert the flag stays false.
     const createToolBridge = vi.fn(async () => ({ sdkTools: [], sourceTools: [] }));
 
     const result = await runCopilotAttempt(makeParams(), {
@@ -1385,7 +1315,7 @@ describe("runCopilotAttempt", () => {
       pool,
     });
 
-    expect(result.yieldDetected).toBe(false);
+    expect(result).not.toHaveProperty("yieldDetected");
   });
 
   it("tool bridge failures become prompt errors", async () => {
