@@ -42,7 +42,7 @@ type ModelPromptBuildContext = {
   appendContext: string;
 };
 
-/** Combines inbound context and the current prompt using the channel-provided joiner. */
+/** Combines inbound context and the current prompt using the channel-provided placement/joiner. */
 export function buildCurrentInboundPrompt(params: {
   context: CurrentInboundPromptContext | undefined;
   prompt: string;
@@ -59,7 +59,9 @@ export function buildCurrentInboundPrompt(params: {
   if (!params.prompt) {
     return prefix;
   }
-  return [prefix, params.prompt].join(params.context?.promptJoiner ?? "\n\n");
+  const parts =
+    params.context?.placement === "tail" ? [params.prompt, prefix] : [prefix, params.prompt];
+  return parts.join(params.context?.promptJoiner ?? "\n\n");
 }
 
 function splitLastPromptOccurrence(

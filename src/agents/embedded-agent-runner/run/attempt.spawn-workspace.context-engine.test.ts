@@ -11,6 +11,11 @@ import {
   clearMemoryPluginState,
   registerMemoryPromptSection,
 } from "../../../plugins/memory-state.js";
+import type { HumanInboundBatch } from "../../../scheduler/human-inbound.js";
+import {
+  buildPersistedUserTurnMessage,
+  createUserTurnTranscriptRecorder,
+} from "../../../sessions/user-turn-transcript.js";
 import {
   addSubagentRunForTests,
   leasePendingAgentSteeringItems,
@@ -333,6 +338,38 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     const availableTools = assembleParams.availableTools;
     expect(availableTools).toBeInstanceOf(Set);
     expect((availableTools as Set<string>).has("memory_search")).toBe(false);
+  });
+
+  it("authorizes managed external files with the host media roots", async () => {
+    const contextEngine = createContextEngineBootstrapAndAssemble();
+    const externalFile = {
+      marker: "[OpenClaw External File: test]",
+      idempotencyKey: "external_file_test",
+      attachmentIndex: 0,
+      mediaRef: "media://inbound/test.pdf",
+      originalPath: "/tmp/openclaw/media/inbound/test.pdf",
+      managedLocalPath: "/tmp/openclaw/media/inbound/test.pdf",
+      sourceMessageId: "message-1",
+      sourceIndex: 0,
+      contentHash: `sha256:${"a".repeat(64)}`,
+    };
+
+    await createContextEngineAttemptRunner({
+      contextEngine,
+      sessionKey,
+      tempPaths,
+      attemptOverrides: { externalFiles: [externalFile] },
+    });
+
+    const assembleParams = mockParams(
+      contextEngine.assemble as MockCallSource,
+      0,
+      "assemble params",
+    );
+    expect(assembleParams.runtimeContext).toMatchObject({
+      externalFiles: [externalFile],
+      managedMediaRoots: expect.arrayContaining([expect.any(String)]),
+    });
   });
 
   it("keeps pending parent steering queued during commitment-only runs", async () => {
@@ -1739,6 +1776,91 @@ describe("runEmbeddedAttempt context engine sessionKey forwarding", () => {
     expect(promptSubmitted?.data?.prompt).toBe(seenPrompt);
     expect(promptSubmitted?.data?.prompt).not.toContain("WT daily plan - Sat May 2");
     expect(promptSubmitted?.data?.prompt).not.toContain("secret runtime context");
+  });
+
+  it("keeps typed scheduler context in one queue-first user item", async () => {
+    const queueEnvelope = [
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]",
+      "",
+      "[Conversation Metadata]:",
+      '```json\n{"channel":"discord"}\n```',
+    ].join("\n");
+    const humanInboundBatch = {
+      version: 1,
+      placement: "idle",
+      route: {
+        channel: "discord",
+        accountId: "default",
+        conversationKind: "channel",
+        conversationId: "C123",
+        sessionKey,
+        queueLaneKey: "discord:default:channel:C123",
+        transcriptOwner: { agentId: "main", sessionKey },
+      },
+      conversation: {
+        channel: "discord",
+        conversationType: "guild_channel",
+        sessionKey,
+      },
+      inbounds: [],
+    } as HumanInboundBatch;
+    const message = buildPersistedUserTurnMessage({
+      text: queueEnvelope,
+      humanInboundBatch,
+      timestamp: 1_717_570_860_000,
+    });
+    const recorder = createUserTurnTranscriptRecorder({
+      message,
+      target: () => undefined,
+    });
+    let seenPrompt: string | undefined;
+    let seenMessages: unknown[] | undefined;
+
+    await createContextEngineAttemptRunner({
+      contextEngine: createContextEngineBootstrapAndAssemble(),
+      sessionKey,
+      tempPaths,
+      attemptOverrides: {
+        prompt: queueEnvelope,
+        transcriptPrompt: queueEnvelope,
+        currentInboundContext: {
+          text: "Active goal: finish the current rollout.",
+          placement: "tail",
+        },
+        userTurnTranscriptRecorder: recorder,
+      },
+      sessionPrompt: async (session, prompt) => {
+        seenPrompt = prompt;
+        seenMessages = [...session.messages];
+        session.messages = [
+          ...session.messages,
+          { role: "assistant", content: "done", timestamp: 2 },
+        ];
+      },
+    });
+
+    expect(seenPrompt?.startsWith("[📋 QUEUE ENGINE]:")).toBe(true);
+    expect(seenPrompt).toContain("Active goal: finish the current rollout.");
+    expect(
+      seenMessages?.some((entry) => {
+        const record = entry as { customType?: unknown };
+        return record.customType === "openclaw.runtime-context";
+      }),
+    ).toBe(false);
+    const modelInput = (
+      (message as unknown as Record<string, unknown>)["__openclaw"] as
+        | { modelInput?: { items?: Array<Record<string, unknown>> } }
+        | undefined
+    )?.modelInput;
+    expect(modelInput?.items).toHaveLength(1);
+    expect(modelInput?.items?.[0]).toMatchObject({
+      kind: "current-user",
+      role: "user",
+    });
+    expect(modelInput?.items?.[0]?.content).toBe(seenPrompt);
+    expect(String(modelInput?.items?.[0]?.content)).not.toContain(
+      "BEGIN_OPENCLAW_INTERNAL_CONTEXT",
+    );
   });
 
   it("keeps hook prompt context visible while hiding inter-session provenance", async () => {

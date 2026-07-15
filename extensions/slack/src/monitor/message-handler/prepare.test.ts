@@ -1191,6 +1191,46 @@ Second paragraph should still reach the agent after Slack's preview cutoff.`;
     expect(members).toHaveBeenCalledTimes(1);
   });
 
+  it("drops human-authored room messages when owner presence is required but absent", async () => {
+    const { slackCtx, members } = createOwnerScopedBotRoomCtx({ members: ["UOTHER"] });
+    (slackCtx as SlackMonitorContext & { requireOwnerPresence: boolean }).requireOwnerPresence =
+      true;
+
+    const prepared = await prepareMessageWith(
+      slackCtx,
+      createSlackAccount(),
+      createSlackMessage({
+        channel: "C123",
+        channel_type: "channel",
+        user: "UOTHER",
+        text: "hello",
+      }),
+    );
+
+    expect(prepared).toBeNull();
+    expect(members).toHaveBeenCalledWith({ token: "token", channel: "C123", limit: 999 });
+  });
+
+  it("drops human-authored group DMs when owner presence is required but absent", async () => {
+    const { slackCtx, members } = createOwnerScopedBotRoomCtx({ members: ["UOTHER"] });
+    (slackCtx as SlackMonitorContext & { requireOwnerPresence: boolean }).requireOwnerPresence =
+      true;
+
+    const prepared = await prepareMessageWith(
+      slackCtx,
+      createSlackAccount(),
+      createSlackMessage({
+        channel: "G123",
+        channel_type: "mpim",
+        user: "UOTHER",
+        text: "hello",
+      }),
+    );
+
+    expect(prepared).toBeNull();
+    expect(members).toHaveBeenCalledWith({ token: "token", channel: "G123", limit: 999 });
+  });
+
   it("forwards bot sender status to ctxPayload when allowBots admits the bot", async () => {
     const { slackCtx } = createOwnerScopedBotRoomCtx({ members: ["UOWNER"] });
 

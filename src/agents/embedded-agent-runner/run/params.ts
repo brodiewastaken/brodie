@@ -53,6 +53,8 @@ export type CurrentInboundPromptContext = {
   text: string;
   resumableText?: string;
   promptJoiner?: "\n\n" | "\n" | " ";
+  /** Typed scheduler envelopes stay at byte zero; supplemental context follows them inline. */
+  placement?: "prefix" | "tail";
   /** Generated goal blocks owned by inbound-context assembly, never user text. */
   injectedGoalContexts?: string[];
 };

@@ -47,6 +47,7 @@ export async function consultOpenClawAgentForGoogleMeet(params: {
   runtime: PluginRuntime;
   logger: RuntimeLogger;
   meetingSessionId: string;
+  turnId?: string;
   requesterSessionKey?: string;
   args: unknown;
   transcript: Array<{ role: "user" | "assistant"; text: string }>;
@@ -64,6 +65,7 @@ export async function consultOpenClawAgentForGoogleMeet(params: {
     messageProvider: "google-meet",
     lane: "google-meet",
     runIdPrefix: `google-meet:${params.meetingSessionId}`,
+    turnId: params.turnId,
     spawnedBy: requesterSessionKey,
     contextMode: "fork",
     args: params.args,
@@ -130,6 +132,7 @@ export function handleGoogleMeetRealtimeConsultToolCall(params: {
     runtime: params.runtime,
     logger: params.logger,
     meetingSessionId: params.meetingSessionId,
+    turnId: callId,
     requesterSessionKey: params.requesterSessionKey,
     args: params.event.args,
     transcript: params.transcript,

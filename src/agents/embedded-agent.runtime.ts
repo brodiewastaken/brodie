@@ -9,6 +9,7 @@ export {
   abortEmbeddedAgentRun,
   isEmbeddedAgentRunActive,
   isEmbeddedAgentRunStreaming,
+  resolveActiveEmbeddedRunCorrelationId,
   resolveActiveEmbeddedRunSessionId,
   resolveActiveEmbeddedRunSessionIdBySessionFile,
   runEmbeddedAgent,

@@ -1782,6 +1782,10 @@ export async function runReplyAgent(params: {
     const { autoCompactionCount } = runOutcome;
     let { didLogHeartbeatStrip } = runOutcome;
 
+    if (runResult.conversationOutcome) {
+      await opts?.onConversationOutcome?.(runResult.conversationOutcome);
+    }
+
     if (
       shouldInjectGroupIntro &&
       activeSessionEntry &&

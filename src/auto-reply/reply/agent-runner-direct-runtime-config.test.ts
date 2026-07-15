@@ -345,6 +345,33 @@ describe("runReplyAgent runtime config", () => {
     expect(runAgentTurnWithFallbackMock).toHaveBeenCalledOnce();
   });
 
+  it("reports the exact terminal conversation outcome for a direct run", async () => {
+    const { replyParams } = createDirectRuntimeReplyParams({
+      shouldFollowup: false,
+      isActive: false,
+    });
+    const onConversationOutcome = vi.fn();
+    replyParams.opts = { onConversationOutcome };
+    runPreflightCompactionIfNeededMock.mockResolvedValue(undefined);
+    runAgentTurnWithFallbackMock.mockResolvedValue({
+      kind: "success",
+      runId: "direct-run",
+      runResult: {
+        payloads: [],
+        meta: {},
+        conversationOutcome: "implicit_silence",
+      },
+      fallbackAttempts: [],
+      didLogHeartbeatStrip: false,
+      autoCompactionCount: 0,
+    });
+
+    await runReplyAgent(replyParams);
+
+    expect(onConversationOutcome).toHaveBeenCalledOnce();
+    expect(onConversationOutcome).toHaveBeenCalledWith("implicit_silence");
+  });
+
   it("rotates, rebinds, and optionally notifies when memory flush is exhausted", async () => {
     const { replyParams, followupRun } = createDirectRuntimeReplyParams({
       shouldFollowup: false,

@@ -28,7 +28,16 @@ export function resetDiagnosticActivityForTest(): void {
 }
 
 /** Logs and emits a diagnostic event when work enters a serialized lane. */
-export function logLaneEnqueue(lane: string, queueSize: number): void {
+export function logLaneEnqueue(
+  lane: string,
+  queueSize: number,
+  details: {
+    sessionKey?: string;
+    receiptId?: string;
+    producerKind?: string;
+    admissionDelayMs?: number;
+  } = {},
+): void {
   if (!areDiagnosticsEnabledForProcess()) {
     return;
   }
@@ -37,12 +46,23 @@ export function logLaneEnqueue(lane: string, queueSize: number): void {
     type: "queue.lane.enqueue",
     lane,
     queueSize,
+    ...details,
   });
   markDiagnosticActivity();
 }
 
 /** Logs and emits a diagnostic event when work leaves a serialized lane. */
-export function logLaneDequeue(lane: string, waitMs: number, queueSize: number): void {
+export function logLaneDequeue(
+  lane: string,
+  waitMs: number,
+  queueSize: number,
+  details: {
+    sessionKey?: string;
+    runId?: string;
+    producerKind?: string;
+    receiptCount?: number;
+  } = {},
+): void {
   if (!areDiagnosticsEnabledForProcess()) {
     return;
   }
@@ -52,6 +72,7 @@ export function logLaneDequeue(lane: string, waitMs: number, queueSize: number):
     lane,
     queueSize,
     waitMs,
+    ...details,
   });
   markDiagnosticActivity();
 }

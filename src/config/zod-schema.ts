@@ -137,6 +137,64 @@ const SecuritySchema = z
   .strict()
   .optional();
 
+const SchedulerDebouncePairSchema = z
+  .object({
+    textMs: z.number().int().nonnegative().optional(),
+    mediaMs: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+const SchedulerConversationClassesSchema = z
+  .object({
+    direct: SchedulerDebouncePairSchema.optional(),
+    two_member: SchedulerDebouncePairSchema.optional(),
+    shared: SchedulerDebouncePairSchema.optional(),
+  })
+  .strict();
+
+const SchedulerCopyPairSchema = z
+  .object({
+    singular: z.string().min(1),
+    plural: z.string().min(1),
+  })
+  .strict();
+
+const SchedulerSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    capacity: z
+      .object({
+        maxRows: z.number().int().positive().optional(),
+        maxBytes: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    debounce: z
+      .object({
+        exactRoutes: z.record(z.string(), SchedulerDebouncePairSchema).optional(),
+        channels: z.record(z.string(), SchedulerConversationClassesSchema).optional(),
+        conversationClasses: SchedulerConversationClassesSchema.optional(),
+      })
+      .strict()
+      .optional(),
+    copy: z
+      .object({
+        sources: z.record(z.string(), SchedulerCopyPairSchema).optional(),
+        timing: z
+          .object({
+            idle: SchedulerCopyPairSchema.optional(),
+            recovery: SchedulerCopyPairSchema.optional(),
+          })
+          .strict()
+          .optional(),
+        genericSource: SchedulerCopyPairSchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .optional();
+
 const AccessGroupsSchema = z
   .record(
     z.string().min(1),
@@ -916,6 +974,7 @@ export const OpenClawSchema = z
     commands: CommandsSchema,
     approvals: ApprovalsSchema,
     session: SessionSchema,
+    scheduler: SchedulerSchema,
     cron: z
       .object({
         enabled: z.boolean().optional(),

@@ -339,6 +339,10 @@ export type DiagnosticLaneEnqueueEvent = DiagnosticBaseEvent & {
   type: "queue.lane.enqueue";
   lane: string;
   queueSize: number;
+  sessionKey?: string;
+  receiptId?: string;
+  producerKind?: string;
+  admissionDelayMs?: number;
 };
 
 export type DiagnosticLaneDequeueEvent = DiagnosticBaseEvent & {
@@ -346,6 +350,10 @@ export type DiagnosticLaneDequeueEvent = DiagnosticBaseEvent & {
   lane: string;
   queueSize: number;
   waitMs: number;
+  sessionKey?: string;
+  runId?: string;
+  producerKind?: string;
+  receiptCount?: number;
 };
 
 export type DiagnosticRunAttemptEvent = DiagnosticBaseEvent & {

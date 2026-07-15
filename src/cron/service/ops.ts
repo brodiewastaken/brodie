@@ -571,6 +571,7 @@ function finalizeUpdatedJob(params: {
 
   nextJob.updatedAtMs = now;
   if (schedulingInputsChanged) {
+    nextJob.state.scheduleChangedAtMs = now;
     if (isJobEnabled(nextJob)) {
       nextJob.state.nextRunAtMs = computeJobNextRunAtMs(nextJob, now);
     } else {

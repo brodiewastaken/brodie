@@ -1,5 +1,16 @@
 // Voice Call tests cover response generator plugin behavior.
 import { describe, expect, it, vi } from "vitest";
+
+const runRuntimeTurnThroughSchedulerMock = vi.hoisted(() =>
+  vi.fn(async (params: { execute: (runId: string) => Promise<unknown> }) =>
+    params.execute("voice:test-run"),
+  ),
+);
+
+vi.mock("openclaw/plugin-sdk/conversation-scheduler", () => ({
+  runRuntimeTurnThroughScheduler: runRuntimeTurnThroughSchedulerMock,
+}));
+
 import { VoiceCallConfigSchema } from "./config.js";
 import type { CoreAgentDeps, CoreConfig } from "./core-bridge.js";
 import { generateVoiceResponse } from "./response-generator.js";
@@ -21,6 +32,7 @@ type EmbeddedAgentArgs = {
   extraSystemPrompt: string;
   provider?: string;
   model?: string;
+  runId?: string;
   sessionKey?: string;
   sessionTarget?: {
     agentId?: string;
@@ -219,6 +231,14 @@ describe("generateVoiceResponse", () => {
     const { result } = await runGenerateVoiceResponse([], { runtime });
 
     expect(result.text).toBe("Hello from JSON.");
+    expect(runRuntimeTurnThroughSchedulerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        producerKind: "voice",
+        sessionKey: "agent:main:voice:15550001111",
+        callId: "call-123",
+        turnId: expect.stringMatching(/^input:[a-f0-9]{64}$/),
+      }),
+    );
     expect(runEmbeddedAgent).toHaveBeenCalledTimes(1);
     const args = requireEmbeddedAgentArgs(runEmbeddedAgent);
     expect(args.extraSystemPrompt).toContain('{"spoken":"..."}');
@@ -226,6 +246,7 @@ describe("generateVoiceResponse", () => {
     expect(args.model).toBe("Qwen/Qwen2.5-7B-Instruct-Turbo");
     expect(args.abortSignal).toBeInstanceOf(AbortSignal);
     expect(args.blockReplyBreak).toBe("text_end");
+    expect(args.runId).toBe("voice:test-run");
     expect(args.onBlockReply).toEqual(expect.any(Function));
     expect(args.onBlockReplyFlush).toEqual(expect.any(Function));
     expect(runWithWorkAdmission).toHaveBeenCalledWith(

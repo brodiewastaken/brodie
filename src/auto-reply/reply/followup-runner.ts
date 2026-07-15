@@ -734,7 +734,15 @@ export function createFollowupRunner(params: {
               effectiveQueued.currentInboundContext,
               goalContextSessionEntry,
             );
-      const runId = crypto.randomUUID();
+      const runId = opts?.runId ?? crypto.randomUUID();
+      let didNotifyAgentRunStart = false;
+      const notifyAgentRunStart = () => {
+        if (didNotifyAgentRunStart) {
+          return;
+        }
+        didNotifyAgentRunStart = true;
+        opts?.onAgentRunStart?.(runId);
+      };
       const shouldSurfaceToControlUi = isInternalMessageChannel(
         resolveOriginMessageProvider({
           originatingChannel: queued.originatingChannel,
@@ -1118,7 +1126,7 @@ export function createFollowupRunner(params: {
                   provider: cliExecutionProvider,
                   startedAt: cliLifecycleStartedAt,
                   emitLifecycleTerminal: false,
-                  onAgentRunStart: () => opts?.onAgentRunStart?.(runId),
+                  onAgentRunStart: notifyAgentRunStart,
                   suppressAssistantBridge: run.silentExpected,
                   onReasoningText: createCliReasoningStreamBridge(progressOpts?.onReasoningStream),
                   onReasoningProgress: async (payload) => {
@@ -1354,6 +1362,7 @@ export function createFollowupRunner(params: {
                 abortSignal: runAbortSignal,
                 deferTerminalLifecycle: true,
                 onExecutionStarted: (info) => {
+                  notifyAgentRunStart();
                   if (info?.lifecycleGeneration) {
                     lifecycleGeneration = info.lifecycleGeneration;
                   }
@@ -1519,6 +1528,10 @@ export function createFollowupRunner(params: {
       }
 
       await drainProgressDeliveries();
+
+      if (runResult.conversationOutcome) {
+        await opts?.onConversationOutcome?.(runResult.conversationOutcome);
+      }
 
       const usage = runResult.meta?.agentMeta?.usage;
       const promptTokens = runResult.meta?.agentMeta?.promptTokens;

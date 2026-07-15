@@ -302,6 +302,8 @@ export type CronJobState = {
   nextRunAtMs?: number;
   runningAtMs?: number;
   lastRunAtMs?: number;
+  /** Last scheduling-input edit; earlier slots were never due. */
+  scheduleChangedAtMs?: number;
   /** Preferred execution outcome field. */
   lastRunStatus?: CronRunStatus;
   /** @deprecated Use lastRunStatus. */

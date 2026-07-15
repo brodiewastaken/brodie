@@ -10,12 +10,63 @@ const resolveMainSessionKeyMock = vi.fn(() => "main-session");
 const loadConfigMock = vi.fn(() => ({}));
 const logHooksInfoMock = vi.fn();
 const logHooksWarnMock = vi.fn();
+const admitScheduledHookMock = vi.fn(async () => ({
+  accepted: false as const,
+  reason: "disabled" as const,
+}));
+const admitRuntimeHeartbeatWakeMock = vi.fn(async (_options?: unknown) => ({
+  accepted: false as const,
+  reason: "disabled" as const,
+}));
 
 vi.mock("../../infra/system-events.js", () => ({
   enqueueSystemEvent: enqueueSystemEventMock,
 }));
 vi.mock("../../infra/heartbeat-wake.js", () => ({
   requestHeartbeat: requestHeartbeatMock,
+}));
+vi.mock("../../infra/heartbeat-runner.js", () => ({
+  admitRuntimeHeartbeatWake: admitRuntimeHeartbeatWakeMock,
+}));
+vi.mock("../../infra/durable-system-event-wake.js", () => ({
+  admitDurableSystemEventWake: async (options: {
+    sessionKey: string;
+    systemEvent: { text: string; contextKey?: string | null; deliveryContext?: unknown };
+    source: string;
+    intent: string;
+    reason: string;
+    sourceGeneration: string;
+    producerKind: string;
+    cfg?: unknown;
+    agentId?: string;
+  }) => {
+    enqueueSystemEventMock(options.systemEvent.text, {
+      sessionKey: options.sessionKey,
+      ...(options.systemEvent.contextKey === undefined
+        ? {}
+        : { contextKey: options.systemEvent.contextKey }),
+      ...(options.systemEvent.deliveryContext === undefined
+        ? {}
+        : { deliveryContext: options.systemEvent.deliveryContext }),
+    });
+    const admission = await admitRuntimeHeartbeatWakeMock(options);
+    if (!admission.accepted) {
+      requestHeartbeatMock({
+        source: options.source,
+        intent: options.intent,
+        reason: options.reason,
+        ...(options.agentId ? { agentId: options.agentId } : {}),
+        sessionKey: options.sessionKey,
+        sourceGeneration: options.sourceGeneration,
+        producerKind: options.producerKind,
+      });
+    }
+    return admission;
+  },
+}));
+vi.mock("./hooks-scheduler-admission.js", () => ({
+  admitScheduledHook: admitScheduledHookMock,
+  ensureHookSchedulerProducerRegistered: vi.fn(),
 }));
 vi.mock("../../cron/isolated-agent.js", () => ({
   runCronIsolatedAgentTurn: runCronIsolatedAgentTurnMock,
@@ -35,10 +86,12 @@ vi.mock("../../config/io.js", () => ({
 }));
 
 let capturedDispatchAgentHook: ((...args: unknown[]) => unknown) | undefined;
+let capturedDispatchWakeHook: ((...args: unknown[]) => unknown) | undefined;
 
 vi.mock("./hooks-request-handler.js", () => ({
   createHooksRequestHandler: vi.fn((opts: Record<string, unknown>) => {
     capturedDispatchAgentHook = opts.dispatchAgentHook as typeof capturedDispatchAgentHook;
+    capturedDispatchWakeHook = opts.dispatchWakeHook as typeof capturedDispatchWakeHook;
     return vi.fn();
   }),
 }));
@@ -70,6 +123,7 @@ function buildAgentPayload(name: string, agentId?: string) {
     wakeMode: "now" as const,
     sessionKey: "session-1",
     sourcePath: "/hooks/agent",
+    sourceGeneration: "hook-source-generation-1",
     deliver: false,
     channel: "last" as const,
     to: undefined,
@@ -86,6 +140,13 @@ function dispatchAgentHook(payload: unknown): unknown {
     throw new Error("dispatchAgentHook missing");
   }
   return capturedDispatchAgentHook(payload);
+}
+
+async function dispatchWakeHook(payload: unknown): Promise<unknown> {
+  if (!capturedDispatchWakeHook) {
+    throw new Error("dispatchWakeHook missing");
+  }
+  return capturedDispatchWakeHook(payload);
 }
 
 type HookLogMeta = {
@@ -126,6 +187,7 @@ describe("dispatchAgentHook trust handling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     capturedDispatchAgentHook = undefined;
+    capturedDispatchWakeHook = undefined;
     createGatewayHooksRequestHandler(buildMinimalParams());
   });
 
@@ -154,6 +216,38 @@ describe("dispatchAgentHook trust handling", () => {
     expect(typeof meta.completedAt).toBe("string");
   });
 
+  it("tags direct wake hooks with their exact main session and source generation", async () => {
+    await dispatchWakeHook({
+      text: "wake up",
+      mode: "now",
+      sourceGeneration: "wake-generation-1",
+    });
+
+    expect(enqueueSystemEventMock).toHaveBeenCalledWith("wake up", {
+      sessionKey: "main-session",
+    });
+    expect(admitRuntimeHeartbeatWakeMock).toHaveBeenCalledWith({
+      cfg: {},
+      agentId: "main",
+      source: "hook",
+      intent: "immediate",
+      reason: "hook:wake",
+      sessionKey: "main-session",
+      sourceGeneration: "wake-generation-1",
+      producerKind: "hook",
+      systemEvent: { text: "wake up" },
+    });
+    expect(requestHeartbeatMock).toHaveBeenCalledWith({
+      agentId: "main",
+      source: "hook",
+      intent: "immediate",
+      reason: "hook:wake",
+      sessionKey: "main-session",
+      sourceGeneration: "wake-generation-1",
+      producerKind: "hook",
+    });
+  });
+
   it("marks non-ok deliver:false status events as untrusted and sanitizes hook names", async () => {
     runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
       status: "error",
@@ -179,6 +273,15 @@ describe("dispatchAgentHook trust handling", () => {
     expect(meta.sessionKey).toBe("session-1");
     expect(meta.status).toBe("error");
     expect(meta.summary).toBe("failed");
+    expect(requestHeartbeatMock).toHaveBeenCalledWith({
+      agentId: "main",
+      source: "hook",
+      intent: "immediate",
+      reason: `hook:${meta.jobId}`,
+      sessionKey: "agent:main:main",
+      sourceGeneration: `${meta.jobId}:announcement`,
+      producerKind: "system",
+    });
   });
 
   it("prefers cron diagnostics for returned hook errors", async () => {
@@ -350,5 +453,14 @@ describe("dispatchAgentHook trust handling", () => {
         },
       ),
     );
+    expect(requestHeartbeatMock).toHaveBeenCalledWith({
+      agentId: "hooks",
+      source: "hook",
+      intent: "immediate",
+      reason: expect.stringMatching(/^hook:.+:error$/),
+      sessionKey: "agent:hooks:main",
+      sourceGeneration: expect.stringMatching(/:announcement$/),
+      producerKind: "system",
+    });
   });
 });

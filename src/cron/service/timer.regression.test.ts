@@ -86,6 +86,44 @@ function firstMockArg(mock: unknown): unknown {
 }
 
 describe("cron service timer regressions", () => {
+  it("does not charge scheduler queue wait to the cron setup watchdog", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = Date.parse("2026-05-14T12:00:00.000Z");
+      const admission = createDeferred<{
+        accepted: false;
+        reason: "disabled";
+      }>();
+      const state = createCronServiceState({
+        cronEnabled: true,
+        storePath: timerRegressionFixtures.makeStorePath().storePath,
+        log: noopLogger,
+        nowMs: () => now,
+        enqueueSystemEvent: vi.fn(),
+        requestHeartbeat: vi.fn(),
+        runIsolatedAgentJob: vi.fn(createDefaultIsolatedRunner()),
+        conversationScheduler: { admit: vi.fn(() => admission.promise) } as never,
+      });
+      const job = createDueIsolatedJob({ id: "queued", nowMs: now, nextRunAtMs: now });
+      const resultPromise = executeJobCoreWithTimeout(state, job);
+      let settled = false;
+      void resultPromise.then(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(settled).toBe(false);
+
+      admission.resolve({ accepted: false, reason: "disabled" });
+      await expect(resultPromise).resolves.toMatchObject({ status: "ok" });
+      await expect(resultPromise).resolves.not.toMatchObject({
+        error: expect.stringContaining("timed out"),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("caps timer delay to 60s for far-future schedules", async () => {
     const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
     const store = timerRegressionFixtures.makeStorePath();

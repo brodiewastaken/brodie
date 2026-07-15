@@ -110,4 +110,61 @@ describe("wake (cron timer)", () => {
     expect(enqueueSystemEvent).not.toHaveBeenCalled();
     expect(requestHeartbeat).not.toHaveBeenCalled();
   });
+
+  it("uses the exact canonical source and tags one stable operator generation", () => {
+    const { state, enqueueSystemEvent, requestHeartbeat } = createState();
+    const canonicalSessionKey = "agent:main:conversation:discord:default:channel:brodie-only";
+    state.deps.resolveOperatorWakeTarget = vi.fn(() => ({
+      agentId: "main",
+      sessionKey: canonicalSessionKey,
+    }));
+
+    expect(
+      wake(state, {
+        mode: "now",
+        text: "inspect the session",
+        sessionKey: "legacy-source-key",
+        sourceGeneration: "operator-generation-1",
+      }),
+    ).toEqual({ ok: true });
+
+    expect(enqueueSystemEvent).toHaveBeenCalledWith("inspect the session", {
+      sessionKey: canonicalSessionKey,
+      agentId: "main",
+    });
+    expect(requestHeartbeat).toHaveBeenCalledWith({
+      source: "manual",
+      intent: "immediate",
+      reason: "wake",
+      sessionKey: canonicalSessionKey,
+      agentId: "main",
+      sourceGeneration: "operator-generation-1",
+      producerKind: "operator",
+    });
+  });
+
+  it("uses the owning agent's internal main route when no exact source session exists", () => {
+    const { state, enqueueSystemEvent } = createState();
+    const internalMainSessionKey = "agent:main:main";
+    const resolveOperatorWakeTarget = vi.fn(() => ({
+      agentId: "main",
+      sessionKey: internalMainSessionKey,
+    }));
+    state.deps.resolveOperatorWakeTarget = resolveOperatorWakeTarget;
+
+    wake(state, {
+      mode: "now",
+      text: "inspect the latest conversation",
+      sourceGeneration: "operator-generation-2",
+    });
+
+    expect(resolveOperatorWakeTarget).toHaveBeenCalledWith({
+      agentId: undefined,
+      sessionKey: undefined,
+    });
+    expect(enqueueSystemEvent).toHaveBeenCalledWith("inspect the latest conversation", {
+      sessionKey: internalMainSessionKey,
+      agentId: "main",
+    });
+  });
 });

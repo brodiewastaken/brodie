@@ -353,6 +353,29 @@ describe("heartbeat-wake", () => {
     });
   });
 
+  it("preserves source generation and typed producer ownership across a busy retry", async () => {
+    vi.useFakeTimers();
+    const handler = setRetryOnceHeartbeatHandler();
+
+    requestHeartbeat({
+      source: "cron",
+      intent: "immediate",
+      reason: "cron:durable-job",
+      sourceGeneration: "cron-source-generation-1",
+      producerKind: "cron",
+      coalesceMs: 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(handler).toHaveBeenCalledTimes(2);
+    for (const [request] of handler.mock.calls) {
+      expect(request.sourceGeneration).toBe("cron-source-generation-1");
+      expect(request.producerKind).toBe("cron");
+    }
+  });
+
   it("preserves heartbeat override when same-target wakes coalesce", async () => {
     vi.useFakeTimers();
     const handler = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 });

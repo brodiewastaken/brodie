@@ -43,7 +43,8 @@ const exportSet = new Set(exportedNames);
 
 const requiredRuntimeShimEntries = ["compat.js", "root-alias.cjs"];
 const forbiddenPublicDeclarationSpecifiers = ["@openclaw/llm-core"];
-const MAX_PLUGIN_SDK_DECLARATION_BYTES = 5_000_000;
+// The typed human-inbound adapter contract adds about 8 KiB to the unified graph.
+const MAX_PLUGIN_SDK_DECLARATION_BYTES = 5_010_000;
 const RELATIVE_DECLARATION_SPECIFIER_RE = /\b(?:from|import)\s*(?:\(\s*)?["']([^"']+)["']/gu;
 const requiredSubpathExports = {
   "secret-input-runtime": [

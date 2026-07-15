@@ -62,4 +62,15 @@ describe("authorizeSlackDirectMessage", () => {
       senderName: "Alice",
     });
   });
+
+  it("allows only the configured stable user under allowlist DM policy", async () => {
+    const owner = makeParams("allowlist");
+    owner.allowFromLower = ["u123"];
+    await expect(authorizeSlackDirectMessage(owner)).resolves.toBe(true);
+
+    const other = makeParams("allowlist");
+    other.senderId = "U999";
+    other.allowFromLower = ["u123"];
+    await expect(authorizeSlackDirectMessage(other)).resolves.toBe(false);
+  });
 });

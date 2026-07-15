@@ -1,4 +1,5 @@
 /** Manual cron wake helper for queueing system events into sessions. */
+import { randomUUID } from "node:crypto";
 import { isSubagentSessionKey } from "../../routing/session-key.js";
 import type { CronServiceState } from "./state.js";
 
@@ -24,14 +25,22 @@ export function wake(
      * ("always routes to default agent").
      */
     agentId?: string;
+    /** Stable identity retained by the heartbeat scheduler across retry. */
+    sourceGeneration?: string;
   },
 ) {
   const text = opts.text.trim();
   if (!text) {
     return { ok: false } as const;
   }
-  const sessionKey = opts.sessionKey?.trim() || undefined;
-  const agentId = opts.agentId?.trim() || undefined;
+  const requestedSessionKey = opts.sessionKey?.trim() || undefined;
+  const requestedAgentId = opts.agentId?.trim() || undefined;
+  const resolvedTarget = state.deps.resolveOperatorWakeTarget?.({
+    sessionKey: requestedSessionKey,
+    agentId: requestedAgentId,
+  });
+  const sessionKey = resolvedTarget?.sessionKey?.trim() || requestedSessionKey;
+  const agentId = resolvedTarget?.agentId?.trim() || requestedAgentId;
   if (sessionKey && isSubagentSessionKey(sessionKey)) {
     return { ok: false, reason: "unwakeable-session-key" } as const;
   }
@@ -53,6 +62,12 @@ export function wake(
         }
       : undefined;
   state.deps.enqueueSystemEvent(text, enqueueOpts);
+  const operatorSchedulerMetadata = state.deps.resolveOperatorWakeTarget
+    ? {
+        sourceGeneration: opts.sourceGeneration?.trim() || randomUUID(),
+        producerKind: "operator" as const,
+      }
+    : {};
   if (opts.mode === "now") {
     state.deps.requestHeartbeat({
       source: "manual",
@@ -60,6 +75,7 @@ export function wake(
       reason: "wake",
       ...(sessionKey ? { sessionKey } : {}),
       ...(agentId ? { agentId } : {}),
+      ...operatorSchedulerMetadata,
     });
   } else if (sessionKey) {
     // next-heartbeat + sessionKey still needs a targeted immediate wake.
@@ -80,6 +96,7 @@ export function wake(
       reason: "wake",
       sessionKey,
       ...(agentId ? { agentId } : {}),
+      ...operatorSchedulerMetadata,
     });
   }
   return { ok: true } as const;

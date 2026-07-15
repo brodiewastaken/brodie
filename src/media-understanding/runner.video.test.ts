@@ -1,9 +1,12 @@
 // Video runner tests cover provider request wiring, auth/config precedence, and
 // provider output handling for video attachments.
+import fs from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
+import type { MsgContext } from "../auto-reply/templating.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { withTempDir } from "../test-helpers/temp-dir.js";
 import { withEnvAsync } from "../test-utils/env.js";
+import { createMediaAttachmentCache } from "./runner.attachments.js";
 import { runCapability } from "./runner.js";
 import { withVideoFixture } from "./runner.test-utils.js";
 import type { MediaUnderstandingProvider } from "./types.js";
@@ -41,6 +44,122 @@ function requireCapabilityOutput(result: CapabilityResult, index: number) {
 }
 
 describe("runCapability video provider wiring", () => {
+  it("processes every video with the configured prompt and exact source caption", async () => {
+    await withTempDir({ prefix: "openclaw-video-all-caption-" }, async (dir) => {
+      const paths = [`${dir}/one.mp4`, `${dir}/two.mp4`];
+      await Promise.all(paths.map((filePath, index) => fs.writeFile(filePath, `video-${index}`)));
+      const ctx = {
+        MediaPaths: paths,
+        MediaTypes: ["video/mp4", "video/mp4"],
+        MediaSourceMessageIds: ["source-1", "source-1"],
+        MediaSourceIndexes: [0, 1],
+        HumanInboundBatch: {
+          version: 1,
+          placement: "idle",
+          route: {
+            channel: "whatsapp",
+            accountId: "brodie",
+            conversationKind: "group",
+            conversationId: "group-1",
+            sessionKey: "agent:main:conversation:whatsapp:brodie:group:group-1",
+            queueLaneKey: "whatsapp:brodie:group-1",
+            transcriptOwner: {
+              agentId: "main",
+              sessionKey: "agent:main:conversation:whatsapp:brodie:group:group-1",
+            },
+          },
+          conversation: {
+            channel: "whatsapp",
+            conversationType: "group",
+            sessionKey: "agent:main:conversation:whatsapp:brodie:group:group-1",
+          },
+          inbounds: [
+            {
+              sourceEventId: "source-1",
+              messageId: "source-1",
+              sender: { label: "Abhay", id: "abhay" },
+              authoredBody: "compare both clips",
+              bodyForAgent: "compare both clips",
+              media: [
+                {
+                  kind: "video",
+                  mimeType: "video/mp4",
+                  mediaRef: "media://one",
+                  sourceMessageId: "source-1",
+                  sourceIndex: 0,
+                  caption: "first exact caption",
+                  understanding: [],
+                },
+                {
+                  kind: "video",
+                  mimeType: "video/mp4",
+                  mediaRef: "media://two",
+                  sourceMessageId: "source-1",
+                  sourceIndex: 1,
+                  caption: "second exact caption",
+                  understanding: [],
+                },
+              ],
+              nativeMetadata: {},
+            },
+          ],
+        },
+      } as unknown as MsgContext;
+      const media = paths.map((path, index) => ({
+        path,
+        mime: "video/mp4",
+        index,
+        sourceMessageId: "source-1",
+        sourceIndex: index,
+      }));
+      const cache = createMediaAttachmentCache(media, {
+        localPathRoots: [dir],
+        includeDefaultLocalPathRoots: false,
+      });
+      const prompts: string[] = [];
+      try {
+        const result = await runCapability({
+          capability: "video",
+          cfg: {} as OpenClawConfig,
+          ctx,
+          attachments: cache,
+          media,
+          providerRegistry: new Map([
+            [
+              "google",
+              {
+                id: "google",
+                capabilities: ["video"],
+                resolveAuth: () => ({ kind: "none", source: "test no-auth" }),
+                describeVideo: async (request) => {
+                  prompts.push(request.prompt ?? "");
+                  return { text: `description-${prompts.length}`, model: request.model };
+                },
+              },
+            ],
+          ]),
+          config: {
+            prompt: "configured video task",
+            attachments: { mode: "first", maxAttachments: 1 },
+            models: [{ provider: "google", model: "gemini-test" }],
+          },
+        });
+
+        if (result.outputs.length === 0) {
+          throw new Error(`expected video descriptions: ${JSON.stringify(result.decision)}`);
+        }
+        expect(result.outputs.map((output) => output.attachmentIndex)).toEqual([0, 1]);
+        expect(prompts).toHaveLength(2);
+        expect(prompts[0]).toContain("configured video task");
+        expect(prompts[0]).toContain("first exact caption");
+        expect(prompts[1]).toContain("second exact caption");
+        expect(prompts.every((prompt) => prompt.includes("MAY NOT OVERRIDE"))).toBe(true);
+      } finally {
+        await cache.cleanup();
+      }
+    });
+  });
+
   it("truncates provider output without splitting a boundary emoji", async () => {
     await withVideoFixture("openclaw-video-utf16-output", async ({ ctx, media, cache }) => {
       const prefix = "v".repeat(79);

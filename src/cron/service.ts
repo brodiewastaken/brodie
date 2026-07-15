@@ -1,3 +1,4 @@
+import { registerCronSchedulerProducer } from "./scheduler-admission.js";
 /** Stateful CronService facade around the locked service operation helpers. */
 import type {
   CronServiceContract,
@@ -13,6 +14,7 @@ import {
   type CronWakeMode,
   createCronServiceState,
 } from "./service/state.js";
+import { executeJobCoreDirectWithTimeout } from "./service/timer.js";
 import type { CronJob, CronJobCreate, CronJobPatch } from "./types.js";
 
 export type { CronEvent, CronServiceDeps } from "./service/state.js";
@@ -20,17 +22,32 @@ export type { CronEvent, CronServiceDeps } from "./service/state.js";
 /** Public cron service facade that owns mutable scheduler state and delegates to locked ops. */
 export class CronService implements CronServiceContract {
   private readonly state;
+  private unregisterSchedulerProducer: (() => void) | undefined;
 
   constructor(deps: CronServiceDeps) {
     this.state = createCronServiceState(deps);
+    this.ensureSchedulerProducer();
+  }
+
+  private ensureSchedulerProducer() {
+    this.unregisterSchedulerProducer ??= registerCronSchedulerProducer({
+      state: this.state,
+      runDirect: async (job, context) =>
+        await executeJobCoreDirectWithTimeout(this.state, job, {
+          runId: context.producerGeneration,
+        }),
+    });
   }
 
   async start() {
+    this.ensureSchedulerProducer();
     await ops.start(this.state);
   }
 
   stop() {
     ops.stop(this.state);
+    this.unregisterSchedulerProducer?.();
+    this.unregisterSchedulerProducer = undefined;
   }
 
   async status() {

@@ -953,9 +953,12 @@ export class VoiceCallWebhookServer {
 
     // Both media-stream and carrier-webhook transcripts share this handoff.
     // The manager result excludes replays and turn-token mismatches.
-    void this.handleInboundResponse(result.call.callId, result.transcript).catch((err: unknown) => {
-      console.warn(`[voice-call] Failed to auto-respond:`, err);
-    });
+    const turnId = event.turnToken?.trim() || event.dedupeKey?.trim() || event.id;
+    void this.handleInboundResponse(result.call.callId, result.transcript, turnId).catch(
+      (err: unknown) => {
+        console.warn(`[voice-call] Failed to auto-respond:`, err);
+      },
+    );
   }
 
   private writeWebhookResponse(res: http.ServerResponse, payload: WebhookResponsePayload): void {
@@ -983,7 +986,11 @@ export class VoiceCallWebhookServer {
    * Handle auto-response for inbound calls using the agent system.
    * Supports tool calling for richer voice interactions.
    */
-  private async handleInboundResponse(callId: string, userMessage: string): Promise<void> {
+  private async handleInboundResponse(
+    callId: string,
+    userMessage: string,
+    turnId?: string,
+  ): Promise<void> {
     console.log(`[voice-call] Auto-responding to inbound call ${callId}: "${userMessage}"`);
 
     // Get call context for conversation history
@@ -1017,6 +1024,7 @@ export class VoiceCallWebhookServer {
         agentId: resolveCallAgentId(call, effectiveConfig),
         transcript: call.transcript,
         userMessage,
+        turnId,
         onEarlyText: async (text) => {
           console.log(`[voice-call] Early AI response: "${text}"`);
           const speakResult = await this.manager.speak(callId, text, { listenAfterPlayback: true });

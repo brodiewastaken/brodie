@@ -295,6 +295,30 @@ describe("applyJobPatch", () => {
     }
   });
 
+  it("persists agentTurn payload.fastMode updates when editing existing jobs", () => {
+    const job = createIsolatedAgentTurnJob("job-fast-mode", {
+      mode: "announce",
+      channel: "telegram",
+    });
+    job.payload = {
+      kind: "agentTurn",
+      message: "do it",
+      fastMode: true,
+    };
+
+    applyJobPatch(job, {
+      payload: {
+        kind: "agentTurn",
+        fastMode: false,
+      },
+    });
+
+    expect(job.payload.kind).toBe("agentTurn");
+    if (job.payload.kind === "agentTurn") {
+      expect(job.payload.fastMode).toBe(false);
+    }
+  });
+
   it("persists agentTurn payload.fallbacks updates when editing existing jobs", () => {
     const job = createIsolatedAgentTurnJob("job-fallbacks", {
       mode: "announce",
@@ -636,6 +660,29 @@ describe("applyJobPatch", () => {
     expect(payload.kind).toBe("agentTurn");
     if (payload.kind === "agentTurn") {
       expect(payload.lightContext).toBe(true);
+    }
+  });
+
+  it("applies payload.fastMode when replacing payload kind via patch", () => {
+    const job = createIsolatedAgentTurnJob("job-fast-mode-switch", {
+      mode: "announce",
+      channel: "telegram",
+    });
+    job.payload = { kind: "systemEvent", text: "ping" };
+
+    applyJobPatch(job, {
+      sessionTarget: "isolated",
+      payload: {
+        kind: "agentTurn",
+        message: "do it",
+        fastMode: false,
+      },
+    });
+
+    const payload = job.payload as CronJob["payload"];
+    expect(payload.kind).toBe("agentTurn");
+    if (payload.kind === "agentTurn") {
+      expect(payload.fastMode).toBe(false);
     }
   });
 

@@ -682,7 +682,6 @@ export async function getReplyFromConfig(
     provider = resolvedChannelModelOverride.ref.provider;
     model = resolvedChannelModelOverride.ref.model;
   }
-
   if (
     shouldUseReplyFastDirectiveExecution({
       isFastTestBootstrap: useFastTestRuntime,
@@ -1075,7 +1074,7 @@ export async function getReplyFromConfig(
       modelState: runModelState,
       provider: runProvider,
       model: runModel,
-      perMessageQueueMode,
+      perMessageQueueMode: internalResolvedOpts?.queueModeOverride ?? perMessageQueueMode,
       perMessageQueueOptions,
       typing,
       opts: withExtractedFileImages(resolvedOpts, extractedFileImages),

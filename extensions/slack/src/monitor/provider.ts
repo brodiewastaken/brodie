@@ -416,6 +416,7 @@ export async function monitorSlackProvider(opts: MonitorSlackOpts = {}) {
     allowNameMatching,
     groupDmEnabled,
     groupDmChannels,
+    requireOwnerPresence: process.env.OPENCLAW_SLACK_REQUIRE_OWNER_PRESENCE === "1",
     defaultRequireMention: slackCfg.requireMention,
     channelsConfig,
     groupPolicy,

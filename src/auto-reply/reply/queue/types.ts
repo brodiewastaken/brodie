@@ -10,8 +10,12 @@ import type { InboundEventKind } from "../../../channels/inbound-event/kind.js";
 import type { SessionEntry } from "../../../config/sessions.js";
 import type { ReplyToMode } from "../../../config/types.base.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import type { ContextEngineExternalFile } from "../../../context-engine/external-files.js";
+import type { CoreConversationalAction } from "../../../infra/outbound/conversational-action.js";
 import type { PromptImageOrderEntry } from "../../../media/prompt-image-order.js";
 import type { PluginHookChannelContext } from "../../../plugins/hook-types.js";
+import type { HumanInboundBatch } from "../../../scheduler/human-inbound.js";
+import type { QueueBatchIdentity } from "../../../scheduler/queue-batch-identity.js";
 import type { InputProvenance } from "../../../sessions/input-provenance.js";
 import type { UserTurnTranscriptRecorder } from "../../../sessions/user-turn-transcript.types.js";
 import type { SkillSnapshot } from "../../../skills/types.js";
@@ -60,6 +64,8 @@ export type FollowupRun = {
   currentInboundAudio?: boolean;
   /** Explicit current-turn context that should be visible for this run but not persisted as user text. */
   currentInboundContext?: CurrentInboundPromptContext;
+  /** Typed scheduler source retained across followup and collect aggregation. */
+  humanInboundBatch?: HumanInboundBatch;
   /** Abort signal for turns that are canceled by their source-channel admission fence. */
   abortSignal?: AbortSignal;
   /** Queue-owned cancellation fence used when lifecycle cleanup invalidates pending work. */
@@ -74,6 +80,9 @@ export type FollowupRun = {
   enqueuedAt: number;
   images?: Array<{ type: "image"; data: string; mimeType: string }>;
   imageOrder?: PromptImageOrderEntry[];
+  externalFiles?: ContextEngineExternalFile[];
+  queueBatchIdentity?: QueueBatchIdentity;
+  promptImageRefExclusions?: string[];
   /**
    * Originating channel for reply routing.
    * When set, replies should be routed back to this provider
@@ -132,6 +141,8 @@ export type FollowupRun = {
     authProfileId?: string;
     authProfileIdSource?: "auto" | "user";
     thinkLevel?: ThinkLevel;
+    /** Explicit reasoning selection that must take precedence over the configured run policy. */
+    runPolicyReasoningOverride?: ThinkLevel;
     fastMode?: FastMode;
     fastModeAutoOnSeconds?: number;
     fastModeOverride?: boolean;
@@ -152,6 +163,7 @@ export type FollowupRun = {
     inputProvenance?: InputProvenance;
     extraSystemPrompt?: string;
     sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+    allowedConversationalActions?: readonly CoreConversationalAction[];
     silentReplyPromptMode?: SilentReplyPromptMode;
     extraSystemPromptStatic?: string;
     cliSessionBindingFacts?: CliSessionBindingFacts;

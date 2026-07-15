@@ -99,7 +99,10 @@ function commandGate(params: {
   const authorized = resolveCommandAuthorizedFromAuthorizers({
     useAccessGroups,
     modeWhenAccessGroupsOff: command.modeWhenAccessGroupsOff,
-    authorizers: [{ configured: owner.hasConfiguredEntries, allowed: owner.match.matched }],
+    authorizers: [
+      { configured: owner.hasConfiguredEntries, allowed: owner.match.matched },
+      { configured: group.hasConfiguredEntries, allowed: group.match.matched },
+    ],
   });
   // Command-shaped text from a non-owner remains admissible conversation.
   // The centralized invocation classifier wraps it in the configured trusted

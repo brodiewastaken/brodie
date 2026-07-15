@@ -1095,6 +1095,8 @@ function createPolicyHarness(overrides?: {
   channelId?: string;
   channelName?: string;
   allowFrom?: string[];
+  requireOwnerPresence?: boolean;
+  channelMembers?: string[];
   useAccessGroups?: boolean;
   slashEphemeral?: boolean;
   shouldDropMismatchedSlackEvent?: (body: unknown) => boolean;
@@ -1103,7 +1105,15 @@ function createPolicyHarness(overrides?: {
   const commands = new Map<unknown, (args: unknown) => Promise<void>>();
   const postEphemeral = vi.fn().mockResolvedValue({ ok: true });
   const app = {
-    client: { chat: { postEphemeral } },
+    client: {
+      chat: { postEphemeral },
+      conversations: {
+        members: vi.fn(async () => ({
+          members: overrides?.channelMembers ?? [],
+          response_metadata: {},
+        })),
+      },
+    },
     command: (name: unknown, handler: (args: unknown) => Promise<void>) => {
       commands.set(name, handler);
     },
@@ -1119,6 +1129,7 @@ function createPolicyHarness(overrides?: {
     botUserId: "bot",
     teamId: "T1",
     allowFrom: overrides?.allowFrom ?? ["*"],
+    requireOwnerPresence: overrides?.requireOwnerPresence ?? false,
     dmEnabled: true,
     dmPolicy: "open",
     groupDmEnabled: false,
@@ -1254,6 +1265,17 @@ describe("slack slash commands channel policy", () => {
 
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(responseTexts(respond)).not.toContain("This channel is not allowed.");
+  });
+
+  it("blocks slash commands when owner presence is required but absent", async () => {
+    const harness = createPolicyHarness({
+      allowFrom: ["U_OWNER"],
+      requireOwnerPresence: true,
+      channelMembers: ["U1"],
+    });
+    const { respond } = await registerAndRunPolicySlash({ harness });
+
+    expectChannelBlockedResponse(respond);
   });
 
   it("blocks explicitly denied channels when groupPolicy is open", async () => {

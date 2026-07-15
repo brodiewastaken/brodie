@@ -161,4 +161,47 @@ describe("update() must not drop a due every-job's pending run", () => {
 
     cron.stop();
   });
+
+  it("stamps scheduleChangedAtMs only when the scheduling inputs change", async () => {
+    const store = await makeStorePath();
+    const base = Date.parse("2026-09-11T00:00:00.000Z");
+    vi.setSystemTime(new Date(base));
+
+    const cron = new CronService({
+      storePath: store.storePath,
+      cronEnabled: true,
+      log: noopLogger,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" as const })),
+    });
+    await cron.start();
+
+    const job = await cron.add({
+      name: "weekly check",
+      enabled: true,
+      schedule: { kind: "cron", expr: "0 9 * * 5", tz: "Asia/Tokyo" },
+      sessionTarget: "isolated",
+      wakeMode: "next-heartbeat",
+      payload: { kind: "agentTurn", message: "check" },
+    });
+    expect(job.state.scheduleChangedAtMs).toBeUndefined();
+
+    const editAt = Date.parse("2026-09-17T08:29:00.000Z");
+    vi.setSystemTime(new Date(editAt));
+    await cron.update(job.id, { name: "weekly check (renamed)" });
+    let current = (await cron.list({ includeDisabled: true })).find((j) => j.id === job.id)!;
+    expect(current.state.scheduleChangedAtMs).toBeUndefined();
+
+    await cron.update(job.id, { schedule: { kind: "cron", expr: "0 9 * * 5", tz: "Asia/Tokyo" } });
+    current = (await cron.list({ includeDisabled: true })).find((j) => j.id === job.id)!;
+    expect(current.state.scheduleChangedAtMs).toBeUndefined();
+
+    await cron.update(job.id, { schedule: { kind: "cron", expr: "0 9 * * 5", tz: "Asia/Dubai" } });
+    current = (await cron.list({ includeDisabled: true })).find((j) => j.id === job.id)!;
+    expect(current.state.scheduleChangedAtMs).toBe(editAt);
+    expect(current.state.nextRunAtMs).toBe(Date.parse("2026-09-18T05:00:00.000Z"));
+
+    cron.stop();
+  });
 });

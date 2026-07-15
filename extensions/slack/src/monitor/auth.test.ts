@@ -30,6 +30,8 @@ function makeSlackCtx(allowFrom: string[]): SlackMonitorContext {
 
 function makeAuthorizeCtx(params?: {
   allowFrom?: string[];
+  requireOwnerPresence?: boolean;
+  channelMembers?: string[];
   channelsConfig?: Record<string, { users?: string[] }>;
   resolveUserName?: (userId: string) => Promise<{ name?: string }>;
   resolveChannelName?: (
@@ -38,6 +40,7 @@ function makeAuthorizeCtx(params?: {
 }) {
   return {
     allowFrom: params?.allowFrom ?? [],
+    requireOwnerPresence: params?.requireOwnerPresence ?? false,
     accountId: "main",
     dmPolicy: "open",
     dmEnabled: true,
@@ -45,6 +48,17 @@ function makeAuthorizeCtx(params?: {
     channelsConfig: params?.channelsConfig ?? {},
     channelsConfigKeys: Object.keys(params?.channelsConfig ?? {}),
     defaultRequireMention: true,
+    app: {
+      client: {
+        conversations: {
+          members: vi.fn(async () => ({
+            members: params?.channelMembers ?? [],
+            response_metadata: {},
+          })),
+        },
+      },
+    },
+    botToken: "xoxb-test",
     isChannelAllowed: vi.fn(() => true),
     resolveUserName: vi.fn(
       params?.resolveUserName ?? ((_) => Promise.resolve({ name: undefined })),
@@ -281,6 +295,25 @@ describe("authorizeSlackSystemEventSender", () => {
 
     expect(result).toEqual({
       allowed: true,
+      channelType: "channel",
+      channelName: "general",
+    });
+  });
+
+  it("blocks system events when owner presence is required but absent", async () => {
+    const result = await authorizeSlackSystemEventSender({
+      ctx: makeAuthorizeCtx({
+        allowFrom: ["U_OWNER"],
+        requireOwnerPresence: true,
+        channelMembers: ["U_ATTACKER"],
+      }),
+      senderId: "U_ATTACKER",
+      channelId: "C1",
+    });
+
+    expect(result).toEqual({
+      allowed: false,
+      reason: "owner-not-present",
       channelType: "channel",
       channelName: "general",
     });
@@ -532,6 +565,27 @@ describe("authorizeSlackSystemEventSender interactiveEvent", () => {
       senderId: "U_OWNER",
       channelId: "C1",
       expectedSenderId: "U_OWNER",
+      interactiveEvent: true,
+    });
+
+    expect(result).toEqual({
+      allowed: true,
+      channelType: "channel",
+      channelName: "general",
+    });
+  });
+
+  it("allows interactive channel senders who match channel users when global allowFrom differs", async () => {
+    const result = await authorizeSlackSystemEventSender({
+      ctx: makeAuthorizeCtx({
+        allowFrom: ["U_OWNER"],
+        channelsConfig: {
+          C1: { users: ["U_ALLOWED"] },
+        },
+      }),
+      senderId: "U_ALLOWED",
+      channelId: "C1",
+      expectedSenderId: "U_ALLOWED",
       interactiveEvent: true,
     });
 

@@ -425,6 +425,74 @@ describe("CronService restart catch-up", () => {
     );
   });
 
+  it("does not replay the previous slot of a schedule edited after the last run", async () => {
+    // 2026-09-17 regression: a Friday 09:00 Asia/Tokyo job ran on the 11th,
+    // was moved to Asia/Dubai (five hours behind) on the 17th, and the next
+    // restart treated the 11th's Dubai slot (five hours after the Tokyo run)
+    // as missed. A slot older than the job's last edit was never due.
+    vi.setSystemTime(new Date("2026-09-17T09:56:41.000Z"));
+    await withRestartedCron(
+      [
+        {
+          id: "restart-tz-edit-no-replay",
+          name: "weekly check moved to Dubai",
+          enabled: true,
+          createdAtMs: Date.parse("2026-06-29T00:00:00.000Z"),
+          updatedAtMs: Date.parse("2026-09-17T08:29:00.000Z"),
+          schedule: { kind: "cron", expr: "0 9 * * 5", tz: "Asia/Dubai" },
+          sessionTarget: "main",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "systemEvent", text: "weekly check replayed" },
+          state: {
+            nextRunAtMs: Date.parse("2026-09-18T05:00:00.000Z"),
+            lastRunAtMs: Date.parse("2026-09-11T00:00:00.000Z"),
+            scheduleChangedAtMs: Date.parse("2026-09-17T08:29:00.000Z"),
+            lastStatus: "ok",
+          },
+        },
+      ],
+      async ({ cron, enqueueSystemEvent, requestHeartbeat }) => {
+        expect(enqueueSystemEvent).not.toHaveBeenCalled();
+        expect(requestHeartbeat).not.toHaveBeenCalled();
+        const listedJobs = await cron.list({ includeDisabled: true });
+        const updated = listedJobs.find((job) => job.id === "restart-tz-edit-no-replay");
+        expect(updated?.state.lastRunAtMs).toBe(Date.parse("2026-09-11T00:00:00.000Z"));
+        expect(updated?.state.nextRunAtMs).toBe(Date.parse("2026-09-18T05:00:00.000Z"));
+      },
+    );
+  });
+
+  it("still replays a slot missed after the schedule edit", async () => {
+    // Edited on the 17th, the new schedule's slot on the 18th passed while the
+    // gateway was down, and state still points at that slot.
+    vi.setSystemTime(new Date("2026-09-18T06:00:00.000Z"));
+    await withRestartedCron(
+      [
+        {
+          id: "restart-tz-edit-real-miss",
+          name: "weekly check moved to Dubai, slot missed",
+          enabled: true,
+          createdAtMs: Date.parse("2026-06-29T00:00:00.000Z"),
+          updatedAtMs: Date.parse("2026-09-17T08:29:00.000Z"),
+          schedule: { kind: "cron", expr: "0 9 * * 5", tz: "Asia/Dubai" },
+          sessionTarget: "main",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "systemEvent", text: "weekly check after downtime" },
+          state: {
+            nextRunAtMs: Date.parse("2026-09-25T05:00:00.000Z"),
+            lastRunAtMs: Date.parse("2026-09-11T00:00:00.000Z"),
+            scheduleChangedAtMs: Date.parse("2026-09-17T08:29:00.000Z"),
+            lastStatus: "ok",
+          },
+        },
+      ],
+      async ({ enqueueSystemEvent, requestHeartbeat }) => {
+        expectQueuedSystemEvent(enqueueSystemEvent, "weekly check after downtime");
+        expect(requestHeartbeat).toHaveBeenCalled();
+      },
+    );
+  });
+
   it("does not replay missed cron slots while error backoff is pending after restart", async () => {
     vi.setSystemTime(new Date("2025-12-13T04:02:00.000Z"));
     await withRestartedCron(

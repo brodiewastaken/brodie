@@ -323,6 +323,7 @@ describe("prepareGatewayPluginBootstrap startup plugins", () => {
       log,
     });
 
+    expect(initSubagentRegistry).toHaveBeenCalledOnce();
     expect(applyPluginAutoEnable).toHaveBeenCalledWith({
       config: sourceConfig,
       env: process.env,

@@ -5,6 +5,7 @@ import type { TelegramMessageProcessingResult } from "./bot-processing-outcome.j
 
 const buildTelegramMessageContext = vi.hoisted(() => vi.fn());
 const dispatchTelegramMessage = vi.hoisted(() => vi.fn());
+const admitTelegramScheduledInbound = vi.hoisted(() => vi.fn());
 const telegramInboundInfo = vi.hoisted(() => vi.fn());
 const sleepWithAbort = vi.hoisted(() =>
   vi.fn<(delayMs: number, signal?: AbortSignal) => Promise<void>>(async () => undefined),
@@ -34,6 +35,10 @@ vi.mock("./bot-message-dispatch.js", () => ({
   dispatchTelegramMessage,
 }));
 
+vi.mock("./scheduler-admission.js", () => ({
+  admitTelegramScheduledInbound,
+}));
+
 let createTelegramMessageProcessor: typeof import("./bot-message.js").createTelegramMessageProcessor;
 let formatTelegramInboundLogLine: typeof import("./bot-message.js").formatTelegramInboundLogLine;
 let createTelegramSpooledReplayDeferredParticipant: typeof import("./bot-processing-outcome.js").createTelegramSpooledReplayDeferredParticipant;
@@ -54,6 +59,9 @@ describe("telegram bot message processor", () => {
   beforeEach(() => {
     buildTelegramMessageContext.mockClear();
     dispatchTelegramMessage.mockClear();
+    admitTelegramScheduledInbound.mockReset().mockResolvedValue({
+      result: { accepted: false, reason: "disabled" },
+    });
     telegramInboundInfo.mockClear();
     sleepWithAbort.mockReset().mockResolvedValue(undefined);
     upsertChannelPairingRequest.mockClear();
@@ -161,6 +169,75 @@ describe("telegram bot message processor", () => {
     expect(telegramInboundInfo).toHaveBeenCalledWith(
       "Inbound message telegram:123 -> @openclaw_bot (direct, 11 chars)",
     );
+  });
+
+  it("transfers prepared inbound ownership after durable scheduler admission", async () => {
+    const context = createMessageContext({
+      accountId: "work",
+      ctxPayload: {
+        From: "telegram:123",
+        To: "telegram:123",
+        OriginatingTo: "telegram:123",
+        SessionKey: "agent:main:conversation:telegram:default:direct:telegram",
+        MessageSid: "456",
+        ChatType: "direct",
+        RawBody: "hello there",
+        CommandTurn: { kind: "normal", source: "message", authorized: false },
+      },
+    });
+    buildTelegramMessageContext.mockResolvedValue(context);
+    admitTelegramScheduledInbound.mockResolvedValue({
+      result: { accepted: true, receiptId: "receipt-1", durableAt: 1000 },
+    });
+
+    const processMessage = createTelegramMessageProcessor(baseDeps);
+    await expect(processSampleMessage(processMessage)).resolves.toEqual({ kind: "completed" });
+
+    expect(admitTelegramScheduledInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ context, allMedia: [] }),
+    );
+    expect(dispatchTelegramMessage).not.toHaveBeenCalled();
+  });
+
+  it("uses native dispatch when scheduler admission declines", async () => {
+    buildTelegramMessageContext.mockResolvedValue(createMessageContext());
+    admitTelegramScheduledInbound.mockResolvedValue({
+      result: { accepted: false, reason: "storage_failed" },
+    });
+
+    const processMessage = createTelegramMessageProcessor(baseDeps);
+    await expect(processSampleMessage(processMessage)).resolves.toEqual({ kind: "completed" });
+
+    expect(admitTelegramScheduledInbound).toHaveBeenCalledTimes(1);
+    expect(dispatchTelegramMessage).toHaveBeenCalledTimes(1);
+    expect(admitTelegramScheduledInbound.mock.invocationCallOrder[0]).toBeLessThan(
+      dispatchTelegramMessage.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("keeps control commands on the native command path", async () => {
+    buildTelegramMessageContext.mockResolvedValue(
+      createMessageContext({
+        ctxPayload: {
+          From: "telegram:123",
+          To: "telegram:123",
+          ChatType: "direct",
+          RawBody: "/status",
+          CommandTurn: {
+            kind: "text-slash",
+            source: "text",
+            authorized: true,
+            commandName: "status",
+          },
+        },
+      }),
+    );
+
+    const processMessage = createTelegramMessageProcessor(baseDeps);
+    await expect(processSampleMessage(processMessage)).resolves.toEqual({ kind: "completed" });
+
+    expect(admitTelegramScheduledInbound).not.toHaveBeenCalled();
+    expect(dispatchTelegramMessage).toHaveBeenCalledTimes(1);
   });
 
   it("runs the dispatch-start lifecycle after context creation and before dispatch", async () => {

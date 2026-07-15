@@ -70,6 +70,18 @@ const sanitizeInboundSystemTagsMock = vi.hoisted(() =>
 );
 const updatePairedDeviceMetadataMock = vi.hoisted(() => vi.fn().mockResolvedValue(true));
 const updatePairedNodeMetadataMock = vi.hoisted(() => vi.fn().mockResolvedValue(true));
+type MockHeartbeatAdmission =
+  | { accepted: false; reason: "disabled" }
+  | {
+      accepted: true;
+      completion: Promise<{ status: "ran"; durationMs: number }>;
+    };
+const admitRuntimeHeartbeatWakeMock = vi.hoisted(() =>
+  vi.fn<(_options?: unknown) => Promise<MockHeartbeatAdmission>>(async () => ({
+    accepted: false,
+    reason: "disabled",
+  })),
+);
 
 const runtimeMocks = vi.hoisted(() => ({
   agentCommandFromIngress: ingressAgentCommandMock,
@@ -141,6 +153,46 @@ vi.mock("../infra/device-pairing.js", () => ({
 vi.mock("../infra/node-pairing.js", () => ({
   updatePairedNodeMetadata: updatePairedNodeMetadataMock,
 }));
+vi.mock("../infra/heartbeat-runner.js", () => ({
+  admitRuntimeHeartbeatWake: admitRuntimeHeartbeatWakeMock,
+}));
+vi.mock("../infra/durable-system-event-wake.js", () => ({
+  admitDurableSystemEventWake: async (options: {
+    agentId?: string;
+    sessionKey: string;
+    systemEvent: { text: string; contextKey?: string | null; deliveryContext?: unknown };
+    source: string;
+    intent: string;
+    reason: string;
+    sourceGeneration: string;
+    producerKind: string;
+    coalesceMs?: number;
+  }) => {
+    runtimeMocks.enqueueSystemEvent(options.systemEvent.text, {
+      sessionKey: options.sessionKey,
+      ...(options.systemEvent.contextKey === undefined
+        ? {}
+        : { contextKey: options.systemEvent.contextKey }),
+      ...(options.systemEvent.deliveryContext === undefined
+        ? {}
+        : { deliveryContext: options.systemEvent.deliveryContext }),
+    });
+    const admission = await admitRuntimeHeartbeatWakeMock(options);
+    if (!admission.accepted) {
+      runtimeMocks.requestHeartbeat({
+        source: options.source,
+        intent: options.intent,
+        reason: options.reason,
+        ...(options.agentId ? { agentId: options.agentId } : {}),
+        sessionKey: options.sessionKey,
+        sourceGeneration: options.sourceGeneration,
+        producerKind: options.producerKind,
+        ...(options.coalesceMs === undefined ? {} : { coalesceMs: options.coalesceMs }),
+      });
+    }
+    return admission;
+  },
+}));
 
 import type { CliDeps } from "../cli/deps.js";
 import type { HealthSummary } from "../commands/health.js";
@@ -164,7 +216,10 @@ const execEventHeartbeatOptions = (sessionKey?: string) => ({
   source: "exec-event",
   intent: "event",
   reason: "exec-event",
+  agentId: "main",
   coalesceMs: 0,
+  sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+  producerKind: "node",
   ...(sessionKey ? { sessionKey } : {}),
 });
 
@@ -266,6 +321,8 @@ describe("node exec events", () => {
     enqueueSystemEventMock.mockClear();
     enqueueSystemEventMock.mockReturnValue(true);
     requestHeartbeatMock.mockClear();
+    admitRuntimeHeartbeatWakeMock.mockClear();
+    admitRuntimeHeartbeatWakeMock.mockResolvedValue({ accepted: false, reason: "disabled" });
     registerApnsRegistrationVi.mockClear();
     loadOrCreateProcessDeviceIdentityMock.mockClear();
     normalizeChannelIdVi.mockClear();
@@ -429,7 +486,7 @@ describe("node exec events", () => {
         contextKey: "exec:run-2",
       },
     );
-    expect(requestHeartbeatMock).toHaveBeenCalledWith(execEventHeartbeatOptions());
+    expect(requestHeartbeatMock).toHaveBeenCalledWith(execEventHeartbeatOptions("node-node-2"));
   });
 
   it("accepts legacy exec.finished events when authorization matches without runId", async () => {
@@ -558,7 +615,7 @@ describe("node exec events", () => {
     expect(text.startsWith("Exec finished (node=node-2 id=run-long, code 0)\n")).toBe(true);
     expect(text.endsWith("…")).toBe(true);
     expect(text.length).toBeLessThan(280);
-    expect(requestHeartbeatMock).toHaveBeenCalledWith(execEventHeartbeatOptions());
+    expect(requestHeartbeatMock).toHaveBeenCalledWith(execEventHeartbeatOptions("node-node-2"));
   });
 
   it("does not split surrogate pairs when truncating exec.finished output", async () => {
@@ -967,6 +1024,8 @@ describe("notifications changed events", () => {
   beforeEach(() => {
     enqueueSystemEventMock.mockClear();
     requestHeartbeatMock.mockClear();
+    admitRuntimeHeartbeatWakeMock.mockClear();
+    admitRuntimeHeartbeatWakeMock.mockResolvedValue({ accepted: false, reason: "disabled" });
     loadSessionEntryMock.mockClear();
     normalizeChannelIdVi.mockClear();
     normalizeChannelIdVi.mockImplementation((channel?: string | null) => channel ?? null);
@@ -998,7 +1057,24 @@ describe("notifications changed events", () => {
       source: "notifications-event",
       intent: "event",
       reason: "notifications-event",
+      agentId: "main",
       sessionKey: "node-node-n1",
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "node",
+    });
+    expect(admitRuntimeHeartbeatWakeMock).toHaveBeenCalledWith({
+      cfg: expect.any(Object),
+      agentId: "main",
+      source: "notifications-event",
+      intent: "event",
+      reason: "notifications-event",
+      sessionKey: "node-node-n1",
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "node",
+      systemEvent: {
+        text: "Notification posted (node=node-n1 key=notif-1 package=com.example.chat): Message - Ping from Alex",
+        contextKey: "notification:notif-1",
+      },
     });
   });
 
@@ -1024,7 +1100,10 @@ describe("notifications changed events", () => {
       source: "notifications-event",
       intent: "event",
       reason: "notifications-event",
+      agentId: "main",
       sessionKey: "node-node-n2",
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "node",
     });
   });
 
@@ -1043,7 +1122,10 @@ describe("notifications changed events", () => {
       source: "notifications-event",
       intent: "event",
       reason: "notifications-event",
+      agentId: "main",
       sessionKey: "agent:main:main",
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "node",
     });
   });
 
@@ -1073,7 +1155,10 @@ describe("notifications changed events", () => {
       source: "notifications-event",
       intent: "event",
       reason: "notifications-event",
+      agentId: "main",
       sessionKey: "agent:main:node-node-n5",
+      sourceGeneration: expect.stringMatching(/^[a-f0-9]{64}$/),
+      producerKind: "node",
     });
   });
 
@@ -1111,7 +1196,7 @@ describe("notifications changed events", () => {
     );
   });
 
-  it("does not wake heartbeat when notifications.changed event is deduped", async () => {
+  it("durably admits notification payload even when the ephemeral queue dedupes it", async () => {
     enqueueSystemEventMock.mockReset();
     enqueueSystemEventMock.mockReturnValueOnce(true).mockReturnValueOnce(false);
     const ctx = buildCtx();
@@ -1133,7 +1218,82 @@ describe("notifications changed events", () => {
     });
 
     expect(enqueueSystemEventMock).toHaveBeenCalledTimes(2);
-    expect(requestHeartbeatMock).toHaveBeenCalledTimes(1);
+    expect(admitRuntimeHeartbeatWakeMock).toHaveBeenCalledTimes(2);
+    const secondAdmission = (
+      admitRuntimeHeartbeatWakeMock.mock.calls as unknown as Array<[Record<string, unknown>]>
+    )[1]?.[0];
+    expect(secondAdmission).toMatchObject({
+      systemEvent: {
+        text: "Notification posted (node=node-n6 key=notif-dupe package=com.example.chat): Message - Ping from Alex",
+        contextKey: "notification:notif-dupe",
+      },
+    });
+    expect(requestHeartbeatMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps node source generation stable across exact notification redelivery", async () => {
+    const ctx = buildCtx();
+    const event = {
+      event: "notifications.changed",
+      payloadJSON: JSON.stringify({
+        change: "posted",
+        key: "notif-stable",
+        title: "Message",
+        text: "same payload",
+      }),
+    };
+
+    await handleNodeEvent(ctx, "node-stable", event);
+    await handleNodeEvent(ctx, "node-stable", event);
+
+    expect(requestHeartbeatMock).toHaveBeenCalledTimes(2);
+    const firstGeneration = requestHeartbeatMock.mock.calls[0]?.[0]?.sourceGeneration;
+    const secondGeneration = requestHeartbeatMock.mock.calls[1]?.[0]?.sourceGeneration;
+    expect(firstGeneration).toMatch(/^[a-f0-9]{64}$/);
+    expect(secondGeneration).toBe(firstGeneration);
+  });
+
+  it("does not acknowledge node work before durable wake admission commits", async () => {
+    let resolveAdmission!: (value: {
+      accepted: true;
+      completion: Promise<{ status: "ran"; durationMs: number }>;
+    }) => void;
+    admitRuntimeHeartbeatWakeMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveAdmission = resolve;
+        }),
+    );
+    const ctx = buildCtx();
+    let acknowledged = false;
+    const handled = handleNodeEvent(ctx, "node-durable", {
+      event: "notifications.changed",
+      payloadJSON: JSON.stringify({ change: "posted", key: "notif-durable" }),
+    }).then(() => {
+      acknowledged = true;
+    });
+
+    await vi.waitFor(() => expect(admitRuntimeHeartbeatWakeMock).toHaveBeenCalledOnce());
+    expect(admitRuntimeHeartbeatWakeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "node-node-durable",
+        systemEvent: {
+          text: "Notification posted (node=node-durable key=notif-durable)",
+          contextKey: "notification:notif-durable",
+        },
+      }),
+    );
+    expect(acknowledged).toBe(false);
+    expect(requestHeartbeatMock).not.toHaveBeenCalled();
+
+    resolveAdmission({
+      accepted: true,
+      completion: Promise.resolve({ status: "ran", durationMs: 1 }),
+    });
+    await handled;
+
+    expect(acknowledged).toBe(true);
+    expect(requestHeartbeatMock).not.toHaveBeenCalled();
   });
 
   it("suppresses exec notifyOnExit events when payload opts out", async () => {
