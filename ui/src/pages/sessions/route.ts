@@ -8,31 +8,34 @@ import type { SessionsRouteData } from "./sessions-page.ts";
 function routeOptions(location: RouteLocation) {
   const search = new URLSearchParams(location.search);
   const expandedSessionKey = search.get("session")?.trim() || null;
-  const showArchived = ["1", "true"].includes(search.get("showArchived")?.toLowerCase() ?? "");
+  // The operator list is deliberately an unarchived-session surface. BRD-01
+  // archives stay hidden and there is no archive-browser route.
+  const showArchived = false;
   return { expandedSessionKey, showArchived };
 }
 
-async function loadSessionsRoute(
+export async function loadSessionsRoute(
   context: ApplicationContext,
   location: RouteLocation,
 ): Promise<SessionsRouteData> {
   const options = routeOptions(location);
   const checkpointAgentId = parseAgentSessionKey(options.expandedSessionKey)?.agentId;
-  const [sessions] = await Promise.all([
-    context.sessions
-      .list({
-        activeMinutes: options.expandedSessionKey || options.showArchived ? 0 : 60,
+  const sessionRequest = options.expandedSessionKey
+    ? context.sessions.list({
+        activeMinutes: 0,
         limit: 50,
-        search: options.expandedSessionKey ?? undefined,
+        search: options.expandedSessionKey,
         includeGlobal: true,
-        includeUnknown: Boolean(options.expandedSessionKey),
-        showArchived: options.showArchived,
+        includeUnknown: true,
+        showArchived: false,
         ...(checkpointAgentId ? { agentId: checkpointAgentId } : {}),
       })
-      .then(
-        (result) => ({ result, error: null }),
-        (error: unknown) => ({ result: null, error: String(error) }),
-      ),
+    : context.sessions.listAllUnarchived();
+  const [sessions] = await Promise.all([
+    sessionRequest.then(
+      (result) => ({ result, error: null }),
+      (error: unknown) => ({ result: null, error: String(error) }),
+    ),
     context.runtimeConfig.ensureLoaded().catch(() => undefined),
   ]);
   const gateway = context.gateway.snapshot;

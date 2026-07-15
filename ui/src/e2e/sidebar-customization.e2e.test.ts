@@ -62,12 +62,38 @@ describeControlUiE2e("Control UI sidebar customization mocked Gateway E2E", () =
     const page = await context.newPage();
     await installMockGateway(page, {
       controlUiTabs: [{ group: "control", id: "logbook", label: "Logbook", pluginId: "logbook" }],
+      methodResponses: {
+        "sessions.list": {
+          count: 1,
+          defaults: { contextTokens: null, model: "gpt-5.6-sol", modelProvider: "openai" },
+          path: "",
+          sessions: [
+            {
+              contextTokens: 372_000,
+              displayName: "whatsapp:g-brodie-testing",
+              key: "agent:main:conversation:whatsapp:brodie:group:120363424071859049@g.us",
+              kind: "group",
+              status: "done",
+              totalTokens: 1,
+              updatedAt: Date.now(),
+            },
+          ],
+          ts: Date.now(),
+        },
+      },
     });
 
     try {
       await page.goto(`${server.baseUrl}overview`);
 
       const sidebar = page.locator("openclaw-app-sidebar");
+      const recentSession = sidebar.locator(
+        '.sidebar-recent-session__link[title="agent:main:conversation:whatsapp:brodie:group:120363424071859049@g.us"]',
+      );
+      await expect.poll(() => recentSession.textContent()).toContain("whatsapp:g-brodie-testing");
+      await expect
+        .poll(() => recentSession.getAttribute("title"))
+        .toBe("agent:main:conversation:whatsapp:brodie:group:120363424071859049@g.us");
       const pinnedItems = sidebar.locator(".sidebar-nav > .nav-section__items > .nav-item");
       await expect.poll(() => trimmedTextContents(pinnedItems)).toEqual(["Overview"]);
       await expect.poll(() => sidebar.locator(".sidebar-brand").count()).toBe(1);

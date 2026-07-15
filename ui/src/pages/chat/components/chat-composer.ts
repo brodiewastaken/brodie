@@ -2187,7 +2187,7 @@ export function renderChatComposer(props: ChatComposerProps) {
     ${props.showNewMessages
       ? html`
           <button class="chat-new-messages" type="button" @click=${props.onScrollToBottom}>
-            ${icons.arrowDown} New messages
+            ${icons.arrowDown} Scroll to bottom
           </button>
         `
       : nothing}

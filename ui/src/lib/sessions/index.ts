@@ -60,6 +60,7 @@ export type SessionListOptions = {
   includeUnknown?: boolean;
   configuredAgentsOnly?: boolean;
   showArchived?: boolean;
+  allUnarchived?: boolean;
   append?: boolean;
 };
 
@@ -104,6 +105,24 @@ type SessionDeleteBatchResult = {
   errors: string[];
 };
 
+export type SessionArchiveRosterSkip = {
+  key: string;
+  kind: "protected" | "error";
+  reason: string;
+};
+
+export type SessionArchiveRosterResult = {
+  archived: string[];
+  skipped: SessionArchiveRosterSkip[];
+};
+
+type SessionArchiveGatewayResult = {
+  rows: Array<
+    | { key: string; status: "archived" }
+    | { key: string; status: "protected" | "error"; reason: string }
+  >;
+};
+
 type SessionCompactResult = {
   ok?: boolean;
   compacted?: boolean;
@@ -142,6 +161,8 @@ type SessionMessageSubscription = {
 export type SessionCapability = {
   readonly state: SessionState;
   list: (options?: SessionListOptions) => Promise<SessionsListResult | null>;
+  listAllUnarchived: () => Promise<SessionsListResult | null>;
+  archiveRoster: (rows: readonly GatewaySessionRow[]) => Promise<SessionArchiveRosterResult>;
   reconcile: (
     row: GatewaySessionRow | undefined,
     defaults?: SessionsListResult["defaults"],
@@ -246,7 +267,9 @@ function buildSessionListParams(options: SessionListOptions = {}): Record<string
   const params: Record<string, unknown> = {
     ...SESSION_LIST_PARAMS,
   };
-  if (options.limit === undefined) {
+  if (options.allUnarchived === true) {
+    params.allUnarchived = true;
+  } else if (options.limit === undefined) {
     params.limit = 50;
   } else if (options.limit > 0) {
     params.limit = Math.floor(options.limit);
@@ -260,11 +283,11 @@ function buildSessionListParams(options: SessionListOptions = {}): Record<string
   if (options.configuredAgentsOnly !== undefined) {
     params.configuredAgentsOnly = options.configuredAgentsOnly;
   }
-  if (options.showArchived === true) {
+  if (options.showArchived === true && options.allUnarchived !== true) {
     params.archived = true;
   }
   const activeMinutes =
-    options.showArchived === true
+    options.allUnarchived === true || options.showArchived === true
       ? 0
       : typeof options.activeMinutes === "number" && options.activeMinutes > 0
         ? Math.floor(options.activeMinutes)
@@ -280,7 +303,7 @@ function buildSessionListParams(options: SessionListOptions = {}): Record<string
   if (search) {
     params.search = search;
   }
-  if (typeof options.offset === "number" && options.offset > 0) {
+  if (options.allUnarchived !== true && typeof options.offset === "number" && options.offset > 0) {
     params.offset = Math.floor(options.offset);
   }
   return params;
@@ -307,6 +330,10 @@ function requestSessionPatch(
     ...buildSessionRequestParams(key, options.agentId),
     ...patch,
   });
+}
+
+function archiveFailureReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function requestSessionDelete(
@@ -579,6 +606,76 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
     }
     const result = await requestSessionList(client, options);
     return disposed || gateway.snapshot.client !== client ? null : (result ?? null);
+  };
+
+  const listAllUnarchived = async (): Promise<SessionsListResult | null> => {
+    const client = gateway.snapshot.client;
+    if (!client || !gateway.snapshot.connected || disposed) {
+      return null;
+    }
+    const result = await requestSessionList(client, {
+      allUnarchived: true,
+      activeMinutes: 0,
+      includeGlobal: true,
+      includeUnknown: true,
+      configuredAgentsOnly: false,
+      showArchived: false,
+    });
+    if (disposed || gateway.snapshot.client !== client) {
+      return null;
+    }
+    return result;
+  };
+
+  const archiveRoster = async (
+    rows: readonly GatewaySessionRow[],
+  ): Promise<SessionArchiveRosterResult> => {
+    const client = gateway.snapshot.client;
+    const seen = new Set<string>();
+    const targets: Array<{ key: string; agentId?: string }> = [];
+    for (const row of rows) {
+      const key = row.key.trim();
+      if (!key || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      const agentId = parseAgentSessionKey(key)?.agentId;
+      targets.push({ key, ...(agentId ? { agentId } : {}) });
+    }
+    if (targets.length === 0) {
+      return { archived: [], skipped: [] };
+    }
+    if (!client || !gateway.snapshot.connected || disposed || gateway.snapshot.client !== client) {
+      return {
+        archived: [],
+        skipped: targets.map(({ key }) => ({
+          key,
+          kind: "error",
+          reason: "Session archiving requires an active Gateway connection.",
+        })),
+      };
+    }
+    try {
+      const result = await client.request<SessionArchiveGatewayResult>("sessions.archive", {
+        targets,
+      });
+      const archived: string[] = [];
+      const skipped: SessionArchiveRosterSkip[] = [];
+      for (const row of result.rows) {
+        if (row.status === "archived") {
+          archived.push(row.key);
+        } else {
+          skipped.push({ key: row.key, kind: row.status, reason: row.reason });
+        }
+      }
+      return { archived, skipped };
+    } catch (error) {
+      const reason = archiveFailureReason(error);
+      return {
+        archived: [],
+        skipped: targets.map(({ key }) => ({ key, kind: "error", reason })),
+      };
+    }
   };
 
   const publish = (next: SessionState) => {
@@ -1108,6 +1205,8 @@ export function createSessionCapability(gateway: SessionGateway): SessionCapabil
       return state;
     },
     list: requestList,
+    listAllUnarchived,
+    archiveRoster,
     reconcile,
     reconcileChanged,
     reconcileRunTerminal,

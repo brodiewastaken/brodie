@@ -26,6 +26,7 @@ import {
 import {
   areUiSessionKeysEquivalent,
   buildAgentMainSessionKey,
+  canArchiveSessionRow,
   parseAgentSessionKey,
   resolveUiConfiguredMainKey,
 } from "../../lib/sessions/session-key.ts";
@@ -53,6 +54,26 @@ function parseFilterInteger(value: string): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function archiveAllSummary(
+  archivedCount: number,
+  protectedSkips: readonly { key: string; reason: string }[],
+  errorCount: number,
+): string {
+  const archivedLabel = archivedCount === 1 ? "session" : "sessions";
+  const parts = [`Archived ${archivedCount} ${archivedLabel}.`];
+  if (protectedSkips.length > 0) {
+    parts.push(
+      `Protected skips (${protectedSkips.length}): ${protectedSkips
+        .map((skip) => `${skip.key}: ${skip.reason}`)
+        .join("; ")}`,
+    );
+  }
+  if (errorCount > 0) {
+    parts.push(`Errors: ${errorCount}.`);
+  }
+  return parts.join(" ");
+}
+
 class SessionsPage extends LitElement {
   @consume({ context: applicationContext, subscribe: false })
   private context?: ApplicationContext;
@@ -62,10 +83,10 @@ class SessionsPage extends LitElement {
   @state() private result: SessionsListResult | null = null;
   @state() private loading = false;
   @state() private error: string | null = null;
-  @state() private activeMinutes = "60";
-  @state() private limit = "50";
+  @state() private activeMinutes = "";
+  @state() private limit = "";
   @state() private includeGlobal = true;
-  @state() private includeUnknown = false;
+  @state() private includeUnknown = true;
   @state() private showArchived = false;
   @state() private searchQuery = "";
   @state() private sortColumn: "key" | "kind" | "updated" | "tokens" = "updated";
@@ -83,6 +104,8 @@ class SessionsPage extends LitElement {
   @state() private checkpointLoadingKey: string | null = null;
   @state() private checkpointBusyKey: string | null = null;
   @state() private checkpointErrorByKey: Record<string, string> = {};
+  @state() private archiveAllPending = false;
+  @state() private archiveAllSummary: string | null = null;
 
   private stopSessionSubscription?: () => void;
   private stopAgentIdentitySubscription?: () => void;
@@ -220,6 +243,8 @@ class SessionsPage extends LitElement {
       this.checkpointLoadingKey = null;
       this.checkpointBusyKey = null;
       this.checkpointErrorByKey = {};
+      this.archiveAllPending = false;
+      this.archiveAllSummary = null;
     }
     if (!snapshot.connected || !snapshot.client) {
       this.sessionRequestId += 1;
@@ -248,7 +273,7 @@ class SessionsPage extends LitElement {
     if (!this.routeDataEnabled) {
       return;
     }
-    this.showArchived = data.showArchived;
+    this.showArchived = false;
     if (data.expandedSessionKey) {
       this.activeMinutes = "";
       this.limit = "";
@@ -258,10 +283,10 @@ class SessionsPage extends LitElement {
       this.page = 0;
       this.selectedKeys = new Set();
     } else {
-      this.activeMinutes = "60";
-      this.limit = "50";
+      this.activeMinutes = "";
+      this.limit = "";
       this.includeGlobal = true;
-      this.includeUnknown = false;
+      this.includeUnknown = true;
     }
     this.expandedSessionKey = data.expandedSessionKey;
     // Only route-driven expansion narrows the list query; interactive drawer
@@ -276,9 +301,7 @@ class SessionsPage extends LitElement {
       }
       return;
     }
-    this.result = data.result
-      ? filterSessionRows(data.result, { showArchived: data.showArchived })
-      : null;
+    this.result = data.result ? filterSessionRows(data.result, { showArchived: false }) : null;
     this.error = data.error;
     this.loading = false;
     const sharedSessions = context.sessions.state;
@@ -351,7 +374,17 @@ class SessionsPage extends LitElement {
     this.loading = true;
     this.error = null;
     try {
-      const result = await context.sessions.list(this.sessionListOptions());
+      const options = this.sessionListOptions();
+      const loadsCompleteUnarchivedRoster =
+        !this.deepLinkSessionKey &&
+        !options.showArchived &&
+        options.activeMinutes === undefined &&
+        options.limit === undefined &&
+        options.includeGlobal &&
+        options.includeUnknown;
+      const result = loadsCompleteUnarchivedRoster
+        ? await context.sessions.listAllUnarchived()
+        : await context.sessions.list(options);
       if (requestId !== this.sessionRequestId) {
         return;
       }
@@ -508,6 +541,90 @@ class SessionsPage extends LitElement {
     }
     if (result.errors.length > 0) {
       this.error = result.errors.join("; ");
+    }
+  }
+
+  private async archiveAll() {
+    const context = this.context;
+    if (!context || this.loading || this.archiveAllPending) {
+      return;
+    }
+    this.archiveAllPending = true;
+    this.archiveAllSummary = null;
+    this.error = null;
+    this.sessionMutationPending = true;
+    try {
+      const complete = await context.sessions.listAllUnarchived();
+      if (!complete) {
+        throw new Error("Unable to load the complete unarchived session roster.");
+      }
+      const roster = complete.sessions;
+      const mainKey = resolveUiConfiguredMainKey({
+        agentsList: context.agents.state.agentsList,
+        hello: context.gateway.snapshot.hello,
+      });
+      const eligibleCount = roster.filter((row) => canArchiveSessionRow(row, mainKey)).length;
+      if (
+        eligibleCount > 0 &&
+        !window.confirm(
+          `Archive ${eligibleCount} eligible ${eligibleCount === 1 ? "session" : "sessions"}?\n\nProtected and active sessions will be skipped.`,
+        )
+      ) {
+        return;
+      }
+      const outcome = await context.sessions.archiveRoster(roster);
+      const archived = new Set(outcome.archived);
+      if (archived.size > 0 && this.result) {
+        const sessions = this.result.sessions.filter((row) => !archived.has(row.key));
+        const totalCount = this.result.totalCount;
+        this.result = {
+          ...this.result,
+          count: sessions.length,
+          ...(typeof totalCount === "number"
+            ? { totalCount: Math.max(0, totalCount - archived.size) }
+            : {}),
+          sessions,
+        };
+        this.selectedKeys = new Set([...this.selectedKeys].filter((key) => !archived.has(key)));
+        if (this.expandedSessionKey && archived.has(this.expandedSessionKey)) {
+          this.expandedSessionKey = null;
+        }
+        if (this.deepLinkSessionKey && archived.has(this.deepLinkSessionKey)) {
+          this.deepLinkSessionKey = null;
+        }
+        const currentKey = context.gateway.snapshot.sessionKey;
+        if (
+          currentKey &&
+          [...archived].some((key) => areUiSessionKeysEquivalent(key, currentKey))
+        ) {
+          context.gateway.setSessionKey(
+            buildAgentMainSessionKey({
+              agentId:
+                parseAgentSessionKey(currentKey)?.agentId ??
+                context.agentSelection.state.selectedId ??
+                "main",
+              mainKey,
+            }),
+          );
+        }
+      }
+      const protectedSkips = outcome.skipped.filter((skip) => skip.kind === "protected");
+      const errorSkips = outcome.skipped.filter((skip) => skip.kind === "error");
+      this.archiveAllSummary = archiveAllSummary(
+        outcome.archived.length,
+        protectedSkips,
+        errorSkips.length,
+      );
+      if (errorSkips.length > 0) {
+        this.error = `Archive errors: ${errorSkips
+          .map((skip) => `${skip.key}: ${skip.reason}`)
+          .join("; ")}`;
+      }
+    } catch (error) {
+      this.error = String(error);
+    } finally {
+      this.sessionMutationPending = false;
+      this.archiveAllPending = false;
     }
   }
 
@@ -784,6 +901,8 @@ class SessionsPage extends LitElement {
         checkpointLoadingKey: this.checkpointLoadingKey,
         checkpointBusyKey: this.checkpointBusyKey,
         checkpointErrorByKey: this.checkpointErrorByKey,
+        archiveAllPending: this.archiveAllPending,
+        archiveAllSummary: this.archiveAllSummary,
         onFiltersChange: (next) => this.updateFilters(next),
         onClearFilters: () => {
           this.activeMinutes = "";
@@ -817,6 +936,7 @@ class SessionsPage extends LitElement {
           this.page = 0;
         },
         onRefresh: () => void this.loadSessions(),
+        onArchiveAll: () => void this.archiveAll(),
         onPatch: (key, patch) => void this.patchSession(key, patch),
         onToggleSelect: (key) => {
           const next = new Set(this.selectedKeys);

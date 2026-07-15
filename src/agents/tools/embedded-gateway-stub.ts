@@ -35,11 +35,11 @@ interface EmbeddedGatewayRuntime {
   }) => unknown[];
   getMaxChatHistoryMessagesBytes: () => number;
   augmentChatHistoryWithCanvasBlocks: (msgs: unknown[]) => unknown[];
-  CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES: number;
-  enforceChatHistoryFinalBudget: (opts: { messages: unknown[]; maxBytes: number }) => {
+  BOUNDED_CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES: number;
+  enforceBoundedChatHistoryBudget: (opts: { messages: unknown[]; maxBytes: number }) => {
     messages: unknown[];
   };
-  replaceOversizedChatHistoryMessages: (opts: {
+  replaceOversizedBoundedChatHistoryMessages: (opts: {
     messages: unknown[];
     maxSingleMessageBytes: number;
   }) => { messages: unknown[] };
@@ -363,13 +363,19 @@ async function handleChatHistory(params: Record<string, unknown>): Promise<{
       : capOffsetChatHistoryProjectedMessages(projected, max);
   const normalized = rt.augmentChatHistoryWithCanvasBlocks(windowed);
 
-  const perMessageHardCap = Math.min(rt.CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES, maxHistoryBytes);
-  const replaced = rt.replaceOversizedChatHistoryMessages({
+  const perMessageHardCap = Math.min(
+    rt.BOUNDED_CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES,
+    maxHistoryBytes,
+  );
+  const replaced = rt.replaceOversizedBoundedChatHistoryMessages({
     messages: normalized,
     maxSingleMessageBytes: perMessageHardCap,
   });
   const capped = rt.capArrayByJsonBytes(replaced.messages, maxHistoryBytes).items;
-  const bounded = rt.enforceChatHistoryFinalBudget({ messages: capped, maxBytes: maxHistoryBytes });
+  const bounded = rt.enforceBoundedChatHistoryBudget({
+    messages: capped,
+    maxBytes: maxHistoryBytes,
+  });
   const nextOffset =
     offsetPage !== undefined
       ? resolveChatHistoryNextOffset({

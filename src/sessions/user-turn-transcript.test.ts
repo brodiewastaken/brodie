@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { runAgentHarnessBeforeMessageWriteHook } from "../agents/harness/hook-helpers.js";
 import {
   appendUserTurnTranscriptMessage,
+  attachUserTurnModelInputSnapshot,
   buildPersistedUserTurnMediaInputsFromFields,
   createUserTurnTranscriptRecorder,
   mergePreparedUserTurnMessageForRuntime,
@@ -169,6 +170,82 @@ describe("user turn transcript persistence", () => {
         // remote.png has no path (the "" was a placeholder) but does have a url.
         { url: "https://example.test/remote.png", contentType: "image/png" },
       ]);
+    });
+  });
+
+  it("attaches exact model-input metadata without changing persisted user content", () => {
+    const message = castAgentMessage({
+      role: "user",
+      content: "persisted inbound envelope",
+      __openclaw: {
+        humanInboundBatch: { version: 1 },
+      },
+    });
+    if (message.role !== "user") {
+      throw new Error("expected user message");
+    }
+
+    attachUserTurnModelInputSnapshot(message, {
+      version: 1,
+      items: [
+        {
+          kind: "current-user",
+          role: "user",
+          content: "[Fri 2026-07-31 11:05 JST] persisted inbound envelope",
+        },
+        {
+          kind: "runtime-context",
+          role: "user",
+          placement: "tail",
+          content: "exact wrapped runtime context",
+        },
+      ],
+    });
+
+    expect(message.content).toBe("persisted inbound envelope");
+    expect(message).toMatchObject({
+      __openclaw: {
+        humanInboundBatch: { version: 1 },
+        modelInput: {
+          version: 1,
+          items: [
+            {
+              kind: "current-user",
+              role: "user",
+              content: "[Fri 2026-07-31 11:05 JST] persisted inbound envelope",
+            },
+            {
+              kind: "runtime-context",
+              role: "user",
+              placement: "tail",
+              content: "exact wrapped runtime context",
+            },
+          ],
+        },
+      },
+    });
+
+    const merged = mergePreparedUserTurnMessageForRuntime({
+      runtimeMessage: castAgentMessage({
+        role: "user",
+        content: "runtime prompt",
+      }),
+      preparedMessage: message,
+    });
+    expect(merged).toMatchObject({
+      content: "persisted inbound envelope",
+      __openclaw: {
+        humanInboundBatch: { version: 1 },
+        modelInput: {
+          version: 1,
+          items: expect.arrayContaining([
+            expect.objectContaining({
+              kind: "runtime-context",
+              content: "exact wrapped runtime context",
+            }),
+          ]),
+        },
+      },
     });
   });
 

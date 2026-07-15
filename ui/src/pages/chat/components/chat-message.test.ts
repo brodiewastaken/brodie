@@ -3178,6 +3178,46 @@ describe("grouped chat rendering", () => {
     expect(sidebar.kind).toBe("markdown");
     expect(sidebar.fullMessageRequest).toBeUndefined();
   });
+
+  it("renders conversational action state, rationale, authored output, and receipt", () => {
+    const container = document.createElement("div");
+    renderAssistantMessage(container, {
+      role: "assistant",
+      content: [{ type: "text", text: "first\n\nsecond" }],
+      openclawMessageToolMirror: { toolName: "message", toolCallId: "call-1" },
+      openclawConversationalAction: {
+        action: "reply",
+        outcome: "partial_delivery",
+        nativeThinking: ["provider-native private plan"],
+        invisibleThinking: "brief action rationale",
+        visibleMessages: ["first", "second"],
+        channel: "whatsapp",
+        receipt: { ok: false, deliveryStatus: "partial_failed" },
+      },
+    });
+
+    expect(
+      container.querySelector(".chat-conversation-action__rationale")?.hasAttribute("open"),
+    ).toBe(false);
+    expect(container.querySelector(".chat-conversation-action__thinking")?.textContent).toContain(
+      "provider-native private plan",
+    );
+    expect(container.querySelector(".chat-conversation-action__rationale")?.textContent).toContain(
+      "action rationale · unsent",
+    );
+    expect(container.querySelector(".chat-conversation-action__rationale")?.textContent).toContain(
+      "brief action rationale",
+    );
+    expect(container.querySelectorAll(".chat-conversation-action__bubble")).toHaveLength(2);
+    expect(container.querySelector(".chat-conversation-action__header")?.textContent).toContain(
+      "partial_delivery",
+    );
+    expect(container.querySelector(".chat-conversation-action__receipt")?.textContent).toContain(
+      "partial_failed",
+    );
+    expect(container.textContent?.match(/first/g)).toHaveLength(1);
+    expect(container.textContent?.match(/second/g)).toHaveLength(1);
+  });
 });
 
 describe("formatChatTimestampForDisplay time format", () => {

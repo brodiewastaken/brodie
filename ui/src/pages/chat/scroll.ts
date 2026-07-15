@@ -21,6 +21,7 @@ type ChatScrollHost = {
   chatNewMessagesBelow: boolean;
   chatIsProgrammaticScroll: boolean;
   chatProgrammaticScrollTarget: number;
+  requestUpdate?: () => void;
   settings?: {
     chatAutoScroll?: ChatAutoScrollMode;
   };
@@ -49,7 +50,7 @@ export function scheduleChatScroll(
     host.chatScrollTimeout = null;
   }
   const pickScrollTarget = () => {
-    const container = queryHost(host, ".chat-thread") as HTMLElement | null;
+    const container = queryHost(host, ".chat-raw-transcript") as HTMLElement | null;
     if (container) {
       const overflowY = getComputedStyle(container).overflowY;
       const canScroll =
@@ -116,7 +117,11 @@ export function scheduleChatScroll(
         host.chatIsProgrammaticScroll = false;
       });
       host.chatUserNearBottom = true;
+      const hidScrollToBottom = host.chatNewMessagesBelow;
       host.chatNewMessagesBelow = false;
+      if (hidScrollToBottom) {
+        host.requestUpdate?.();
+      }
       const retryDelay = effectiveForce ? 150 : 120;
       host.chatScrollTimeout = window.setTimeout(() => {
         host.chatScrollTimeout = null;
@@ -188,13 +193,14 @@ export function handleChatScroll(host: ChatScrollHost, event: Event) {
     host.chatHeaderControlsHidden = false;
   }
 
-  // Clear the "new messages below" indicator when user scrolls back to bottom.
-  if (host.chatUserNearBottom) {
-    host.chatNewMessagesBelow = false;
-  }
+  // This state also owns the manual scroll-to-bottom affordance. Near-bottom
+  // auto-follow has a generous threshold, but the explicit control remains
+  // available until the operator is actually at the latest event.
+  host.chatNewMessagesBelow = distanceFromBottom > 2;
 }
 
 export function resetChatScroll(host: ChatScrollHost) {
+  const hidScrollToBottom = host.chatNewMessagesBelow;
   host.chatHasAutoScrolled = false;
   host.chatUserNearBottom = true;
   host.chatFollowLocked = false;
@@ -204,4 +210,7 @@ export function resetChatScroll(host: ChatScrollHost) {
   host.chatNewMessagesBelow = false;
   host.chatIsProgrammaticScroll = false;
   host.chatProgrammaticScrollTarget = 0;
+  if (hidScrollToBottom) {
+    host.requestUpdate?.();
+  }
 }

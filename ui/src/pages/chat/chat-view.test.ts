@@ -26,6 +26,7 @@ import {
   getChatAttachmentDataUrl,
   resetChatAttachmentPayloadStoreForTest,
 } from "./attachment-payload-store.ts";
+import { loadRawTranscriptFullMessage } from "./chat-pane.ts";
 import { switchChatFastMode, switchChatModel, switchChatThinkingLevel } from "./chat-session.ts";
 import { renderChat, resetChatViewState } from "./chat-view.ts";
 import { renderChatQueue, resetChatComposerState } from "./components/chat-composer.ts";
@@ -664,25 +665,469 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-describe("chat compaction divider", () => {
-  it("renders checkpoint recovery copy and action", () => {
-    const onOpenSessionCheckpoints = vi.fn();
+function encodeBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32 * 1024) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32 * 1024));
+  }
+  return globalThis.btoa(binary);
+}
+
+function chunkedTranscriptRequest(record: unknown) {
+  const encoded = new TextEncoder().encode(JSON.stringify(record));
+  const request = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+    const offset = params.chunkOffset as number;
+    const maxBytes = params.chunkBytes as number;
+    const bytes = encoded.subarray(offset, Math.min(encoded.length, offset + maxBytes));
+    return {
+      ok: true,
+      seq: params.seq,
+      chunk: {
+        offset,
+        byteLength: bytes.byteLength,
+        totalBytes: encoded.byteLength,
+        dataBase64: encodeBase64(bytes),
+        done: offset + bytes.byteLength === encoded.byteLength,
+      },
+    };
+  });
+  return { encoded, request };
+}
+
+describe("raw transcript timeline", () => {
+  it("forwards raw transcript scrolling to the shared scroll-to-bottom state", () => {
+    const onChatScroll = vi.fn();
     const container = renderChatView({
-      messages: [{ __testDivider: true }],
-      onOpenSessionCheckpoints,
+      messages: [{ role: "user", content: "hello" }],
+      onChatScroll,
     });
 
-    expect(container.querySelector(".chat-divider__label")?.textContent).toBe("Compacted history");
-    expect(container.querySelector(".chat-divider__description")?.textContent?.trim()).toBe(
-      "The compacted transcript is preserved as a checkpoint. Open session checkpoints to branch or restore from that compacted view.",
+    container
+      .querySelector<HTMLElement>(".chat-raw-transcript")!
+      .dispatchEvent(new Event("scroll", { bubbles: true }));
+
+    expect(onChatScroll).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders authored input, model-visible input, thinking, actions, and receipts as semantic events", async () => {
+    const container = renderChatView({
+      messages: [
+        {
+          role: "user",
+          content: "[QUEUE ENGINE] the model-visible envelope",
+          openclawSourceMessage: { text: "hello brodie" },
+          __openclaw: {
+            seq: 41,
+            modelInput: {
+              version: 1,
+              items: [
+                {
+                  kind: "current-user",
+                  role: "user",
+                  content: "[Fri 2026-07-31 11:05 JST] [QUEUE ENGINE] the model-visible envelope",
+                },
+                {
+                  kind: "runtime-context",
+                  role: "user",
+                  placement: "tail",
+                  content:
+                    "OpenClaw runtime context\n<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nactual Slack thread history\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+                },
+              ],
+            },
+            humanInboundBatch: {
+              version: 1,
+              conversation: {
+                channel: "discord",
+                conversationType: "guild_channel",
+                conversationName: "#testing",
+                sessionKey: "agent:main:conversation:discord:channel:C123",
+              },
+              inbounds: [
+                {
+                  sender: { label: "Abhay", id: "user-1" },
+                  messageId: "message-1",
+                  authoredBody: "hello brodie",
+                  quote: {
+                    sender: "quoted sender",
+                    messageId: "quoted-message",
+                    media: [
+                      {
+                        kind: "image",
+                        mimeType: "image/jpeg",
+                        mediaRef: "discord:quoted-message:0",
+                        sourceMessageId: "quoted-message",
+                        sourceIndex: 0,
+                        nativeImageCandidate: { contentHash: "sha256:quoted" },
+                        understanding: [
+                          {
+                            kind: "image.description",
+                            text: "possibly the quoted image",
+                            provider: "google",
+                            model: "gemini-3-flash",
+                            trust: "derived_untrusted",
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                  media: [
+                    {
+                      kind: "image",
+                      mimeType: "image/png",
+                      mediaRef: "discord:message-1:0",
+                      sourceMessageId: "message-1",
+                      sourceIndex: 0,
+                      nativeImageCandidate: { contentHash: "sha256:abc123" },
+                      understanding: [
+                        {
+                          kind: "image.description",
+                          text: "possibly a screenshot",
+                          provider: "google",
+                          model: "gemini-3-flash",
+                          trust: "derived_untrusted",
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "private plan" },
+            {
+              type: "toolCall",
+              id: "call-1",
+              name: "message",
+              arguments: {
+                action: "send",
+                invisibleThinking: "why this reply is right",
+                visibleMessages: ["morning bro"],
+                endTurn: true,
+              },
+            },
+          ],
+          __openclaw: { seq: 42 },
+        },
+        {
+          role: "toolResult",
+          toolName: "message",
+          toolCallId: "call-1",
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "sent",
+                authoredMessages: [
+                  {
+                    authoredIndex: 0,
+                    status: "sent",
+                    bubbles: [{ messageId: "1", quoted: true }],
+                  },
+                ],
+              }),
+            },
+          ],
+          __openclaw: { seq: 43 },
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "ordinary provider prose" }],
+          __openclaw: { seq: 44 },
+        },
+      ],
+    });
+    await Promise.resolve();
+
+    expect(container.querySelectorAll(".chat-raw-event")).toHaveLength(4);
+    expect(
+      container.querySelector('[data-event-kind="inbound"] .chat-raw-event__source')?.textContent,
+    ).toContain("hello brodie");
+    expect(
+      container.querySelector('[data-event-kind="inbound"] .chat-raw-event__source')?.textContent,
+    ).toContain("Abhay");
+    expect(
+      container.querySelector<HTMLDetailsElement>("details.chat-raw-event__model-input")?.open,
+    ).toBe(false);
+    expect(
+      container.querySelector('[data-event-kind="inbound"] .chat-raw-event__model-input')
+        ?.textContent,
+    ).toContain("[Fri 2026-07-31 11:05 JST] [QUEUE ENGINE] the model-visible envelope");
+    expect(
+      container.querySelector('[data-event-kind="inbound"] .chat-raw-event__model-input')
+        ?.textContent,
+    ).toContain("actual Slack thread history");
+    expect(
+      container.querySelector('[data-event-kind="inbound"] .chat-raw-event__model-input')
+        ?.textContent,
+    ).toContain("captured current-turn text input");
+    expect(
+      container.querySelector('[data-event-kind="inbound"] .chat-raw-event__persisted-input')
+        ?.textContent,
+    ).toContain("[QUEUE ENGINE] the model-visible envelope");
+    expect(container.querySelectorAll('[data-block-kind="native-image"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-block-kind="derived-media"]')).toHaveLength(2);
+    expect(container.querySelector('[data-block-kind="native-image"]')?.textContent).toContain(
+      "quoted sender · quoted-message",
     );
-    const button = container.querySelector<HTMLButtonElement>(".chat-divider__action");
-    expect(button?.textContent?.trim()).toBe("Open checkpoints");
+    expect(container.querySelector('[data-block-kind="derived-media"]')?.textContent).toContain(
+      "google / gemini-3-flash",
+    );
+    expect(container.querySelector('[data-block-kind="thinking"]')?.textContent).toContain(
+      "private plan",
+    );
+    expect(
+      container.querySelector('[data-block-kind="invisible-thinking"]')?.textContent,
+    ).toContain("private thought");
+    expect(
+      container.querySelector('[data-block-kind="invisible-thinking"]')?.textContent,
+    ).toContain("why this reply is right");
+    expect(container.querySelector('[data-block-kind="visible-message"]')?.textContent).toContain(
+      "morning bro",
+    );
+    expect(container.querySelector('[data-block-kind="assistant-text"]')?.textContent).toContain(
+      "ordinary provider prose",
+    );
+    expect(
+      container
+        .querySelector('[data-block-kind="assistant-text"]')
+        ?.classList.contains("chat-raw-block--visible-message"),
+    ).toBe(false);
+    expect(container.querySelector('[data-block-kind="tool-call"]')?.textContent).toContain(
+      "message · send",
+    );
+    expect(container.querySelector('[data-event-kind="tool-result"]')?.textContent).toContain(
+      "sent",
+    );
+    expect(container.querySelector('[data-event-kind="tool-result"]')?.textContent).toContain(
+      "1 authored · 1 bubble · 1 receipt · quoted",
+    );
+    expect(
+      container.querySelector<HTMLDetailsElement>("details.chat-raw-block--tool-result")?.open,
+    ).toBe(false);
+    expect(container.querySelectorAll("details.chat-raw-exact-json")).toHaveLength(4);
+    expect(container.querySelector(".chat-raw-row > pre")).toBeNull();
+  });
 
-    expect(button).toBeInstanceOf(HTMLButtonElement);
-    button!.click();
+  it("keeps a sender-attributed authored card for a media-only inbound", async () => {
+    const container = renderChatView({
+      messages: [
+        {
+          role: "user",
+          content: "[QUEUE ENGINE] media-only envelope",
+          __openclaw: {
+            seq: 45,
+            humanInboundBatch: {
+              placement: "idle",
+              conversation: { channel: "whatsapp" },
+              inbounds: [
+                {
+                  sender: { label: "Abhay", id: "user-1" },
+                  messageId: "message-media",
+                  authoredBody: "",
+                  media: [
+                    {
+                      kind: "image",
+                      sourceMessageId: "message-media",
+                      sourceIndex: 0,
+                      nativeImageCandidate: { contentHash: "sha256:media" },
+                      understanding: [],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    await Promise.resolve();
 
-    expect(onOpenSessionCheckpoints).toHaveBeenCalledTimes(1);
+    const source = container.querySelector('[data-event-kind="inbound"] .chat-raw-event__source');
+    expect(source?.textContent).toContain("Abhay");
+    expect(source?.textContent).toContain("1 media");
+    expect(container.querySelectorAll('[data-block-kind="native-image"]')).toHaveLength(1);
+  });
+
+  it("serializes exact persisted rows only when their disclosure opens", async () => {
+    let serializationCount = 0;
+    const record = {
+      role: "user",
+      content: "hello brodie",
+      __openclaw: { seq: 1 },
+      toJSON() {
+        serializationCount += 1;
+        return { role: "user", content: "hello brodie", __openclaw: { seq: 1 } };
+      },
+    };
+    const container = renderChatView({ messages: [record] });
+    await Promise.resolve();
+
+    const details = container.querySelector<HTMLDetailsElement>("details.chat-raw-exact-json");
+    expect(details?.querySelector("pre")?.textContent).toBe("");
+    expect(serializationCount).toBe(0);
+
+    details!.open = true;
+    details!.dispatchEvent(new Event("toggle"));
+    expect(serializationCount).toBe(1);
+    expect(details?.querySelector("pre")?.textContent).toContain('"hello brodie"');
+
+    details!.dispatchEvent(new Event("toggle"));
+    expect(serializationCount).toBe(1);
+  });
+
+  it("parses oversized string tool arguments only when their disclosure opens", async () => {
+    const argumentsJson = JSON.stringify({ payload: "x".repeat(70 * 1024) });
+    const parseSpy = vi.spyOn(JSON, "parse");
+    const container = renderChatView({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "exec", arguments: argumentsJson }],
+          __openclaw: { seq: 1 },
+        },
+      ],
+    });
+    await Promise.resolve();
+
+    expect(parseSpy.mock.calls.some(([value]) => value === argumentsJson)).toBe(false);
+    const details = container.querySelector<HTMLDetailsElement>("details.chat-raw-tool__payload");
+    details!.open = true;
+    details!.dispatchEvent(new Event("toggle"));
+    expect(parseSpy.mock.calls.some(([value]) => value === argumentsJson)).toBe(true);
+    expect(details?.querySelector("pre")?.textContent).toContain('"payload"');
+    parseSpy.mockRestore();
+  });
+
+  it("fetches a 300 KiB oversized placeholder by sequence only when exact JSON opens", async () => {
+    const fullText = "x".repeat(300 * 1024);
+    const { request } = chunkedTranscriptRequest({
+      type: "message",
+      id: "message-73",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: fullText }],
+      },
+    });
+    const client = { request } as unknown as GatewayBrowserClient;
+    const container = renderChatView({
+      sessionKey: "agent:main:conversation:test:default:direct:test",
+      fullMessageAgentId: "main",
+      messages: [
+        {
+          role: "assistant",
+          content: [],
+          __openclaw: {
+            seq: 73,
+            deferredTranscriptRow: { reason: "oversized", byteLength: 300 * 1024 },
+          },
+        },
+      ],
+      onLoadRawFullMessage: (seq, expectedSha256) =>
+        loadRawTranscriptFullMessage({
+          client,
+          connected: true,
+          sessionKey: "agent:main:conversation:test:default:direct:test",
+          agentId: "main",
+          seq,
+          ...(expectedSha256 ? { expectedSha256 } : {}),
+        }),
+    });
+    await Promise.resolve();
+
+    expect(request).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain(fullText.slice(0, 1000));
+
+    const details = container.querySelector<HTMLDetailsElement>(
+      'details.chat-raw-exact-json[data-full-row-seq="73"]',
+    );
+    details!.open = true;
+    details!.dispatchEvent(new Event("toggle"));
+
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    expect(request).toHaveBeenCalledWith("chat.message.get", {
+      sessionKey: "agent:main:conversation:test:default:direct:test",
+      agentId: "main",
+      seq: 73,
+      chunkOffset: 0,
+      chunkBytes: 512 * 1024,
+    });
+    await vi.waitFor(() => expect(details?.dataset.loaded).toBe("true"));
+    expect(details?.querySelector("pre")?.textContent).toContain(fullText);
+
+    details!.dispatchEvent(new Event("toggle"));
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconstructs an unbounded row above 8 MiB across a split UTF-8 code point", async () => {
+    const chunkBytes = 512 * 1024;
+    const marker = "界";
+    const markerOnly = new TextEncoder().encode(
+      JSON.stringify({ type: "message", message: { role: "assistant", content: marker } }),
+    );
+    const markerBytes = new TextEncoder().encode(marker);
+    const markerStart = markerOnly.findIndex((_byte, index) =>
+      markerBytes.every(
+        (markerByte, markerIndex) => markerOnly[index + markerIndex] === markerByte,
+      ),
+    );
+    expect(markerStart).toBeGreaterThan(0);
+    const padding = "x".repeat((chunkBytes - 1 - markerStart + chunkBytes) % chunkBytes);
+    const fullText = `${padding}${marker}${"y".repeat(8 * 1024 * 1024)}`;
+    const persisted = {
+      type: "message",
+      id: "message-91",
+      message: { role: "assistant", content: fullText },
+    };
+    const { encoded, request } = chunkedTranscriptRequest(persisted);
+    expect(encoded.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+    const client = { request } as unknown as GatewayBrowserClient;
+
+    const result = await loadRawTranscriptFullMessage({
+      client,
+      connected: true,
+      sessionKey: "agent:main:conversation:test:default:direct:huge",
+      agentId: "main",
+      seq: 91,
+    });
+
+    expect(request.mock.calls.length).toBeGreaterThan(16);
+    expect(result).toEqual({ ok: true, seq: 91, message: persisted });
+  });
+
+  it("fails visibly when a deferred row does not match its source hash", async () => {
+    const persisted = { type: "message", message: { role: "assistant", content: "exact" } };
+    const { request } = chunkedTranscriptRequest(persisted);
+
+    await expect(
+      loadRawTranscriptFullMessage({
+        client: { request } as unknown as GatewayBrowserClient,
+        connected: true,
+        sessionKey: "agent:main:conversation:test:default:direct:hash",
+        agentId: "main",
+        seq: 92,
+        expectedSha256: "0".repeat(64),
+      }),
+    ).rejects.toThrow("gateway transcript row hash mismatch");
+  });
+});
+
+describe("chat compaction divider", () => {
+  it("retains compaction records as inspectable raw runtime events", () => {
+    const container = renderChatView({
+      messages: [{ __testDivider: true, checkpointId: "checkpoint-1" }],
+    });
+
+    expect(container.querySelector('[data-event-kind="event"]')?.textContent).toContain(
+      "runtime event",
+    );
+    expect(container.querySelector("details.chat-raw-exact-json")?.textContent).toContain(
+      "exact persisted row",
+    );
   });
 });
 
@@ -742,233 +1187,35 @@ describe("chat code-block copy", () => {
   });
 });
 
-describe("chat history render window", () => {
-  it("starts freshly loaded large histories with a small render window", () => {
+describe("raw transcript completeness", () => {
+  it("renders every loaded history row without a presentation window", () => {
     const messages = Array.from({ length: 80 }, (_, index) => ({
       role: index % 2 === 0 ? "user" : "assistant",
       content: `message ${index}`,
-      timestamp: index,
+      __openclaw: { seq: index + 1 },
     }));
 
-    renderChatView({ messages });
+    const container = renderChatView({ messages });
 
-    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        messages,
-        historyRenderLimit: 30,
-      }),
-    );
+    expect(container.querySelectorAll(".chat-raw-event")).toHaveLength(80);
+    expect(container.querySelector('[data-seq="1"]')?.textContent).toContain("message 0");
+    expect(container.querySelector('[data-seq="80"]')?.textContent).toContain("message 79");
   });
 
-  it("expands the history render window when the user scrolls to the top", () => {
-    const messages = Array.from({ length: 80 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" : "assistant",
-      content: `message ${index}`,
-      timestamp: index,
-    }));
-    const onRequestUpdate = vi.fn();
+  it("forwards scrolling without dropping any loaded rows", () => {
     const onChatScroll = vi.fn();
-
-    const container = renderChatView({ messages, onRequestUpdate, onChatScroll });
-    const thread = requireElement(container, ".chat-thread", "chat thread") as HTMLElement;
-    thread.scrollTop = 120;
-    thread.dispatchEvent(new Event("scroll", { bubbles: true }));
-    thread.scrollTop = 0;
-    thread.dispatchEvent(new Event("scroll", { bubbles: true }));
-
-    expect(onRequestUpdate).toHaveBeenCalledTimes(1);
-    expect(onChatScroll).toHaveBeenCalledTimes(2);
-
-    buildChatItemsMock.mockClear();
-    renderChatView({ messages, onRequestUpdate, onChatScroll });
-
-    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        messages,
-        historyRenderLimit: 60,
-      }),
-    );
-  });
-
-  it("preserves the visible anchor across repeated top-scroll expansion", () => {
     const messages = Array.from({ length: 80 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" : "assistant",
+      role: "user",
       content: `message ${index}`,
-      timestamp: index,
+      __openclaw: { seq: index + 1 },
     }));
-    const onRequestUpdate = vi.fn();
-    const onChatScroll = vi.fn();
-    const frameCallbacks: FrameRequestCallback[] = [];
-    vi.stubGlobal(
-      "requestAnimationFrame",
-      vi.fn((callback: FrameRequestCallback) => {
-        frameCallbacks.push(callback);
-        return frameCallbacks.length;
-      }),
-    );
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const container = renderChatView({ messages, onChatScroll });
+    const thread = requireElement(container, ".chat-raw-transcript", "raw transcript");
 
-    const container = renderChatView({ messages, onRequestUpdate, onChatScroll });
-    const thread = requireElement(container, ".chat-thread", "chat thread") as HTMLElement;
-    Object.defineProperties(thread, {
-      clientHeight: { configurable: true, value: 100 },
-      scrollHeight: { configurable: true, value: 300 },
-    });
-    thread.scrollTop = 0;
     thread.dispatchEvent(new Event("scroll", { bubbles: true }));
 
-    Object.defineProperty(thread, "scrollHeight", { configurable: true, value: 600 });
-    buildChatItemsMock.mockClear();
-    renderChatView({ messages, onRequestUpdate, onChatScroll });
-
-    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        messages,
-        historyRenderLimit: 60,
-      }),
-    );
-    const firstExpandedThread = requireElement(
-      container,
-      ".chat-thread",
-      "chat thread",
-    ) as HTMLElement;
-    Object.defineProperties(firstExpandedThread, {
-      clientHeight: { configurable: true, value: 100 },
-      scrollHeight: { configurable: true, value: 600 },
-    });
-    for (const callback of frameCallbacks.splice(0)) {
-      callback(0);
-    }
-    expect(firstExpandedThread.scrollTop).toBe(300);
-
-    firstExpandedThread.scrollTop = 0;
-    firstExpandedThread.dispatchEvent(new Event("scroll", { bubbles: true }));
-
-    buildChatItemsMock.mockClear();
-    renderChatView({ messages, onRequestUpdate, onChatScroll });
-
-    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        messages,
-        historyRenderLimit: 80,
-      }),
-    );
-    const secondExpandedThread = requireElement(
-      container,
-      ".chat-thread",
-      "chat thread",
-    ) as HTMLElement;
-    Object.defineProperties(secondExpandedThread, {
-      clientHeight: { configurable: true, value: 100 },
-      scrollHeight: { configurable: true, value: 900 },
-    });
-    for (const callback of frameCallbacks.splice(0)) {
-      callback(0);
-    }
-    expect(secondExpandedThread.scrollTop).toBe(300);
-    expect(onRequestUpdate).toHaveBeenCalledTimes(2);
-    expect(onChatScroll).toHaveBeenCalledTimes(2);
-  });
-
-  it("does not expand the history render window for bottom auto-scrolls inside the top threshold", () => {
-    const messages = Array.from({ length: 80 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" : "assistant",
-      content: `message ${index}`,
-      timestamp: index,
-    }));
-    const onRequestUpdate = vi.fn();
-    const onChatScroll = vi.fn();
-
-    const container = renderChatView({ messages, onRequestUpdate, onChatScroll });
-    const thread = requireElement(container, ".chat-thread", "chat thread") as HTMLElement;
-    thread.scrollTop = 30;
-    thread.dispatchEvent(new Event("scroll", { bubbles: true }));
-
-    expect(onRequestUpdate).not.toHaveBeenCalled();
     expect(onChatScroll).toHaveBeenCalledTimes(1);
-
-    buildChatItemsMock.mockClear();
-    const rerenderedContainer = renderChatView({ messages, onRequestUpdate, onChatScroll });
-
-    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        messages,
-        historyRenderLimit: 30,
-      }),
-    );
-
-    const rerenderedThread = requireElement(
-      rerenderedContainer,
-      ".chat-thread",
-      "chat thread",
-    ) as HTMLElement;
-    rerenderedThread.scrollTop = 0;
-    rerenderedThread.dispatchEvent(new Event("scroll", { bubbles: true }));
-
-    expect(onRequestUpdate).toHaveBeenCalledTimes(1);
-    expect(onChatScroll).toHaveBeenCalledTimes(2);
-  });
-
-  it("expands the history render window when the thread is already at the top", () => {
-    const messages = Array.from({ length: 80 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" : "assistant",
-      content: `message ${index}`,
-      timestamp: index,
-    }));
-    const onRequestUpdate = vi.fn();
-    const onChatScroll = vi.fn();
-
-    const container = renderChatView({ messages, onRequestUpdate, onChatScroll });
-    const thread = requireElement(container, ".chat-thread", "chat thread") as HTMLElement;
-    thread.scrollTop = 0;
-    thread.dispatchEvent(new Event("scroll", { bubbles: true }));
-
-    expect(onRequestUpdate).toHaveBeenCalledTimes(1);
-    expect(onChatScroll).toHaveBeenCalledTimes(1);
-  });
-
-  it("expands the render window after render when the initial window cannot scroll", () => {
-    const messages = Array.from({ length: 80 }, (_, index) => ({
-      role: index % 2 === 0 ? "user" : "assistant",
-      content: `message ${index}`,
-      timestamp: index,
-    }));
-    const onRequestUpdate = vi.fn();
-    const onScrollToBottom = vi.fn();
-    const frameCallbacks: FrameRequestCallback[] = [];
-    vi.stubGlobal(
-      "requestAnimationFrame",
-      vi.fn((callback: FrameRequestCallback) => {
-        frameCallbacks.push(callback);
-        return frameCallbacks.length;
-      }),
-    );
-    vi.stubGlobal("cancelAnimationFrame", vi.fn());
-
-    renderChatView({ messages, onRequestUpdate, onScrollToBottom });
-
-    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        messages,
-        historyRenderLimit: 30,
-      }),
-    );
-    expect(frameCallbacks).toHaveLength(1);
-
-    frameCallbacks[0](0);
-
-    expect(onRequestUpdate).toHaveBeenCalledTimes(1);
-    expect(onScrollToBottom).toHaveBeenCalledTimes(1);
-
-    buildChatItemsMock.mockClear();
-    renderChatView({ messages, onRequestUpdate, onScrollToBottom });
-
-    expect(buildChatItemsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        messages,
-        historyRenderLimit: 60,
-      }),
-    );
+    expect(container.querySelectorAll(".chat-raw-event")).toHaveLength(80);
   });
 });
 
@@ -1318,62 +1565,29 @@ describe("per-pane chat presentation state", () => {
   });
 });
 
-describe("chat transcript rendering cache", () => {
-  it("rerenders transcript groups when assistant attachment availability changes", () => {
-    const messages = [{ role: "assistant", content: "ready" }];
-    const toolMessages: unknown[] = [];
-    const streamSegments: Array<{ text: string; ts: number }> = [];
-    const queue: ChatQueueItem[] = [];
+describe("raw transcript rerendering", () => {
+  it("replaces semantic timeline rows when the transcript reference changes", () => {
     const container = document.createElement("div");
-
     render(
-      renderChat(createChatProps({ messages, toolMessages, streamSegments, queue })),
+      renderChat(
+        createChatProps({
+          messages: [{ role: "assistant", content: "ready", __openclaw: { seq: 1 } }],
+        }),
+      ),
       container,
     );
-    assistantAttachmentRenderVersionMock.value += 1;
     render(
-      renderChat(createChatProps({ messages, toolMessages, streamSegments, queue, draft: "h" })),
+      renderChat(
+        createChatProps({
+          messages: [{ role: "assistant", content: "new reply", __openclaw: { seq: 1 } }],
+        }),
+      ),
       container,
     );
 
-    expect(renderMessageGroupMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("passes assistant attachment load callbacks to transcript groups", () => {
-    const onAssistantAttachmentLoaded = vi.fn();
-
-    renderChatView({
-      messages: [{ role: "assistant", content: "MEDIA:https://example.com/voice.ogg" }],
-      onAssistantAttachmentLoaded,
-    });
-
-    expect(renderMessageGroupMock).toHaveBeenCalledTimes(1);
-    expect(renderMessageGroupMock.mock.calls[0]?.[1]).toMatchObject({
-      onAssistantAttachmentLoaded,
-    });
-  });
-
-  it("rebuilds transcript items when the transcript reference changes", () => {
-    const toolMessages: unknown[] = [];
-    const streamSegments: Array<{ text: string; ts: number }> = [];
-    const queue: ChatQueueItem[] = [];
-
-    renderChatView({
-      messages: [{ role: "assistant", content: "ready" }],
-      toolMessages,
-      streamSegments,
-      queue,
-      draft: "",
-    });
-    renderChatView({
-      messages: [{ role: "assistant", content: "new reply" }],
-      toolMessages,
-      streamSegments,
-      queue,
-      draft: "",
-    });
-
-    expect(buildChatItemsMock).toHaveBeenCalledTimes(2);
+    expect(container.querySelectorAll(".chat-raw-event")).toHaveLength(1);
+    expect(container.querySelector(".chat-raw-event")?.textContent).toContain("new reply");
+    expect(container.textContent).not.toContain("ready");
   });
 });
 
@@ -1439,7 +1653,7 @@ describe("chat loading skeleton", () => {
     });
 
     expect(container.querySelector(".chat-reading-indicator")).toBeNull();
-    expect(container.querySelector(".chat-group")?.textContent?.trim()).toBe("Finished answer");
+    expect(container.querySelector(".chat-raw-event")?.textContent).toContain("Finished answer");
   });
 
   it("keeps existing messages visible without the skeleton during a background reload", () => {
@@ -1455,7 +1669,7 @@ describe("chat loading skeleton", () => {
     });
 
     expect(container.querySelector(".chat-loading-skeleton")).toBeNull();
-    expect(container.querySelector(".chat-group")?.textContent?.trim()).toBe(
+    expect(container.querySelector(".chat-raw-event")?.textContent).toContain(
       "Already loaded answer",
     );
   });
@@ -1468,7 +1682,9 @@ describe("chat loading skeleton", () => {
     });
 
     expect(container.querySelector(".chat-loading-skeleton")).toBeNull();
-    expect(container.querySelector(".chat-stream")?.textContent).toBe("Partial streamed answer");
+    expect(container.querySelector(".chat-stream")?.textContent).toContain(
+      "Partial streamed answer",
+    );
   });
 
   it("keeps the reading indicator visible without the skeleton before stream text arrives", () => {
@@ -3000,7 +3216,7 @@ describe("chat sidebar raw content", () => {
     });
   });
 
-  it("does not carry full-message requests into raw views", () => {
+  it("does not carry full-message requests into a newly selected chat", () => {
     const raw = buildRawSidebarContent({
       kind: "markdown",
       content: "Rendered",

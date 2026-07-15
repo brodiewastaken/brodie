@@ -49,6 +49,12 @@ type ReplyTarget = {
   senderLabel?: string | null;
 };
 
+export type ChatReplyContextMenuProps = {
+  paneId: string;
+  onSetReply?: (target: ReplyTarget) => void;
+  onFocusComposer?: () => void;
+};
+
 type ChatThreadState = {
   searchOpen: boolean;
   searchQuery: string;
@@ -514,18 +520,18 @@ function createReplyContextMenuButton(onClick: () => void): HTMLButtonElement {
   return button;
 }
 
-function handleChatContextMenu(event: MouseEvent, props: ChatThreadProps) {
-  const bubble = (event.target as HTMLElement).closest(".chat-bubble");
+export function handleChatContextMenu(event: MouseEvent, props: ChatReplyContextMenuProps) {
+  const bubble = (event.target as HTMLElement).closest(".chat-bubble, .chat-raw-event__source");
   if (!bubble || typeof props.onSetReply !== "function") {
     return;
   }
-  const group = bubble.closest(".chat-group");
+  const group = bubble.closest(".chat-group, .chat-raw-event");
   if (!group) {
     return;
   }
   if (
     group.querySelector(".chat-reading-indicator") ||
-    group.querySelector(".chat-bubble.streaming")
+    group.querySelector(".chat-bubble.streaming, .chat-raw-event__source.streaming")
   ) {
     return;
   }

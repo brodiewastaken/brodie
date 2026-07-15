@@ -3570,6 +3570,10 @@ describe("followup queue collect routing", () => {
     const message = await calls[0]?.userTurnTranscriptRecorder?.resolveMessage();
     expect(message?.content).toContain("first transcript");
     expect(message?.content).toContain("second transcript");
+    expect(
+      (message as unknown as { openclawSourceMessage?: unknown } | undefined)
+        ?.openclawSourceMessage,
+    ).toEqual({ text: "first transcript\n\nsecond transcript" });
     expect((message as unknown as { MediaPaths?: string[] } | undefined)?.MediaPaths).toEqual([
       "/tmp/first.png",
       "/tmp/second.png",

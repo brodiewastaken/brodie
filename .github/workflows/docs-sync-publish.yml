@@ -1,13 +1,6 @@
 name: Docs Sync Publish Repo
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - docs/**
-      - scripts/docs-sync-publish.mjs
-      - .github/workflows/docs-sync-publish.yml
   workflow_dispatch:
 
 permissions:

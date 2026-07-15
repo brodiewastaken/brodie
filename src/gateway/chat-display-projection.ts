@@ -26,6 +26,16 @@ import { isSuppressedControlReplyText } from "./control-reply-text.js";
 
 export const DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS = 8_000;
 
+export type ChatDisplayProjectionOptions = {
+  maxChars?: number;
+  stripEnvelope?: boolean;
+  includeUnindexedAssistant?: boolean;
+};
+
+type ChatHistoryTranscriptConfigCarrier = {
+  gateway?: { controlUi?: { transcript?: { maxChars?: unknown } } };
+};
+
 type RoleContentMessage = {
   role: string;
   content?: unknown;
@@ -34,6 +44,15 @@ type RoleContentMessage = {
 type PendingMessageToolVisibleReply = {
   toolCallId?: string;
   text: string;
+  action: "reply" | "send" | "react" | "silence";
+  visibleMessages: string[];
+  nativeThinking?: string[];
+  invisibleThinking?: string;
+  visibleReaction?: string;
+  channel?: string;
+  target?: string;
+  outcome?: "delivered" | "reacted" | "deliberate_silence" | "failed" | "partial_delivery";
+  receipt?: Record<string, unknown>;
   anchor: Record<string, unknown>;
   completionAnchor?: Record<string, unknown>;
   deliveryMirrorAnchor?: Record<string, unknown>;
@@ -42,9 +61,14 @@ type PendingMessageToolVisibleReply = {
 };
 
 /** Resolve the text cap used when projecting chat history for display. */
-export function resolveEffectiveChatHistoryMaxChars(_cfg: unknown, maxChars?: number): number {
+export function resolveEffectiveChatHistoryMaxChars(cfg: unknown, maxChars?: number): number {
   if (typeof maxChars === "number") {
     return maxChars;
+  }
+  const configured = (cfg as ChatHistoryTranscriptConfigCarrier | undefined)?.gateway?.controlUi
+    ?.transcript?.maxChars;
+  if (typeof configured === "number" && Number.isFinite(configured) && configured >= 1) {
+    return Math.floor(configured);
   }
   return DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS;
 }
@@ -102,6 +126,108 @@ function extractChatHistoryBlockText(message: unknown): string | undefined {
     })
     .filter((value): value is string => typeof value === "string");
   return textParts.length > 0 ? textParts.join("\n") : undefined;
+}
+
+// Legacy decisionNote values were share-safe summaries, not the canonical private field.
+const LEGACY_ACTION_INVISIBLE_THINKING = "legacy action rationale";
+
+function projectHumanInboundBatchSources(
+  record: Record<string, unknown>,
+): Array<Record<string, unknown>> | undefined {
+  const transcriptMeta = readRecord(record["__openclaw"]);
+  const batch = readRecord(transcriptMeta?.humanInboundBatch);
+  if (!Array.isArray(batch?.inbounds) || batch.inbounds.length === 0) {
+    return undefined;
+  }
+  const sources = batch.inbounds.flatMap((value, sourceIndex) => {
+    const inbound = readRecord(value);
+    const sender = readRecord(inbound?.sender);
+    if (!inbound || !sender) {
+      return [];
+    }
+    const authoredBody = typeof inbound.authoredBody === "string" ? inbound.authoredBody : "";
+    const messageId =
+      normalizeOptionalString(inbound.messageId) ?? normalizeOptionalString(inbound.sourceEventId);
+    const senderLabel =
+      normalizeOptionalString(sender.label) ??
+      normalizeOptionalString(sender.displayName) ??
+      normalizeOptionalString(sender.username) ??
+      normalizeOptionalString(sender.id) ??
+      "Unknown sender";
+    const media = Array.isArray(inbound.media) ? inbound.media : [];
+    const mediaEntries = media.flatMap((mediaValue) => {
+      const item = readRecord(mediaValue);
+      if (!item) {
+        return [];
+      }
+      const path =
+        normalizeOptionalString(item.managedLocalPath) ?? normalizeOptionalString(item.mediaRef);
+      if (!path) {
+        return [];
+      }
+      return [{ path, mimeType: normalizeOptionalString(item.mimeType) }];
+    });
+    const sourceMessage = {
+      text: authoredBody,
+      ...(messageId ? { messageId } : {}),
+      ...(normalizeOptionalString(sender.id)
+        ? { senderId: normalizeOptionalString(sender.id) }
+        : {}),
+      senderLabel,
+      ...(normalizeOptionalString(inbound.timestamp)
+        ? { timestamp: normalizeOptionalString(inbound.timestamp) }
+        : {}),
+      ...(inbound.quote ? { quote: inbound.quote } : {}),
+      ...(media.length > 0 ? { media } : {}),
+      ...(normalizeOptionalString(inbound.eventType)
+        ? { eventType: normalizeOptionalString(inbound.eventType) }
+        : {}),
+    };
+    return [
+      {
+        ...record,
+        content: authoredBody,
+        senderLabel,
+        ...(messageId ? { messageId } : {}),
+        ...(mediaEntries.length > 0
+          ? {
+              MediaPaths: mediaEntries.map((entry) => entry.path),
+              MediaTypes: mediaEntries.map((entry) => entry.mimeType ?? "application/octet-stream"),
+            }
+          : {}),
+        openclawSourceMessage: sourceMessage,
+        __openclaw: {
+          ...transcriptMeta,
+          sourceIndex,
+          ...(messageId ? { sourceMessageId: messageId } : {}),
+        },
+      },
+    ];
+  });
+  return sources.length > 0 ? sources : undefined;
+}
+
+function projectAuthoredUserSourceMessages(messages: unknown[]): unknown[] {
+  let changed = false;
+  const projected = messages.flatMap((message) => {
+    const record = readRecord(message);
+    if (record?.role !== "user") {
+      return [message];
+    }
+    const batchSources = projectHumanInboundBatchSources(record);
+    if (batchSources) {
+      changed = true;
+      return batchSources;
+    }
+    const source = readRecord(record.openclawSourceMessage);
+    const text = normalizeOptionalString(source?.text);
+    if (!text) {
+      return [message];
+    }
+    changed = true;
+    return [{ ...record, content: text }];
+  });
+  return changed ? projected : messages;
 }
 
 function appendCanvasBlockToAssistantHistoryMessage(params: {
@@ -703,43 +829,6 @@ function readToolBlockArguments(block: Record<string, unknown>): Record<string, 
   return {};
 }
 
-function hasNonEmptyValue(value: unknown): boolean {
-  if (typeof value === "string") {
-    return value.trim().length > 0;
-  }
-  if (Array.isArray(value)) {
-    return value.some(hasNonEmptyValue);
-  }
-  if (!value || typeof value !== "object") {
-    return value != null;
-  }
-  return Object.values(value as Record<string, unknown>).some(hasNonEmptyValue);
-}
-
-function hasExplicitMessageToolRoute(args: Record<string, unknown>): boolean {
-  // Channel/provider select the transport; only concrete target ids move the send off-chat.
-  const routeFields = [
-    "target",
-    "targets",
-    "to",
-    "recipient",
-    "recipients",
-    "chatId",
-    "chat_id",
-    "channelId",
-    "channel_id",
-    "conversationId",
-    "conversation_id",
-    "threadId",
-    "thread_id",
-    "roomId",
-    "room_id",
-    "groupId",
-    "group_id",
-  ];
-  return routeFields.some((field) => hasNonEmptyValue(args[field]));
-}
-
 function readMessageToolVisibleText(args: Record<string, unknown>): string | undefined {
   for (const field of ["message", "text", "content", "body", "caption"] as const) {
     const value = args[field];
@@ -748,6 +837,16 @@ function readMessageToolVisibleText(args: Record<string, unknown>): string | und
     }
   }
   return undefined;
+}
+
+function readMessageToolVisibleMessages(args: Record<string, unknown>): string[] {
+  if (Array.isArray(args.visibleMessages)) {
+    return args.visibleMessages
+      .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+      .map((value) => stripInlineDirectiveTagsForDisplay(value).text);
+  }
+  const fallback = readMessageToolVisibleText(args);
+  return fallback ? [fallback] : [];
 }
 
 function isDryRunMessageToolRecord(record: Record<string, unknown>): boolean {
@@ -767,6 +866,20 @@ function extractMessageToolVisibleReplies(
   if (message.role !== "assistant" || !Array.isArray(message.content)) {
     return [];
   }
+  const nativeThinking = message.content.flatMap((block) => {
+    const record = readRecord(block);
+    if (!record) {
+      return [];
+    }
+    const type = normalizeToolHistoryType(record.type);
+    if (type !== "thinking" && type !== "reasoning" && type !== "redactedthinking") {
+      return [];
+    }
+    const text = normalizeOptionalString(
+      record.thinking ?? record.reasoning ?? record.text ?? record.content,
+    );
+    return text ? [text] : [];
+  });
   const replies: Array<Omit<PendingMessageToolVisibleReply, "anchor" | "succeeded">> = [];
   for (const block of message.content) {
     const record = readRecord(block);
@@ -781,21 +894,38 @@ function extractMessageToolVisibleReplies(
       continue;
     }
     const args = readToolBlockArguments(record);
-    if (normalizeOptionalString(args.action)?.toLowerCase() !== "send") {
+    const action = normalizeOptionalString(args.action)?.toLowerCase() ?? "send";
+    if (action !== "reply" && action !== "send" && action !== "react" && action !== "silence") {
       continue;
     }
     if (isDryRunMessageToolRecord(args)) {
       continue;
     }
-    if (hasExplicitMessageToolRoute(args)) {
-      continue;
-    }
-    const text = readMessageToolVisibleText(args);
-    if (!text?.trim()) {
+    const visibleMessages = readMessageToolVisibleMessages(args);
+    const visibleReaction = normalizeOptionalString(args.visibleReaction);
+    const text = action === "react" ? (visibleReaction ?? "") : visibleMessages.join("\n\n");
+    if (action !== "silence" && !text.trim()) {
       continue;
     }
     const toolCallId = readToolBlockCallId(record);
-    replies.push({ ...(toolCallId ? { toolCallId } : {}), text });
+    const invisibleThinking =
+      normalizeOptionalString(args.invisibleThinking) ??
+      (Object.hasOwn(args, "decisionNote") ? LEGACY_ACTION_INVISIBLE_THINKING : undefined);
+    replies.push({
+      ...(toolCallId ? { toolCallId } : {}),
+      text,
+      action,
+      visibleMessages,
+      ...(nativeThinking.length > 0 ? { nativeThinking } : {}),
+      ...(invisibleThinking ? { invisibleThinking } : {}),
+      ...(visibleReaction ? { visibleReaction } : {}),
+      ...(normalizeOptionalString(args.channel)
+        ? { channel: normalizeOptionalString(args.channel) }
+        : {}),
+      ...(normalizeOptionalString(args.target ?? args.to)
+        ? { target: normalizeOptionalString(args.target ?? args.to) }
+        : {}),
+    });
   }
   return replies;
 }
@@ -888,25 +1018,6 @@ function hasDryRunToolResultValue(value: unknown): boolean {
   });
 }
 
-function isSuccessfulMessageToolResult(
-  message: Record<string, unknown>,
-  pending: PendingMessageToolVisibleReply,
-): boolean {
-  const role = typeof message.role === "string" ? message.role.toLowerCase().replace(/_/g, "") : "";
-  const toolName = readMessageToolResultName(message)?.toLowerCase();
-  if (role !== "toolresult" && role !== "tool" && role !== "function" && toolName !== "message") {
-    return false;
-  }
-  if (toolName && toolName !== "message") {
-    return false;
-  }
-  const resultCallId = readMessageToolResultCallId(message);
-  if (pending.toolCallId) {
-    return resultCallId === pending.toolCallId && isSuccessfulMessageToolResultPayload(message);
-  }
-  return isSuccessfulMessageToolResultPayload(message);
-}
-
 function isSuccessfulMessageToolResultPayload(message: Record<string, unknown>): boolean {
   if (message.isError === true || (message.error != null && message.error !== false)) {
     return false;
@@ -927,15 +1038,94 @@ function isSuccessfulMessageToolResultPayload(message: Record<string, unknown>):
   return ok !== false;
 }
 
+function readMessageToolResultReceipt(
+  message: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  for (const value of [message.result, message.output, message.content, message.text]) {
+    const direct = readMaybeJsonRecord(value);
+    if (direct) {
+      return direct;
+    }
+    if (Array.isArray(value)) {
+      for (const block of value) {
+        const record = readRecord(block);
+        const parsed = readMaybeJsonRecord(record?.text ?? record?.content);
+        if (parsed) {
+          return parsed;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function classifyMessageToolOutcome(
+  message: Record<string, unknown>,
+  pending: PendingMessageToolVisibleReply,
+): PendingMessageToolVisibleReply["outcome"] | undefined {
+  const role = typeof message.role === "string" ? message.role.toLowerCase().replace(/_/g, "") : "";
+  const toolName = readMessageToolResultName(message)?.toLowerCase();
+  if (role !== "toolresult" && role !== "tool" && role !== "function" && toolName !== "message") {
+    return undefined;
+  }
+  if (toolName && toolName !== "message") {
+    return undefined;
+  }
+  if (pending.toolCallId && readMessageToolResultCallId(message) !== pending.toolCallId) {
+    return undefined;
+  }
+  const receipt = readMessageToolResultReceipt(message);
+  const deliveryStatus = normalizeOptionalString(
+    receipt?.deliveryStatus ?? receipt?.delivery_status ?? receipt?.status,
+  )?.toLowerCase();
+  if (deliveryStatus === "partial_failed") {
+    return "partial_delivery";
+  }
+  if (deliveryStatus === "failed") {
+    return "failed";
+  }
+  const failed =
+    message.isError === true ||
+    receipt?.ok === false ||
+    message.error === true ||
+    (typeof message.error === "string" && Boolean(message.error.trim()));
+  if (failed) {
+    return deliveryStatus === "partial_failed" || receipt?.sentBeforeError === true
+      ? "partial_delivery"
+      : "failed";
+  }
+  if (!isSuccessfulMessageToolResultPayload(message)) {
+    return undefined;
+  }
+  if (pending.action === "react" || deliveryStatus === "reaction") {
+    return "reacted";
+  }
+  if (pending.action === "silence") {
+    return "deliberate_silence";
+  }
+  return "delivered";
+}
+
 function buildMessageToolVisibleReplyMirror(
   pending: PendingMessageToolVisibleReply,
 ): Record<string, unknown> {
   const mirror: Record<string, unknown> = {
     role: "assistant",
-    content: [{ type: "text", text: pending.text }],
+    content: pending.text ? [{ type: "text", text: pending.text }] : [],
     openclawMessageToolMirror: {
       toolName: "message",
       ...(pending.toolCallId ? { toolCallId: pending.toolCallId } : {}),
+    },
+    openclawConversationalAction: {
+      action: pending.action,
+      visibleMessages: pending.visibleMessages,
+      ...(pending.nativeThinking ? { nativeThinking: pending.nativeThinking } : {}),
+      ...(pending.invisibleThinking ? { invisibleThinking: pending.invisibleThinking } : {}),
+      ...(pending.visibleReaction ? { visibleReaction: pending.visibleReaction } : {}),
+      ...(pending.channel ? { channel: pending.channel } : {}),
+      ...(pending.target ? { target: pending.target } : {}),
+      outcome: pending.outcome ?? "delivered",
+      ...(pending.receipt ? { receipt: pending.receipt } : {}),
     },
   };
   for (const field of ["timestamp", "createdAt", "agentId"] as const) {
@@ -1028,7 +1218,11 @@ function mirrorMessageToolVisibleReplies(messages: unknown[]): unknown[] {
     }
 
     const flushAfterCurrentMessage: PendingMessageToolVisibleReply[] = [];
-    const deliveryMirrorText = readMessageToolDeliveryMirrorText(record);
+    const deliveryMirrorText =
+      readMessageToolDeliveryMirrorText(record) ??
+      (isRenderableAssistantDisplayMessage(record)
+        ? displayTextForDuplicateCheck(record)
+        : undefined);
     const matchingDeliveryMirrorPending = deliveryMirrorText
       ? pending.filter((item) => item.text.trim() === deliveryMirrorText)
       : [];
@@ -1051,8 +1245,11 @@ function mirrorMessageToolVisibleReplies(messages: unknown[]): unknown[] {
 
     if (pending.length > 0) {
       for (const item of pending) {
-        if (!item.succeeded && isSuccessfulMessageToolResult(record, item)) {
+        const outcome = item.succeeded ? undefined : classifyMessageToolOutcome(record, item);
+        if (outcome) {
           item.succeeded = true;
+          item.outcome = outcome;
+          item.receipt = readMessageToolResultReceipt(record);
           item.completionAnchor = item.deliveryMirrorAnchor ?? record;
           if (item.deliveryMirrorAnchor) {
             if (typeof item.deliveryMirrorIndex === "number") {
@@ -1080,9 +1277,11 @@ function mirrorMessageToolVisibleReplies(messages: unknown[]): unknown[] {
       item.deliveryMirrorAnchor = record;
       item.deliveryMirrorIndex = next.length;
     }
-    next.push(message);
+    next.push(matchingDeliveryMirrorPending.length > 0 ? { ...record, display: false } : message);
     flushSelectedMirrors(flushAfterCurrentMessage);
   }
+
+  flushSucceededMirrors();
 
   return changed ? next : messages;
 }
@@ -1500,38 +1699,6 @@ function isDuplicateAcpGatewayInjectedMessage(
   return Boolean(previousText && currentText && previousText === currentText);
 }
 
-function isDuplicateChannelFinalDeliveryMirror(
-  current: Record<string, unknown>,
-  previousVisible: Record<string, unknown> | undefined,
-): boolean {
-  if (!previousVisible || !isOpenClawDeliveryMirrorAssistantMessage(current)) {
-    return false;
-  }
-  const deliveryMirror = readRecord(current.openclawDeliveryMirror);
-  if (deliveryMirror?.kind !== "channel-final") {
-    return false;
-  }
-  if (asRoleContentMessage(previousVisible)?.role !== "assistant") {
-    return false;
-  }
-  if (isOpenClawDeliveryMirrorAssistantMessage(previousVisible)) {
-    return false;
-  }
-  if (isProjectedSessionsSendForwardedMessage(previousVisible)) {
-    return false;
-  }
-  const previousMeta = readRecord(previousVisible["__openclaw"]);
-  if (typeof previousMeta?.mirrorIdentity !== "string" || !previousMeta.mirrorIdentity.trim()) {
-    return false;
-  }
-  if (hasAssistantNonTextContent(previousVisible) || hasAssistantNonTextContent(current)) {
-    return false;
-  }
-  const previousText = displayTextForDuplicateCheck(previousVisible);
-  const currentText = displayTextForDuplicateCheck(current);
-  return Boolean(previousText && currentText && previousText === currentText);
-}
-
 function toProjectedMessages(messages: unknown[]): Array<Record<string, unknown>> {
   return messages.filter(
     (message): message is Record<string, unknown> =>
@@ -1571,15 +1738,141 @@ function filterVisibleProjectedHistoryMessages(
       continue;
     }
     if (
-      isDuplicateAcpGatewayInjectedMessage(current, visible.at(-1)) ||
-      isDuplicateChannelFinalDeliveryMirror(current, messages[i - 1])
+      !current.openclawMessageToolMirror &&
+      ((current.role === "assistant" && extractMessageToolVisibleReplies(current).length > 0) ||
+        ((current.role === "toolResult" ||
+          current.role === "tool" ||
+          current.role === "function") &&
+          readMessageToolResultName(current)?.toLowerCase() === "message"))
     ) {
+      // Sanitized session recall exposes the authored action projection and its receipt,
+      // never the underlying message-tool call/result bookkeeping rows.
+      changed = true;
+      continue;
+    }
+    if (isDuplicateAcpGatewayInjectedMessage(current, visible.at(-1))) {
       changed = true;
       continue;
     }
     visible.push(current);
   }
   return changed ? visible : messages;
+}
+
+function filterStandardConversationMessages(
+  messages: Array<Record<string, unknown>>,
+  includeUnindexedAssistant = false,
+  strictOperatorProjection = true,
+): Array<Record<string, unknown>> {
+  const projected: Array<Record<string, unknown>> = [];
+  for (const message of messages) {
+    if (message.role === "user") {
+      const provenance = normalizeInputProvenance(message.provenance);
+      if (message.provenance !== undefined && !provenance) {
+        continue;
+      }
+      if (provenance && provenance.kind !== "external_user") {
+        continue;
+      }
+      const metadata = readRecord(message["__openclaw"]);
+      const source = readRecord(message.openclawSourceMessage);
+      const hasAuthoredSource = Boolean(
+        normalizeOptionalString(source?.text) ?? normalizeOptionalString(source?.messageId),
+      );
+      if (!provenance && !hasAuthoredSource) {
+        if (strictOperatorProjection) {
+          continue;
+        }
+        const legacyText = extractProjectedText(message.content ?? message.text).trim();
+        if (
+          legacyText === "[OpenClaw session new]" ||
+          legacyText.startsWith("[Queued messages while agent was busy]") ||
+          legacyText.startsWith("[📋 QUEUE ENGINE]:") ||
+          legacyText.startsWith("[SYSTEM HANDOFF]") ||
+          legacyText.startsWith("[OpenClaw room event]")
+        ) {
+          continue;
+        }
+      }
+      if (metadata?.queueBatchIdentity && !hasAuthoredSource) {
+        continue;
+      }
+      projected.push(message);
+      continue;
+    }
+    const action = readRecord(message.openclawConversationalAction);
+    if (!action) {
+      if (
+        message.role !== "assistant" ||
+        (strictOperatorProjection && isProjectedSessionsSendForwardedMessage(message))
+      ) {
+        continue;
+      }
+      if (messageContainsToolHistoryContent(message)) {
+        continue;
+      }
+      const deliveryMirror = readRecord(message.openclawDeliveryMirror);
+      const deliveryMirrorKind = normalizeOptionalString(deliveryMirror?.kind);
+      const hasDeliveredMirror =
+        isOpenClawDeliveryMirrorAssistantMessage(message) &&
+        (deliveryMirrorKind === undefined || deliveryMirrorKind === "channel-final");
+      const hasLegacyTranscriptIdentity =
+        !strictOperatorProjection &&
+        (Boolean(readRecord(message["__openclaw"])) || typeof message.timestamp === "number");
+      if (includeUnindexedAssistant || hasDeliveredMirror || hasLegacyTranscriptIdentity) {
+        projected.push(message);
+      }
+      continue;
+    }
+    const visibleMessages = Array.isArray(action.visibleMessages)
+      ? action.visibleMessages.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const receipt = readRecord(action.receipt);
+    const mirror = readRecord(message.openclawMessageToolMirror);
+    const toolCallId = normalizeOptionalString(mirror?.toolCallId);
+    const transcriptMeta = readRecord(message["__openclaw"]);
+    const actionInvisibleThinking =
+      normalizeOptionalString(action.invisibleThinking) ??
+      (Object.hasOwn(action, "decisionNote") ? LEGACY_ACTION_INVISIBLE_THINKING : undefined);
+    const minimal: Record<string, unknown> = {
+      role: "assistant",
+      content: [],
+      openclawConversationalAction: {
+        ...(typeof action.action === "string" ? { action: action.action } : {}),
+        ...(typeof action.outcome === "string" ? { outcome: action.outcome } : {}),
+        ...(Array.isArray(action.nativeThinking)
+          ? {
+              nativeThinking: action.nativeThinking.filter(
+                (entry): entry is string => typeof entry === "string" && Boolean(entry.trim()),
+              ),
+            }
+          : {}),
+        ...(actionInvisibleThinking ? { invisibleThinking: actionInvisibleThinking } : {}),
+        visibleMessages,
+        ...(typeof action.visibleReaction === "string"
+          ? { visibleReaction: action.visibleReaction }
+          : {}),
+        ...(typeof action.channel === "string" ? { channel: action.channel } : {}),
+        ...(typeof action.target === "string" ? { target: action.target } : {}),
+        ...(receipt ? { receipt: { ...receipt } } : {}),
+      },
+      ...(transcriptMeta || toolCallId
+        ? {
+            __openclaw: {
+              ...transcriptMeta,
+              ...(toolCallId ? { conversationalActionId: toolCallId } : {}),
+            },
+          }
+        : {}),
+    };
+    for (const field of ["timestamp", "createdAt", "agentId", "senderLabel"] as const) {
+      if (message[field] !== undefined) {
+        minimal[field] = message[field];
+      }
+    }
+    projected.push(minimal);
+  }
+  return projected;
 }
 
 function stripInterSessionPromptPrefixFromContent(content: unknown): unknown {
@@ -1750,11 +2043,13 @@ function projectEmptyAssistantErrorMessages(
   return changed ? projected : messages;
 }
 
-export function projectChatDisplayMessages(
+function projectChatDisplayMessagesWithPolicy(
   messages: unknown[],
-  options?: { maxChars?: number; stripEnvelope?: boolean },
+  options?: ChatDisplayProjectionOptions,
+  strictOperatorProjection = true,
 ): Array<Record<string, unknown>> {
-  const source = options?.stripEnvelope === false ? messages : stripEnvelopeFromMessages(messages);
+  const authored = projectAuthoredUserSourceMessages(messages);
+  const source = options?.stripEnvelope === false ? authored : stripEnvelopeFromMessages(authored);
   const mirrored = mirrorMessageToolVisibleReplies(source);
   const projectedErrors = projectEmptyAssistantErrorMessages(toProjectedMessages(mirrored));
   const projectedForwarded = mergeTtsSupplementMessages(
@@ -1765,9 +2060,20 @@ export function projectChatDisplayMessages(
     ),
   );
   return sanitizeChatHistoryMessages(
-    projectedForwarded,
+    filterStandardConversationMessages(
+      projectedForwarded,
+      options?.includeUnindexedAssistant,
+      strictOperatorProjection,
+    ),
     options?.maxChars ?? DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS,
   ) as Array<Record<string, unknown>>;
+}
+
+export function projectChatDisplayMessages(
+  messages: unknown[],
+  options?: ChatDisplayProjectionOptions,
+): Array<Record<string, unknown>> {
+  return projectChatDisplayMessagesWithPolicy(messages, options, true);
 }
 
 function limitChatDisplayMessages<T>(messages: T[], maxMessages?: number): T[] {
@@ -1784,17 +2090,17 @@ function limitChatDisplayMessages<T>(messages: T[], maxMessages?: number): T[] {
 
 export function projectRecentChatDisplayMessages(
   messages: unknown[],
-  options?: { maxChars?: number; maxMessages?: number; stripEnvelope?: boolean },
+  options?: ChatDisplayProjectionOptions & { maxMessages?: number },
 ): Array<Record<string, unknown>> {
   return limitChatDisplayMessages(
-    projectChatDisplayMessages(messages, options),
+    projectChatDisplayMessagesWithPolicy(messages, options, false),
     options?.maxMessages,
   );
 }
 
 export function projectChatDisplayMessage(
   message: unknown,
-  options?: { maxChars?: number; stripEnvelope?: boolean },
+  options?: ChatDisplayProjectionOptions,
 ): Record<string, unknown> | undefined {
   return projectChatDisplayMessages([message], options)[0];
 }

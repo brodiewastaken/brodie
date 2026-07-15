@@ -203,6 +203,42 @@ describe("gateway session utils", () => {
     expect(listed.sessions.at(-1)?.key).toBe("session-99");
   });
 
+  test("allUnarchived returns one complete snapshot without limit or archived rows", async () => {
+    const cfg = createModelDefaultsConfig({ primary: "openai/gpt-5.4" });
+    const store = Object.fromEntries([
+      ...Array.from({ length: 1_000 }, (_value, index) => [
+        `session-${index}`,
+        {
+          sessionId: `session-${index}`,
+          updatedAt: 2_000 - index,
+        } satisfies SessionEntry,
+      ]),
+      [
+        "session-archived",
+        {
+          sessionId: "session-archived",
+          updatedAt: 3_000,
+          archivedAt: 3_001,
+        } satisfies SessionEntry,
+      ],
+    ]);
+
+    const listed = await listSessionsFromStoreAsync({
+      cfg,
+      storePath: "",
+      store,
+      opts: { allUnarchived: true, archived: true, limit: 1, offset: 999 },
+    });
+
+    expect(listed.sessions).toHaveLength(1_000);
+    expect(new Set(listed.sessions.map((row) => row.key)).size).toBe(1_000);
+    expect(listed.sessions.some((row) => row.key === "session-archived")).toBe(false);
+    expect(listed.limitApplied).toBeUndefined();
+    expect(listed.offset).toBeUndefined();
+    expect(listed.hasMore).toBe(false);
+    expect(listed.nextOffset).toBeNull();
+  });
+
   test("session lists honor explicit caller limits", () => {
     const cfg = createModelDefaultsConfig({ primary: "openai/gpt-5.4" });
     const store = Object.fromEntries(
@@ -2092,6 +2128,34 @@ describe("resolveSessionModelRef", () => {
 });
 
 describe("listSessionsFromStore selected model display", () => {
+  test("clamps stale persisted context to the authoritative model cap", () => {
+    const row = buildGatewaySessionRow({
+      cfg: createModelDefaultsConfig({ primary: "openai/gpt-5.6-sol" }),
+      storePath: "",
+      store: {},
+      key: "agent:main:whatsapp:brodie:direct:test",
+      entry: {
+        sessionId: "session-sol-stale-context",
+        updatedAt: 1,
+        modelProvider: "openai",
+        model: "gpt-5.6-sol",
+        contextTokens: 1_048_576,
+      },
+      modelCatalog: [
+        {
+          provider: "openai",
+          id: "gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          contextWindow: 372_000,
+          contextTokens: 372_000,
+        },
+      ],
+      skipTranscriptUsageFallback: true,
+    });
+
+    expect(row.contextTokens).toBe(372_000);
+  });
+
   test("async list yields during bulk transcript title and last-message hydration", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sessions-list-yield-"));
     try {

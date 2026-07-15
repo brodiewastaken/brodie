@@ -66,6 +66,7 @@ async function initializeRemoteBackedGitWorkspace(root: string): Promise<string>
 
 afterEach(() => {
   closeOpenClawStateDatabaseForTest();
+  testState.gatewayControlUi = undefined;
 });
 
 function expectObject(value: unknown) {
@@ -175,7 +176,7 @@ test("sessions.delete removes clean session worktrees and keeps dirty ones", asy
   }
 });
 
-test("sessions.delete rejects main and aborts active runs", async () => {
+test("sessions.delete rejects main, aborts active runs, and preserves browser tabs", async () => {
   const { dir } = await createSessionStoreDir();
   await writeSingleLineSession(dir, "sess-main", "hello");
   await writeSingleLineSession(dir, "sess-active", "active");
@@ -202,17 +203,7 @@ test("sessions.delete rejects main and aborts active runs", async () => {
     "sess-active",
   );
   expect(bundleMcpRuntimeMocks.disposeSessionMcpRuntime).toHaveBeenCalledWith("sess-active");
-  expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).toHaveBeenCalledTimes(1);
-  const closeTabsCall = (
-    browserSessionTabMocks.closeTrackedBrowserTabsForSessions.mock.calls as unknown as Array<
-      [{ sessionKeys?: string[]; onWarn?: unknown }]
-    >
-  )[0]?.[0];
-  expect(closeTabsCall?.sessionKeys).toHaveLength(3);
-  expect(closeTabsCall?.sessionKeys).toContain("discord:group:dev");
-  expect(closeTabsCall?.sessionKeys).toContain("agent:main:discord:group:dev");
-  expect(closeTabsCall?.sessionKeys).toContain("sess-active");
-  expect(typeof closeTabsCall?.onWarn).toBe("function");
+  expect(browserSessionTabMocks.closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
   expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledTimes(1);
   expect(subagentLifecycleHookMocks.runSubagentEnded).toHaveBeenCalledWith(
     {
@@ -231,6 +222,24 @@ test("sessions.delete rejects main and aborts active runs", async () => {
     targetSessionKey: "agent:main:discord:group:dev",
     reason: "session-delete",
   });
+});
+
+test("sessions.delete allows only the canonical main key when explicitly enabled", async () => {
+  testState.gatewayControlUi = { security: { allowMainSessionDelete: true } };
+  const { dir } = await createSessionStoreDir();
+  await writeSingleLineSession(dir, "sess-main", "hello");
+  await writeSessionStore({ entries: { main: sessionStoreEntry("sess-main") } });
+
+  const aliasDelete = await directSessionReq("sessions.delete", { key: "main" });
+  expect(aliasDelete.ok).toBe(false);
+  expect(String((aliasDelete.error as { message?: unknown } | undefined)?.message)).toContain(
+    "canonical session key",
+  );
+
+  const canonicalDelete = await directSessionReq("sessions.delete", {
+    key: "agent:main:main",
+  });
+  expect(canonicalDelete.ok).toBe(true);
 });
 
 test("sessions.delete interrupts work admitted before runtime registration", async () => {

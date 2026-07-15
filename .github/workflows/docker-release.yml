@@ -1,16 +1,6 @@
 name: Docker Release
 
 on:
-  push:
-    tags:
-      - "v*"
-      - "!v*-alpha.*"
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "**/*.mdx"
-      - ".agents/**"
-      - "skills/**"
   workflow_dispatch:
     inputs:
       tag:

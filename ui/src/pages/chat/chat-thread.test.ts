@@ -309,6 +309,30 @@ describe("buildChatItems", () => {
     expect(groups[0].messages).toHaveLength(1);
   });
 
+  it("keeps contentless conversational action projections", () => {
+    const action = {
+      action: "reply",
+      outcome: "delivered",
+      invisibleThinking: "private thought",
+      visibleMessages: ["alpha and beta"],
+      receipt: { status: "sent" },
+    };
+    const groups = messageGroups({
+      messages: [
+        {
+          role: "assistant",
+          content: [],
+          openclawConversationalAction: action,
+          timestamp: 1000,
+        },
+      ],
+    });
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].role).toBe("assistant");
+    expect(messageRecord(groups[0]).openclawConversationalAction).toEqual(action);
+  });
+
   it("collapses consecutive duplicate text messages into one rendered item with a count", () => {
     const groups = messageGroups({
       messages: [

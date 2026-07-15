@@ -386,6 +386,12 @@ import {
   SecretsResolveResultSchema,
   type SessionsAbortParams,
   SessionsAbortParamsSchema,
+  type SessionArchiveResultRow,
+  SessionArchiveResultRowSchema,
+  type SessionsArchiveParams,
+  SessionsArchiveParamsSchema,
+  type SessionsArchiveResult,
+  SessionsArchiveResultSchema,
   type SessionsCompactParams,
   SessionsCompactParamsSchema,
   type SessionsCleanupParams,
@@ -805,6 +811,9 @@ export const validateSessionsMessagesUnsubscribeParams =
   lazyCompile<SessionsMessagesUnsubscribeParams>(SessionsMessagesUnsubscribeParamsSchema);
 export const validateSessionsAbortParams =
   lazyCompile<SessionsAbortParams>(SessionsAbortParamsSchema);
+export const validateSessionsArchiveParams = lazyCompile<SessionsArchiveParams>(
+  SessionsArchiveParamsSchema,
+);
 export const validateSessionsPatchParams =
   lazyCompile<SessionsPatchParams>(SessionsPatchParamsSchema);
 export const validateSessionsPluginPatchParams = lazyCompile<SessionsPluginPatchParams>(
@@ -1229,6 +1238,9 @@ export {
   SessionsCreateResultSchema,
   SessionsSendParamsSchema,
   SessionsAbortParamsSchema,
+  SessionArchiveResultRowSchema,
+  SessionsArchiveParamsSchema,
+  SessionsArchiveResultSchema,
   SessionsPatchParamsSchema,
   SessionsPluginPatchParamsSchema,
   SessionsResetParamsSchema,
@@ -1615,6 +1627,9 @@ export type {
   NodePendingEnqueueParams,
   NodePendingEnqueueResult,
   SessionsListParams,
+  SessionArchiveResultRow,
+  SessionsArchiveParams,
+  SessionsArchiveResult,
   SessionsCleanupParams,
   SessionsPreviewParams,
   SessionsDescribeParams,

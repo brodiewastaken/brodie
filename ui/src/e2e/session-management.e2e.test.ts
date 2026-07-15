@@ -232,7 +232,7 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       // Sidebar: pinned rows form their own group ahead of the Sessions group.
       const sidebarRows = page.locator(".sidebar-recent-sessions__list .sidebar-recent-session");
       await sidebarRows.first().waitFor({ state: "visible", timeout: 10_000 });
-      await expect.poll(() => sidebarRows.first().textContent()).toContain("Release planning");
+      await expect.poll(() => sidebarRows.first().textContent()).toContain("agent:main:release");
       const groups = page.locator(".sidebar-recent-sessions__group");
       await expect.poll(() => groups.count()).toBe(2);
       await expect
@@ -246,19 +246,21 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
         chatRows.evaluateAll((rows) =>
           rows.map((row) => row.querySelector(".sidebar-recent-session__name")?.textContent ?? ""),
         );
-      await expect.poll(rowNames).toEqual(["Main", "Data migration", "Research notes"]);
-      const sidebarMigration = sidebarRows.filter({ hasText: "Data migration" });
+      await expect
+        .poll(rowNames)
+        .toEqual(["agent:main:main", "agent:main:migration", "agent:main:research"]);
+      const sidebarMigration = sidebarRows.filter({ hasText: "agent:main:migration" });
       await expect
         .poll(() => sidebarMigration.locator(".session-run-spinner").isVisible())
         .toBe(true);
 
       // Hover-revealed management actions on sidebar rows.
-      const sidebarResearch = sidebarRows.filter({ hasText: "Research notes" });
+      const sidebarResearch = sidebarRows.filter({ hasText: "agent:main:research" });
       const sidebarResearchPin = sidebarResearch.getByRole("button", { name: "Pin session" });
       await page.mouse.move(900, 500);
       await expect.poll(() => actionOpacity(sidebarResearchPin)).toBe("0");
       const sidebarReleasePin = sidebarRows
-        .filter({ hasText: "Release planning" })
+        .filter({ hasText: "agent:main:release" })
         .getByRole("button", { name: "Unpin session" });
       // Pinned badge stays visible without hover.
       await expect.poll(() => actionOpacity(sidebarReleasePin)).toBe("1");
@@ -302,11 +304,13 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       const researchLink = sidebarResearch.locator("a").first();
       await researchLink.click();
       await expect.poll(() => page.url()).toContain("session=agent%3Amain%3Aresearch");
-      await expect.poll(rowNames).toEqual(["Main", "Data migration", "Research notes"]);
+      await expect
+        .poll(rowNames)
+        .toEqual(["agent:main:main", "agent:main:migration", "agent:main:research"]);
       await expect
         .poll(() =>
           chatRows
-            .filter({ hasText: "Research notes" })
+            .filter({ hasText: "agent:main:research" })
             .first()
             .evaluate((row) => row.classList.contains("sidebar-recent-session--active")),
         )
@@ -482,7 +486,7 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       const chatsGroup = sessionGroups.filter({ hasText: "Sessions" });
       await expect
         .poll(() => trimmedTextContents(pinnedGroup.locator(".sidebar-recent-session__name")))
-        .toEqual(["Pinned only"]);
+        .toEqual(["agent:main:pinned"]);
       await expect.poll(() => chatsGroup.locator(".sidebar-recent-session").count()).toBe(0);
       await expect.poll(() => page.locator(".sidebar-recent-session--active").count()).toBe(1);
     } finally {
@@ -516,7 +520,7 @@ describeControlUiE2e("Control UI session management mocked Gateway E2E", () => {
       await page.goto(`${server.baseUrl}chat`);
       const row = page
         .locator(".sidebar-recent-sessions__list .sidebar-recent-session")
-        .filter({ hasText: "Research notes" });
+        .filter({ hasText: "agent:main:research" });
       await row.waitFor({ state: "visible", timeout: 10_000 });
       const pin = row.getByRole("button", { name: "Pin session" });
       const menu = row.getByRole("button", { name: "Open session menu" });

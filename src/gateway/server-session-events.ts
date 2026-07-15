@@ -1,5 +1,5 @@
 // Gateway session event broadcaster.
-// Projects transcript and lifecycle updates to websocket subscribers.
+// Broadcasts raw transcript and lifecycle updates to websocket subscribers.
 import { asPositiveSafeInteger } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { resolveDefaultAgentId } from "../agents/agent-scope.js";
@@ -8,7 +8,6 @@ import { normalizeAgentId } from "../routing/session-key.js";
 import type { SessionLifecycleEvent } from "../sessions/session-lifecycle-events.js";
 import type { InternalSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import type { ChatAbortControllerEntry } from "./chat-abort.js";
-import { projectChatDisplayMessage } from "./chat-display-projection.js";
 import type { GatewayBroadcastToConnIdsFn } from "./server-broadcast-types.js";
 import type {
   SessionEventSubscriberRegistry,
@@ -216,8 +215,13 @@ async function handleTranscriptUpdateBroadcast(
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(messageSeq !== undefined ? { seq: messageSeq } : {}),
   });
-  const message = projectChatDisplayMessage(rawMessage);
-  if (message) {
+  if (!rawMessage || typeof rawMessage !== "object" || Array.isArray(rawMessage)) {
+    return;
+  }
+  const broadcastMessage = (
+    message: Record<string, unknown>,
+    targetConnIds: ReadonlySet<string>,
+  ) => {
     params.broadcastToConnIds(
       "session.message",
       {
@@ -229,32 +233,11 @@ async function handleTranscriptUpdateBroadcast(
         ...(messageSeq !== undefined ? { messageSeq } : {}),
         ...sessionSnapshot,
       },
-      connIds,
+      targetConnIds,
       { dropIfSlow: true },
     );
-    return;
-  }
-
-  // Messages suppressed from display can still change transcript state, so
-  // notify broad session listeners even when no session.message is emitted.
-  const sessionEventConnIds = params.sessionEventSubscribers.getAll();
-  if (sessionEventConnIds.size === 0) {
-    return;
-  }
-  params.broadcastToConnIds(
-    "sessions.changed",
-    {
-      sessionKey,
-      ...(visibleAgentId ? { agentId: visibleAgentId } : {}),
-      phase: "message",
-      ts: Date.now(),
-      ...(typeof update.messageId === "string" ? { messageId: update.messageId } : {}),
-      ...(messageSeq !== undefined ? { messageSeq } : {}),
-      ...sessionSnapshot,
-    },
-    sessionEventConnIds,
-    { dropIfSlow: true },
-  );
+  };
+  broadcastMessage(rawMessage as Record<string, unknown>, connIds);
 }
 
 /** Creates a lifecycle-event broadcaster for session list refreshes. */
