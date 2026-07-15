@@ -1,11 +1,14 @@
 // Whatsapp plugin module implements listener log behavior.
 export function formatWhatsAppInboundListeningLog(account: {
   groups?: Record<string, unknown>;
-  groupPolicy: "open" | "allowlist" | "disabled";
+  groupPolicy: "open" | "allowlist" | "disabled" | "duo";
   hasGroupAllowFrom: boolean;
 }): string {
   if (account.groupPolicy === "disabled") {
     return "Listening for WhatsApp inbound messages (DM + groups disabled by groupPolicy).";
+  }
+  if (account.groupPolicy === "duo") {
+    return "Listening for WhatsApp inbound messages (DM + trusted groups only; duo policy).";
   }
   if (account.groupPolicy === "allowlist" && !account.hasGroupAllowFrom) {
     return "Listening for WhatsApp inbound messages (DM + group inbound blocked by empty groupPolicy allowlist).";

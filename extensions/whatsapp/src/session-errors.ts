@@ -1,5 +1,27 @@
 // Whatsapp plugin module implements session errors behavior.
-function safeStringify(value: unknown, limit = 800): string {
+const SAFE_STRINGIFY_MAX_BASE64_CHARS = 8_192;
+
+function describeBinary(
+  type: string,
+  buffer: Buffer,
+): {
+  type: string;
+  bytes: number;
+  base64: string;
+} {
+  const base64 = buffer.toString("base64");
+  return {
+    type,
+    bytes: buffer.length,
+    base64:
+      base64.length > SAFE_STRINGIFY_MAX_BASE64_CHARS
+        ? `${base64.slice(0, SAFE_STRINGIFY_MAX_BASE64_CHARS)}…`
+        : base64,
+  };
+}
+
+/** Circular/bigint/function/binary-safe JSON rendering with a size cap. */
+export function safeStringify(value: unknown, limit = 800): string {
   try {
     const seen = new WeakSet();
     const raw = JSON.stringify(
@@ -13,6 +35,18 @@ function safeStringify(value: unknown, limit = 800): string {
           const name =
             typeof maybeName === "string" && maybeName.length > 0 ? maybeName : "anonymous";
           return `[Function ${name}]`;
+        }
+        if (Buffer.isBuffer(v)) {
+          return describeBinary("Buffer", v);
+        }
+        if (ArrayBuffer.isView(v)) {
+          return describeBinary(
+            v.constructor.name,
+            Buffer.from(v.buffer, v.byteOffset, v.byteLength),
+          );
+        }
+        if (v instanceof ArrayBuffer) {
+          return describeBinary("ArrayBuffer", Buffer.from(v));
         }
         if (typeof v === "object" && v) {
           if (seen.has(v)) {

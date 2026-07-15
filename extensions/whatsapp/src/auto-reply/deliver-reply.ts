@@ -12,6 +12,7 @@ import {
   sendMediaWithLeadingCaption,
 } from "openclaw/plugin-sdk/reply-payload";
 import { logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
+import type { GifAutoConvertConfig } from "../gif-transcode.js";
 import { requireWhatsAppInboundAdmission } from "../inbound/admission.js";
 import type { WhatsAppSendResult } from "../inbound/send-result.js";
 import { listWhatsAppSendResultMessageIds } from "../inbound/send-result.js";
@@ -24,7 +25,11 @@ import {
   prepareWhatsAppOutboundMedia,
   sendWhatsAppOutboundWithRetry,
 } from "../outbound-media-contract.js";
-import { buildQuotedMessageOptions, lookupInboundMessageMeta } from "../quoted-message.js";
+import {
+  buildQuotedMessageOptions,
+  cacheInboundMessageMeta,
+  lookupInboundMessageMetaForTarget,
+} from "../quoted-message.js";
 import { newConnectionId } from "../reconnect.js";
 import { formatError } from "../session.js";
 import { convertMarkdownTables } from "../text-runtime.js";
@@ -32,10 +37,26 @@ import { markdownToWhatsApp } from "../text-runtime.js";
 import { whatsappOutboundLog } from "./loggers.js";
 import { elide, markWhatsAppVisibleDeliveryError } from "./util.js";
 
+const DEFAULT_FAILED_MEDIA_WARNING = "⚠️ Media failed.";
+
+export type WhatsAppPartialMediaFailure = {
+  mediaUrl: string;
+  caption?: string;
+  index: number;
+  errorText: string;
+  error: unknown;
+};
+
 export type WhatsAppReplyDeliveryResult = {
   results: WhatsAppSendResult[];
   receipt: MessageReceipt;
   providerAccepted: boolean;
+  /**
+   * Media items that failed after other parts were provider-accepted.
+   * Surfaces as success-with-warnings in the message-tool result so the model
+   * can react in-turn (resend, apologize, or stay silent).
+   */
+  partialMediaFailures: WhatsAppPartialMediaFailure[];
 };
 
 function resolveWhatsAppReceiptKind(
@@ -90,6 +111,8 @@ export async function deliverWebReply(params: {
   normalizedReplyResult?: DeliverableWhatsAppOutboundPayload<ReplyPayload>;
   msg: AdmittedWebInboundMessage;
   mediaLocalRoots?: readonly string[];
+  gifAutoConvert?: GifAutoConvertConfig;
+  failedMediaWarning?: string;
   maxMediaBytes: number;
   textLimit: number;
   chunkMode?: ChunkMode;
@@ -107,9 +130,48 @@ export async function deliverWebReply(params: {
   const isGroupConversation = admission.conversation.kind === "group";
   const replyStarted = Date.now();
   const sendResults: WhatsAppSendResult[] = [];
-  const rememberSendResult = (result: WhatsAppSendResult | undefined) => {
-    if (result) {
-      sendResults.push(result);
+  const partialMediaFailures: WhatsAppPartialMediaFailure[] = [];
+  // Self-quote participant is LID-first: phone-JID participants render
+  // "unknown sender" quotes in LID groups.
+  const selfParticipant =
+    msg.platform.selfLid ??
+    msg.platform.self?.lid ??
+    msg.platform.selfJid ??
+    msg.platform.self?.jid ??
+    undefined;
+  const rememberSendResult = (result: WhatsAppSendResult | undefined, messageText?: string) => {
+    if (!result) {
+      return;
+    }
+    sendResults.push(result);
+    // Record every outbound send into the quoted-message meta cache with the
+    // self participant so later replies targeting our own message ids render
+    // correct fromMe quotes in groups and cross-conversation lookups.
+    const normalizedText = messageText?.trim();
+    const keyEntries =
+      result.keys.length > 0
+        ? result.keys
+        : listWhatsAppSendResultMessageIds(result).map((id) => ({
+            id,
+            remoteJid: msg.platform.chatJid,
+            fromMe: true,
+            participant: selfParticipant,
+          }));
+    for (const key of keyEntries) {
+      if (!key.id) {
+        continue;
+      }
+      cacheInboundMessageMeta(admission.accountId, key.remoteJid ?? msg.platform.chatJid, key.id, {
+        participant: key.participant ?? (key.fromMe ? selfParticipant : undefined),
+        participantE164:
+          admission.conversation.kind === "direct"
+            ? key.fromMe
+              ? (msg.platform.selfE164 ?? undefined)
+              : (msg.platform.senderE164 ?? undefined)
+            : undefined,
+        body: normalizedText,
+        fromMe: key.fromMe ?? true,
+      });
     }
   };
   const finishDelivery = (): WhatsAppReplyDeliveryResult => {
@@ -118,6 +180,7 @@ export async function deliverWebReply(params: {
       results: sendResults,
       receipt,
       providerAccepted: sendResults.some((result) => result.providerAccepted),
+      partialMediaFailures,
     };
   };
   if (isReasoningReplyPayload(replyResult)) {
@@ -137,26 +200,41 @@ export async function deliverWebReply(params: {
   const textChunks = chunkMarkdownTextWithMode(convertedText, textLimit, chunkMode);
   const mediaList = normalizedReply.mediaUrls ?? [];
 
+  // At most one quote per delivery: the first outbound part consumes it and
+  // subsequent parts send unquoted.
+  let replyQuoteUsed = false;
+  let replyQuote: ReturnType<typeof buildQuotedMessageOptions> | undefined;
   const getQuote = () => {
-    if (!replyResult.replyToId) {
+    if (replyQuoteUsed || !replyResult.replyToId) {
       return undefined;
     }
     // Use replyToId (not msg.event.id) so batched payloads quote the correct
-    // per-message target.  Look up cached metadata for the specific
-    // message being quoted — msg.payload.body may be a combined batch body.
-    const cached = lookupInboundMessageMeta(
-      admission.accountId,
-      msg.platform.chatJid,
-      replyResult.replyToId,
-    );
-    return buildQuotedMessageOptions({
-      messageId: replyResult.replyToId,
-      remoteJid: msg.platform.chatJid,
-      fromMe: cached?.fromMe ?? false,
-      participant:
-        cached?.participant ?? (isGroupConversation ? msg.platform.senderJid : undefined),
-      messageText: cached?.body ?? "",
-    });
+    // per-message target; the cross-conversation lookup matches quoted ids
+    // from other chats (never across group boundaries).
+    replyQuote ??= (() => {
+      const cached = lookupInboundMessageMetaForTarget(
+        admission.accountId,
+        msg.platform.chatJid,
+        replyResult.replyToId,
+      );
+      return buildQuotedMessageOptions({
+        messageId: replyResult.replyToId,
+        remoteJid: cached?.remoteJid ?? msg.platform.chatJid,
+        fromMe: cached?.fromMe ?? false,
+        participant:
+          cached?.participant ??
+          (cached?.fromMe
+            ? selfParticipant
+            : isGroupConversation
+              ? msg.platform.senderJid
+              : undefined),
+        messageText: cached?.body ?? "",
+      });
+    })();
+    if (replyQuote) {
+      replyQuoteUsed = true;
+    }
+    return replyQuote;
   };
 
   const sendWithRetry = async <T>(fn: () => Promise<T>, label: string, maxAttempts = 3) => {
@@ -171,6 +249,8 @@ export async function deliverWebReply(params: {
         },
       });
     } catch (error: unknown) {
+      // A throw after any provider-accepted send must carry the accepted
+      // receipts so callers do not re-send already-delivered parts.
       if (sendResults.some((result) => result.providerAccepted)) {
         throw markWhatsAppVisibleDeliveryError(error);
       }
@@ -184,7 +264,10 @@ export async function deliverWebReply(params: {
     for (const [index, chunk] of textChunks.entries()) {
       const chunkStarted = Date.now();
       const quote = getQuote();
-      rememberSendResult(await sendWithRetry(() => msg.platform.reply(chunk, quote), "text"));
+      rememberSendResult(
+        await sendWithRetry(() => msg.platform.reply(chunk, quote), "text"),
+        chunk,
+      );
       if (!skipLog) {
         const durationMs = Date.now() - chunkStarted;
         whatsappOutboundLog.debug(
@@ -226,6 +309,7 @@ export async function deliverWebReply(params: {
           localRoots: params.mediaLocalRoots,
         }),
         mediaUrl,
+        { gifAutoConvert: params.gifAutoConvert },
       );
       if (shouldLogVerbose()) {
         logVerbose(
@@ -248,6 +332,7 @@ export async function deliverWebReply(params: {
               ),
             "media:image",
           ),
+          caption,
         );
       } else if (media.kind === "audio") {
         const quote = getQuote();
@@ -266,8 +351,13 @@ export async function deliverWebReply(params: {
           ),
         );
         if (caption) {
+          const captionQuote = getQuote();
           rememberSendResult(
-            await sendWithRetry(() => msg.platform.reply(caption, quote), "media:audio-text"),
+            await sendWithRetry(
+              () => msg.platform.reply(caption, captionQuote),
+              "media:audio-text",
+            ),
+            caption,
           );
         }
       } else if (media.kind === "video") {
@@ -280,11 +370,13 @@ export async function deliverWebReply(params: {
                   video: media.buffer,
                   caption,
                   mimetype: media.mimetype,
+                  ...(media.gifPlayback ? { gifPlayback: true } : {}),
                 },
                 quote,
               ),
             "media:video",
           ),
+          caption,
         );
       } else {
         const quote = getQuote();
@@ -302,6 +394,7 @@ export async function deliverWebReply(params: {
               ),
             "media:document",
           ),
+          caption,
         );
       }
       whatsappOutboundLog.info(
@@ -322,24 +415,35 @@ export async function deliverWebReply(params: {
         "auto-reply sent (media)",
       );
     },
-    onError: async ({ error, mediaUrl, caption, isFirst }) => {
+    onError: async ({ error, mediaUrl, caption, index, isFirst }) => {
       whatsappOutboundLog.error(
         `Failed sending web media to ${conversationId}: ${formatError(error)}`,
       );
       replyLogger.warn({ err: error, mediaUrl }, "failed to send web media reply");
+      partialMediaFailures.push({
+        mediaUrl,
+        ...(caption ? { caption } : {}),
+        index,
+        errorText: formatError(error),
+        error,
+      });
+      const warning = params.failedMediaWarning?.trim() || DEFAULT_FAILED_MEDIA_WARNING;
       if (!isFirst) {
-        // Non-first media failures were silently dropped before. Notify the user
-        // so they know a trailing attachment did not arrive.
+        // Interim surfacing until the feature-03 message-tool executor renders
+        // partialMediaFailures as success-with-warnings (Round 2 Q4): a
+        // trailing attachment must not vanish without any user-visible signal.
         whatsappOutboundLog.warn(`Trailing media failed; sent warning to ${conversationId}`);
         rememberSendResult(
           await sendWithRetry(
-            () => msg.platform.reply("⚠️ Media unavailable.", getQuote()),
+            () => msg.platform.reply(warning, getQuote()),
             "media:fallback-unavailable",
           ),
         );
         return;
       }
-      const warning = "⚠️ Media failed.";
+      // First-media failure: the caption chunk rode the failed media and was
+      // never delivered, so the fallback re-sends it with the warning; the
+      // remaining chunks still go out through the trailing loop.
       const fallbackTextParts = [caption ?? "", warning].filter(Boolean);
       const fallbackText = fallbackTextParts.join("\n");
       if (!fallbackText) {
@@ -357,8 +461,28 @@ export async function deliverWebReply(params: {
 
   // Remaining text chunks after media
   for (const chunk of remainingText) {
+    const quote = getQuote();
     rememberSendResult(
-      await sendWithRetry(() => msg.platform.reply(chunk, getQuote()), "media:text"),
+      await sendWithRetry(() => msg.platform.reply(chunk, quote), "media:text"),
+      chunk,
+    );
+  }
+  // Round 2 Q4: partial media failure is success-with-warnings, not an error —
+  // the delivery result lists exactly which media failed alongside the
+  // accepted receipts; the agent decides whether to resend.
+  if (partialMediaFailures.length > 0 && sendResults.some((result) => result.providerAccepted)) {
+    const receipt = createWhatsAppReplyDeliveryReceipt(sendResults);
+    replyLogger.warn(
+      {
+        correlationId: msg.event.id ?? newConnectionId(),
+        connectionId: connectionId ?? null,
+        to: conversationId,
+        from: msg.platform.recipientJid,
+        failedMediaCount: partialMediaFailures.length,
+        mediaUrls: partialMediaFailures.map((failure) => failure.mediaUrl),
+        receiptIds: receipt.platformMessageIds,
+      },
+      "auto-reply partially failed after WhatsApp accepted messages",
     );
   }
   return finishDelivery();

@@ -28,6 +28,8 @@ import {
 import { requireWhatsAppInboundAdmission } from "../../inbound/admission.js";
 import type { AdmittedWebInboundMessage } from "../../inbound/types.js";
 import { newConnectionId } from "../../reconnect.js";
+import { toOpenWhatsAppGroupPolicy } from "../../runtime-group-policy.js";
+import { admitWhatsAppScheduledInbound } from "../../scheduler-admission.js";
 import { formatError } from "../../session.js";
 import {
   resolveWhatsAppDirectSystemPrompt,
@@ -233,6 +235,11 @@ export async function processMessage(params: {
     selfE164: self.e164 ?? null,
   });
   const account = inboundPolicy.account;
+  // The agent sees a trusted room as "open"; duo itself is plugin-internal and
+  // must not leak into context building, which expects a core policy value.
+  const visibleGroupPolicy = admission.trustedGroup
+    ? "open"
+    : (toOpenWhatsAppGroupPolicy(inboundPolicy.groupPolicy) ?? "allowlist");
   const contextVisibilityMode = resolveChannelContextVisibilityMode({
     cfg: params.cfg,
     channel: "whatsapp",
@@ -255,19 +262,21 @@ export async function processMessage(params: {
   //   undefined → caller did not attempt; run internal STT
   let audioTranscript: string | undefined = params.preflightAudioTranscript ?? undefined;
   const hasAudioBody =
-    params.msg.payload.media?.type?.startsWith("audio/") === true &&
+    params.msg.payload.media?.[0]?.type?.startsWith("audio/") === true &&
     params.msg.payload.body === "<media:audio>";
   if (
     params.preflightAudioTranscript === undefined &&
     hasAudioBody &&
-    params.msg.payload.media?.path
+    params.msg.payload.media?.[0]?.path
   ) {
     try {
       const { transcribeFirstAudio } = await import("./audio-preflight.runtime.js");
       audioTranscript = await transcribeFirstAudio({
         ctx: {
-          MediaPaths: [params.msg.payload.media?.path],
-          MediaTypes: params.msg.payload.media?.type ? [params.msg.payload.media?.type] : undefined,
+          MediaPaths: [params.msg.payload.media?.[0]?.path],
+          MediaTypes: params.msg.payload.media?.[0]?.type
+            ? [params.msg.payload.media[0]?.type]
+            : undefined,
           From: conversationId,
           To: params.msg.platform.recipientJid,
           Provider: "whatsapp",
@@ -299,7 +308,7 @@ export async function processMessage(params: {
     msg: params.msg,
     authDir: account.authDir,
     mode: contextVisibilityMode,
-    groupPolicy: inboundPolicy.groupPolicy,
+    groupPolicy: visibleGroupPolicy,
     groupAllowFrom: inboundPolicy.groupAllowFrom,
   });
 
@@ -317,7 +326,7 @@ export async function processMessage(params: {
       ? resolveVisibleWhatsAppGroupHistory({
           history: params.groupHistory ?? params.groupHistories.get(params.groupHistoryKey) ?? [],
           mode: contextVisibilityMode,
-          groupPolicy: inboundPolicy.groupPolicy,
+          groupPolicy: visibleGroupPolicy,
           groupAllowFrom: inboundPolicy.groupAllowFrom,
           authDir: account.authDir,
         })
@@ -406,14 +415,16 @@ export async function processMessage(params: {
       from: conversationId,
       to: params.msg.platform.recipientJid,
       body: elide(combinedBody, 240),
-      mediaType: params.msg.payload.media?.type ?? null,
-      mediaPath: params.msg.payload.media?.path ?? null,
+      mediaType: params.msg.payload.media?.[0]?.type ?? null,
+      mediaPath: params.msg.payload.media?.[0]?.path ?? null,
     },
     "inbound web message",
   );
 
   const fromDisplay = conversationId;
-  const kindLabel = params.msg.payload.media?.type ? `, ${params.msg.payload.media?.type}` : "";
+  const kindLabel = params.msg.payload.media?.[0]?.type
+    ? `, ${params.msg.payload.media[0]?.type}`
+    : "";
   whatsappInboundLog.info(
     `Inbound message ${fromDisplay} -> ${params.msg.platform.recipientJid} (${conversationKind}${kindLabel}, ${combinedBody.length} chars)`,
   );
@@ -483,6 +494,7 @@ export async function processMessage(params: {
   const ctxPayload = await buildWhatsAppInboundContext({
     cfg: params.cfg,
     bodyForAgent: msgForAgent.payload.body,
+    groupRoster: account.groupRoster,
     combinedBody,
     commandBody,
     commandAuthorized,
@@ -491,7 +503,8 @@ export async function processMessage(params: {
     groupMemberRoster: params.groupMemberNames.get(params.groupHistoryKey),
     groupSystemPrompt: conversationSystemPrompt,
     msg: params.msg,
-    rawBody: commandBody,
+    rawBody:
+      params.msg.payload.authoredBody ?? params.msg.payload.commandBody ?? params.msg.payload.body,
     route: params.route,
     sender: {
       id: getPrimaryIdentityId(sender) ?? undefined,
@@ -525,6 +538,31 @@ export async function processMessage(params: {
     updateLastRoute: updateLastRouteInBackground,
     warn: params.replyLogger.warn.bind(params.replyLogger),
   });
+
+  const schedulerAdmission =
+    admission.ingress.admission === "dispatch" && !isTextCommand
+      ? await admitWhatsAppScheduledInbound({
+          cfg: params.cfg,
+          ctx: ctxPayload,
+          msg: params.msg,
+          onError: (error) => {
+            params.replyLogger.warn(
+              { error: formatError(error), sessionKey: params.route.sessionKey },
+              "WhatsApp scheduler admission failed; using native dispatch",
+            );
+          },
+        })
+      : undefined;
+
+  if (schedulerAdmission?.result.accepted) {
+    if (statusReactionController) {
+      statusReactionController.cancelPending();
+      await statusReactionController.clear();
+    } else if (ackReaction && (await ackReaction.ackReactionPromise)) {
+      await ackReaction.remove();
+    }
+    return false;
+  }
 
   const turnResult = await runChannelInboundEvent({
     channel: "whatsapp",
@@ -580,12 +618,14 @@ export async function processMessage(params: {
             trackBackgroundTask(params.backgroundTasks, task);
           },
         },
-        runDispatch: () =>
-          dispatchWhatsAppBufferedReply({
+        runDispatch: async () =>
+          await dispatchWhatsAppBufferedReply({
             cfg: params.cfg,
             connectionId: params.connectionId,
             context: ctxPayload,
             deliverReply: deliverWebReply,
+            gifAutoConvert: account.gifAutoConvert,
+            failedMediaWarning: account.media?.failedMediaWarning,
             groupHistories: params.groupHistories,
             groupHistoryKey: params.groupHistoryKey,
             maxMediaBytes: params.maxMediaBytes,

@@ -91,7 +91,11 @@ describe("applyGroupGating audio preflight mention text", () => {
     });
 
     expect(result).toEqual({ shouldProcess: true });
-    expect(msg.groupMention).toEqual({ wasMentioned: true, requireMention: true });
+    expect(msg.groupMention).toEqual({
+      wasMentioned: true,
+      requireMention: true,
+      addressed: true,
+    });
     expect(groupHistories.get("whatsapp:group:1203630")).toBeUndefined();
   });
 
@@ -101,8 +105,12 @@ describe("applyGroupGating audio preflight mention text", () => {
 
     const result = await applyGroupGating(makeParams(msg, groupHistories));
 
-    expect(result).toEqual({ shouldProcess: true });
-    expect(msg.groupMention).toEqual({ wasMentioned: false, requireMention: false });
+    expect(result).toEqual({ shouldProcess: true, commandBody: "<media:audio>" });
+    expect(msg.groupMention).toEqual({
+      wasMentioned: false,
+      requireMention: false,
+      addressed: false,
+    });
   });
 
   it("stores transcript text instead of the audio placeholder when mention is still missing", async () => {

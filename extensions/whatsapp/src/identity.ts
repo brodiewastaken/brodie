@@ -20,7 +20,12 @@ export type WhatsAppSelfIdentity = {
 export type WhatsAppReplyContext = {
   id?: string;
   body: string;
+  mentionedJids?: string[];
   sender?: WhatsAppIdentity | null;
+  /** Downloaded quoted media (lists; single item = one-element list). */
+  mediaPaths?: string[];
+  mediaTypes?: string[];
+  mediaFileName?: string;
 };
 
 type LegacySenderLike = {

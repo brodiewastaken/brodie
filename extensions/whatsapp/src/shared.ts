@@ -28,6 +28,7 @@ import { WhatsAppChannelConfigSchema } from "./config-schema.js";
 import { whatsappDoctor } from "./doctor.js";
 import { resolveWhatsAppConfigPath } from "./group-config-path.js";
 import { resolveLegacyGroupSessionKey } from "./group-session-contract.js";
+import { toOpenWhatsAppGroupPolicy } from "./runtime-group-policy.js";
 import {
   collectUnsupportedSecretRefConfigCandidates,
   unsupportedSecretRefSurfacePatterns,
@@ -119,7 +120,9 @@ export function createWhatsAppPluginBase(params: {
     accountId?: string | null;
   }>({
     providerConfigPresent: (cfg) => cfg.channels?.whatsapp !== undefined,
-    resolveGroupPolicy: ({ account }) => account.groupPolicy,
+    // Duo maps to allowlist for the shared warning collector: both are
+    // fail-closed group policies from core's perspective.
+    resolveGroupPolicy: ({ account }) => toOpenWhatsAppGroupPolicy(account.groupPolicy),
     collect: ({ account, accountId, cfg, groupPolicy }) =>
       collectOpenGroupPolicyRouteAllowlistWarnings({
         groupPolicy,

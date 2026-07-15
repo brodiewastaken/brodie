@@ -45,10 +45,6 @@ vi.mock("../../accounts.js", () => ({
   }),
 }));
 
-vi.mock("../../group-session-key.js", () => ({
-  resolveWhatsAppGroupSessionRoute: (route: unknown) => route,
-}));
-
 vi.mock("../../identity.js", () => ({
   getPrimaryIdentityId: () => "+15551234567",
   getSenderIdentity: () => ({ e164: "+15551234567", name: "Alice" }),
@@ -343,10 +339,12 @@ function createGroupAudioMessage() {
     },
     payload: {
       body: "<media:audio>",
-      media: {
-        type: "audio/ogg; codecs=opus",
-        path: "/tmp/voice.ogg",
-      },
+      media: [
+        {
+          type: "audio/ogg; codecs=opus",
+          path: "/tmp/voice.ogg",
+        },
+      ],
     },
     platform: {
       chatJid: "120363001234567890@g.us",

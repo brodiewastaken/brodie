@@ -19,6 +19,7 @@ import { resolveGroupActivationFor } from "./group-activation.js";
 import {
   hasControlCommand,
   implicitMentionKindWhen,
+  isUnaddressedCommandExecutable,
   normalizeE164,
   parseActivationCommand,
   createChannelHistoryWindow,
@@ -149,7 +150,14 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     selfE164: self.e164 ?? null,
   });
   const conversationGroupPolicy = inboundPolicy.resolveConversationGroupPolicy(conversationId);
-  if (conversationGroupPolicy.allowlistEnabled && !conversationGroupPolicy.allowed) {
+  // Trusted groups (duo/auto-whitelist) bypass the registered-groups allowlist
+  // drop: duo maps to "allowlist" for core, which would otherwise drop the very
+  // room the owner just trusted.
+  if (
+    conversationGroupPolicy.allowlistEnabled &&
+    !conversationGroupPolicy.allowed &&
+    !admission.trustedGroup
+  ) {
     const accountId = inboundPolicy.account.accountId;
     const warnKey = `${accountId}:${conversationId}`;
     if (shouldWarnForGroupDrop(warnKey)) {
@@ -198,10 +206,10 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     mentionMsg.payload.body,
     mentionConfig.mentionRegexes,
     self.e164,
+    params.msg.group?.mentions?.jids,
   );
   const activationCommand = parseActivationCommand(commandBody);
   const owner = isOwnerSender(baseMentionConfig, params.msg, params.authDir);
-  const shouldBypassMention = owner && hasControlCommand(commandBody, params.cfg);
 
   if (activationCommand.hasCommand && !owner) {
     return skipGroupMessageAndStoreHistory(
@@ -227,7 +235,9 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     sessionKey: params.sessionKey,
     conversationId,
   });
-  const requireMention = activation !== "always";
+  // A duo room (exactly self + owner, trust automation active) feels like a
+  // DM: no mention needed. Consumes the admission fact computed at normalize.
+  const requireMention = activation !== "always" && !admission.duoRoom;
   const replyContext = getReplyContext(params.msg, params.authDir);
   const sharedNumberSelfChat = params.selfChatMode === true;
   // Detect reply-to-bot: compare JIDs, LIDs, and E.164 numbers.
@@ -255,10 +265,31 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
       commandAuthorized: false,
     },
   });
+  // An owner control command bypasses the mention gate only when the command
+  // parser will execute it unaddressed: the operator-name prefix or a proven
+  // duo room. A bare command in a larger group is not addressing brodie, and
+  // admitting it would only hand the parser a turn it refuses.
+  const shouldBypassMention =
+    owner &&
+    !mentionDecision.addressed &&
+    hasControlCommand(commandBody, params.cfg) &&
+    isUnaddressedCommandExecutable({
+      cfg: params.cfg,
+      agentId: params.agentId,
+      text: commandBody,
+      authorized: true,
+      conversationKind: "group",
+      duoRoom: admission.duoRoom,
+    });
   const effectiveWasMentioned = mentionDecision.effectiveWasMentioned || shouldBypassMention;
   // Carry the session activation and mention result together. Dispatch needs
-  // both facts to distinguish an always-on group from a blocked unmentioned turn.
-  params.msg.groupMention = { wasMentioned: effectiveWasMentioned, requireMention };
+  // both facts to distinguish an always-on group from a blocked unmentioned turn,
+  // and the parser needs addressing kept apart from the bypass.
+  params.msg.groupMention = {
+    wasMentioned: effectiveWasMentioned,
+    requireMention,
+    addressed: mentionDecision.addressed,
+  };
   if (!shouldBypassMention && requireMention && mentionDecision.shouldSkip) {
     if (params.deferMissingMention === true) {
       params.logVerbose(
@@ -273,5 +304,8 @@ export async function applyGroupGating(params: ApplyGroupGatingParams) {
     );
   }
 
-  return { shouldProcess: true };
+  return {
+    shouldProcess: true,
+    ...(params.mentionText === undefined ? { commandBody } : {}),
+  } as const;
 }

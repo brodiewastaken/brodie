@@ -14,12 +14,12 @@ type QuotedMeta = {
   body?: string;
   fromMe?: boolean;
 };
-type CacheEntry = QuotedMeta & { ts: number };
 type QuotedMetaLookup = QuotedMeta & { remoteJid: string };
 
-const CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_ENTRIES = 500;
-const cache = new Map<string, CacheEntry>();
+// Replying can outlive an agent turn by many minutes. Capacity bounds retained
+// quote metadata without expiring the sender before a terminal reply arrives.
+const cache = new Map<string, QuotedMeta>();
 
 function makeCacheKey(accountId: string, remoteJid: string, messageId: string): string {
   return `${accountId}:${remoteJid}:${messageId}`;
@@ -40,7 +40,7 @@ export function cacheInboundMessageMeta(
       cache.delete(oldest);
     }
   }
-  cache.set(makeCacheKey(accountId, remoteJid, messageId), { ...meta, ts: Date.now() });
+  cache.set(makeCacheKey(accountId, remoteJid, messageId), { ...meta });
 }
 
 export function lookupInboundMessageMeta(
@@ -51,10 +51,6 @@ export function lookupInboundMessageMeta(
   const cacheKey = makeCacheKey(accountId, remoteJid, messageId);
   const entry = cache.get(cacheKey);
   if (!entry) {
-    return undefined;
-  }
-  if (Date.now() - entry.ts > CACHE_TTL_MS) {
-    cache.delete(cacheKey);
     return undefined;
   }
   return {
@@ -133,10 +129,6 @@ export function lookupInboundMessageMetaForTarget(
   let matched: QuotedMetaLookup | undefined;
   for (const [cacheKey, entry] of cache.entries()) {
     if (!cacheKey.startsWith(prefix) || !cacheKey.endsWith(suffix)) {
-      continue;
-    }
-    if (Date.now() - entry.ts > CACHE_TTL_MS) {
-      cache.delete(cacheKey);
       continue;
     }
     const remoteJid = cacheKey.slice(prefix.length, cacheKey.length - suffix.length);

@@ -95,6 +95,11 @@ export type WhatsAppInboundAdmission = {
     id: string;
     isSamePhone: boolean;
   };
+  /** Group trust facts prepared at inbound normalize time (duo policy / auto whitelist). */
+  trustedGroup: boolean;
+  autoGroupWhitelistEnabled: boolean;
+  /** Participant set is exactly {self, owner} under duo/auto-whitelist: DM-like handling. */
+  duoRoom: boolean;
   ingress: WhatsAppInboundIngressDecision;
   senderAccess: WhatsAppInboundSenderAccess;
   commandAccess: WhatsAppInboundCommandAccess;
@@ -127,8 +132,14 @@ export function buildWhatsAppInboundAdmission(params: {
   isGroup: boolean;
   conversationId: string;
   senderId: string;
+  trustedGroup?: boolean;
+  autoGroupWhitelistEnabled?: boolean;
+  duoRoom?: boolean;
 }): WhatsAppInboundAdmission {
   return {
+    trustedGroup: params.trustedGroup === true,
+    autoGroupWhitelistEnabled: params.autoGroupWhitelistEnabled === true,
+    duoRoom: params.duoRoom === true,
     accountId: params.policy.account.accountId,
     isSelfChat: params.policy.isSelfChat,
     account: copyAccount(params.policy.account),

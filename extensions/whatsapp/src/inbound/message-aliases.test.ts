@@ -20,12 +20,14 @@ function createCanonicalMessage(overrides: Partial<WebInboundCallbackMessage> = 
     },
     payload: {
       body: "hello",
-      media: {
-        path: "/tmp/image.jpg",
-        type: "image/jpeg",
-        fileName: "image.jpg",
-        url: "https://example.com/image.jpg",
-      },
+      media: [
+        {
+          path: "/tmp/image.jpg",
+          type: "image/jpeg",
+          fileName: "image.jpg",
+          url: "https://example.com/image.jpg",
+        },
+      ],
       untrustedStructuredContext: [
         {
           label: "WhatsApp contact",
@@ -119,12 +121,12 @@ describe("WhatsApp inbound flat aliases", () => {
     msg.chatId = "789@g.us";
     expect(msg.platform.chatJid).toBe("789@g.us");
 
-    msg.payload.media = { path: "/tmp/next.jpg", type: "image/png" };
+    msg.payload.media = [{ path: "/tmp/next.jpg", type: "image/png" }];
     expect(msg.mediaPath).toBe("/tmp/next.jpg");
     expect(msg.mediaType).toBe("image/png");
     msg.mediaFileName = "next.jpg";
     msg.mediaUrl = "https://example.com/next.jpg";
-    expect(msg.payload.media).toMatchObject({
+    expect(msg.payload.media[0]).toMatchObject({
       fileName: "next.jpg",
       url: "https://example.com/next.jpg",
     });
@@ -165,21 +167,23 @@ describe("WhatsApp inbound flat aliases", () => {
     expect(msg.from).toBe("456@g.us");
     expect(msg.conversationId).toBe("456@g.us");
 
+    // Alias writes never mutate admission facts (access-control output);
+    // the admission value keeps winning on read.
     msg.conversationId = "789@g.us";
-    expect(msg.admission?.conversation.id).toBe("789@g.us");
-    expect(msg.admission?.conversation.groupSessionId).toBe("789@g.us");
-    expect(msg.from).toBe("789@g.us");
+    expect(msg.admission?.conversation.id).toBe("456@g.us");
+    expect(msg.from).toBe("456@g.us");
 
     msg.admission!.accountId = "work";
     expect(msg.accountId).toBe("work");
     msg.accountId = "ops";
-    expect(msg.admission?.accountId).toBe("ops");
-    expect(msg.admission?.account.accountId).toBe("ops");
+    expect(msg.admission?.accountId).toBe("work");
+    expect(msg.accountId).toBe("work");
 
     msg.admission!.conversation.kind = "direct";
     expect(msg.chatType).toBe("direct");
     msg.chatType = "group";
-    expect(msg.admission?.conversation.kind).toBe("group");
+    expect(msg.admission?.conversation.kind).toBe("direct");
+    expect(msg.chatType).toBe("direct");
 
     expect(msg.accessControlPassed).toBe(true);
     msg.admission!.ingress.decision = "block";
@@ -274,7 +278,7 @@ describe("WhatsApp inbound flat aliases", () => {
       isBatched: true,
     });
     expect(normalized.payload.body).toBe("legacy body");
-    expect(normalized.payload.media).toMatchObject({
+    expect(normalized.payload.media?.[0]).toMatchObject({
       path: "/tmp/legacy.jpg",
       type: "image/jpeg",
     });

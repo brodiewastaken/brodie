@@ -1,3 +1,4 @@
+import { resolveConversationRoute } from "openclaw/plugin-sdk/routing";
 // Whatsapp tests cover session route plugin behavior.
 import { describe, expect, it } from "vitest";
 import { resolveWhatsAppOutboundSessionRoute } from "./session-route.js";
@@ -10,9 +11,14 @@ describe("resolveWhatsAppOutboundSessionRoute", () => {
       target: "120363401234567890@newsletter",
     });
 
+    const canonical = resolveConversationRoute({
+      cfg: {},
+      channel: "whatsapp",
+      peer: { kind: "channel", id: "120363401234567890@newsletter" },
+    });
     expect(route).toEqual({
-      sessionKey: "agent:main:whatsapp:channel:120363401234567890@newsletter",
-      baseSessionKey: "agent:main:whatsapp:channel:120363401234567890@newsletter",
+      sessionKey: canonical.sessionKey,
+      baseSessionKey: canonical.sessionKey,
       recipientSessionExact: true,
       peer: {
         kind: "channel",
@@ -25,15 +31,21 @@ describe("resolveWhatsAppOutboundSessionRoute", () => {
   });
 
   it("keeps direct user targets on direct session semantics", () => {
+    const cfg = { session: { dmScope: "per-channel-peer" as const } };
     const route = resolveWhatsAppOutboundSessionRoute({
-      cfg: { session: { dmScope: "per-channel-peer" } },
+      cfg,
       agentId: "main",
       target: "+15551234567",
     });
 
+    const canonical = resolveConversationRoute({
+      cfg,
+      channel: "whatsapp",
+      peer: { kind: "direct", id: "+15551234567" },
+    });
     expect(route).toEqual({
-      sessionKey: "agent:main:whatsapp:direct:+15551234567",
-      baseSessionKey: "agent:main:whatsapp:direct:+15551234567",
+      sessionKey: canonical.sessionKey,
+      baseSessionKey: canonical.sessionKey,
       recipientSessionExact: true,
       peer: {
         kind: "direct",
@@ -45,7 +57,7 @@ describe("resolveWhatsAppOutboundSessionRoute", () => {
     });
   });
 
-  it("uses the inbound account suffix for named-account groups", () => {
+  it("uses the canonical account dimension for named-account groups", () => {
     const route = resolveWhatsAppOutboundSessionRoute({
       cfg: {},
       agentId: "main",
@@ -53,9 +65,15 @@ describe("resolveWhatsAppOutboundSessionRoute", () => {
       target: "123@g.us",
     });
 
+    const canonical = resolveConversationRoute({
+      cfg: {},
+      channel: "whatsapp",
+      accountId: "work",
+      peer: { kind: "group", id: "123@g.us" },
+    });
     expect(route).toMatchObject({
-      sessionKey: "agent:main:whatsapp:group:123@g.us:thread:whatsapp-account-work",
-      baseSessionKey: "agent:main:whatsapp:group:123@g.us",
+      sessionKey: canonical.sessionKey,
+      baseSessionKey: canonical.sessionKey,
       recipientSessionExact: true,
     });
   });
