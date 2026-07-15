@@ -64,6 +64,76 @@ describe("resolveMentionGatingWithBypass", () => {
 });
 
 describe("resolveInboundMentionDecision", () => {
+  it("never reports a control-command bypass as addressing the bot", () => {
+    const res = resolveInboundMentionDecision({
+      facts: { canDetectMention: true, wasMentioned: false },
+      policy: {
+        isGroup: true,
+        requireMention: true,
+        allowTextCommands: true,
+        hasControlCommand: true,
+        commandAuthorized: true,
+      },
+    });
+    expect(res.shouldBypassMention).toBe(true);
+    expect(res.effectiveWasMentioned).toBe(true);
+    expect(res.addressed).toBe(false);
+    expect(res.shouldSkip).toBe(false);
+  });
+
+  it("reports explicit and implicit mentions as addressing the bot", () => {
+    const policy = {
+      isGroup: true,
+      requireMention: true,
+      allowTextCommands: true,
+      hasControlCommand: false,
+      commandAuthorized: false,
+    };
+    expect(
+      resolveInboundMentionDecision({
+        facts: { canDetectMention: true, wasMentioned: true },
+        policy,
+      }).addressed,
+    ).toBe(true);
+    expect(
+      resolveInboundMentionDecision({
+        facts: {
+          canDetectMention: true,
+          wasMentioned: false,
+          implicitMentionKinds: ["quoted_bot"],
+        },
+        policy,
+      }).addressed,
+    ).toBe(true);
+    expect(
+      resolveInboundMentionDecision({
+        facts: {
+          canDetectMention: true,
+          wasMentioned: false,
+          implicitMentionKinds: ["quoted_bot"],
+        },
+        policy: { ...policy, allowedImplicitMentionKinds: [] },
+      }).addressed,
+    ).toBe(false);
+  });
+
+  it("keeps the bypass closed when the control command would not execute unaddressed", () => {
+    const res = resolveInboundMentionDecision({
+      facts: { canDetectMention: true, wasMentioned: false },
+      policy: {
+        isGroup: true,
+        requireMention: true,
+        allowTextCommands: true,
+        hasControlCommand: true,
+        controlCommandExecutable: false,
+        commandAuthorized: true,
+      },
+    });
+    expect(res.shouldBypassMention).toBe(false);
+    expect(res.effectiveWasMentioned).toBe(false);
+    expect(res.shouldSkip).toBe(true);
+  });
+
   it("allows matching implicit mention kinds by default", () => {
     const res = resolveInboundMentionDecision({
       facts: {

@@ -77,4 +77,23 @@ describe("buildConfiguredAgentSystemPrompt", () => {
     expect(prompt).toContain("## Sub-Agent Delegation");
     expect(prompt).toContain("Mode: prefer");
   });
+
+  it("opens the prompt with the identity-bootstrap identity line and drops the default assistant line", () => {
+    const base = { agentId: "main", workspaceDir: "/tmp/openclaw", toolNames: ["read"] };
+    const configured = buildConfiguredAgentSystemPrompt({
+      ...base,
+      config: {
+        hooks: {
+          internal: {
+            entries: { "identity-bootstrap": { enabled: true, identityLine: "YOU ARE BRODIE." } },
+          },
+        },
+      },
+    });
+    expect(configured.startsWith("YOU ARE BRODIE.\n")).toBe(true);
+    expect(configured).not.toContain("You are a personal assistant running inside OpenClaw.");
+
+    const stock = buildConfiguredAgentSystemPrompt({ ...base, config: {} });
+    expect(stock.startsWith("You are a personal assistant running inside OpenClaw.\n")).toBe(true);
+  });
 });

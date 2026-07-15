@@ -76,6 +76,7 @@ export type ConversationFacts = {
   parentId?: string;
   threadId?: string;
   nativeChannelId?: string;
+  duoRoom?: boolean;
   routePeer?: {
     kind: "direct" | "group" | "channel";
     id: string;
@@ -185,6 +186,7 @@ export type AccessFacts = {
   mentions?: {
     canDetectMention: boolean;
     wasMentioned: boolean;
+    addressed?: boolean;
     hasAnyMention?: boolean;
     explicitlyMentionedBot?: boolean;
     mentionedUserIds?: string[];

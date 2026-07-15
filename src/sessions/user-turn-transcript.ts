@@ -269,6 +269,7 @@ export function buildPersistedUserTurnMessage(params: UserTurnInput): PersistedU
   // here would NOT match the bare-current arrival (the gateway no longer stamps
   // the live turn) — see https://github.com/openclaw/openclaw/issues/3658.
   const content = text || (hasMedia ? (params.mediaOnlyText ?? "") : "");
+  const sourceMessage = normalizeOptionalText(params.sourceMessage);
   const senderMeta = buildUserTurnSenderMeta(params.sender);
   const openClawMeta = {
     ...(params.senderIsOwner === undefined ? {} : { senderIsOwner: params.senderIsOwner }),
@@ -279,6 +280,7 @@ export function buildPersistedUserTurnMessage(params: UserTurnInput): PersistedU
     content,
     timestamp: params.timestamp ?? Date.now(),
     ...(params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : {}),
+    ...(sourceMessage ? { openclawSourceMessage: { text: sourceMessage } } : {}),
     ...mediaFields,
     ...(Object.keys(openClawMeta).length > 0 ? { __openclaw: openClawMeta } : {}),
   } as PersistedUserTurnMessage;

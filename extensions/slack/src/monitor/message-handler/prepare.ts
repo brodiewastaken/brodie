@@ -18,7 +18,10 @@ import {
   toInboundMediaFacts,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveChannelMessageSourceReplyDeliveryMode } from "openclaw/plugin-sdk/channel-outbound";
-import { hasControlCommand } from "openclaw/plugin-sdk/command-detection";
+import {
+  hasControlCommand,
+  isUnaddressedCommandExecutable,
+} from "openclaw/plugin-sdk/command-detection";
 import { isAbortRequestText } from "openclaw/plugin-sdk/command-primitives-runtime";
 import { shouldHandleTextCommands } from "openclaw/plugin-sdk/command-surface";
 import { ensureConfiguredBindingRouteReady } from "openclaw/plugin-sdk/conversation-runtime";
@@ -980,6 +983,15 @@ export async function prepareSlackMessage(params: {
     channelUsers: isRoom ? channelConfig?.users : undefined,
     allowTextCommands,
     hasControlCommand: hasControlCommandInMessage,
+    // Owner control commands bypass the mention gate only when the parser will
+    // execute them unaddressed (operator-name prefix or direct chat).
+    controlCommandExecutable: isUnaddressedCommandExecutable({
+      cfg,
+      agentId: routing.route.agentId,
+      text: textForCommandDetection,
+      authorized: true,
+      conversationKind: isDirectMessage ? "direct" : isGroupDm ? "group" : "channel",
+    }),
     mentionFacts: {
       canDetectMention,
       wasMentioned,
@@ -1368,6 +1380,7 @@ export async function prepareSlackMessage(params: {
       mentions: {
         canDetectMention: isRoomish,
         wasMentioned: effectiveWasMentioned,
+        addressed: messageIngress.activationAccess.addressed ?? false,
         hasAnyMention: explicitlyMentioned || mentionedSubteamIds.length > 0,
         implicitMentionKinds: matchedImplicitMentionKinds as Array<
           "reply_to_bot" | "quoted_bot" | "bot_thread_participant" | "native"

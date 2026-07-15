@@ -1027,6 +1027,7 @@ export const AgentModelRuntimeEntrySchema = z
     params: z.record(z.string(), z.unknown()).optional(),
     agentRuntime: AgentRuntimePolicySchema,
     streaming: z.boolean().optional(),
+    startupJournals: z.enum(["inline", "paths"]).optional(),
   })
   .strict();
 

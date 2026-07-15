@@ -3,6 +3,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { killSubagentRunAdmin } from "../agents/subagent-control.js";
 import { getRuntimeConfig } from "../config/io.js";
+import { assertOpaqueSessionKey } from "../routing/session-key.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
 import {
@@ -29,7 +30,7 @@ function resolveSessionKeyFromPath(pathname: string): SessionKeyPathResolution {
     return { matched: false };
   }
   try {
-    const decoded = decodeURIComponent(match[1] ?? "").trim();
+    const decoded = assertOpaqueSessionKey(decodeURIComponent(match[1] ?? ""));
     if (!decoded) {
       return { error: "invalid-session-key", matched: true };
     }

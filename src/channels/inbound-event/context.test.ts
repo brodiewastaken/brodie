@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildChannelInboundEventContext,
   finalizeChannelInboundContext,
+  resolveChannelInboundSupplementalContext,
   type BuildChannelInboundEventContextParams,
 } from "./context.js";
 
@@ -118,6 +119,8 @@ describe("buildChannelInboundEventContext", () => {
           id: "quote-1",
           body: "quoted",
           sender: "Quoted User",
+          senderId: "quoted-native",
+          timestamp: 456,
           isQuote: true,
         },
         thread: {
@@ -147,6 +150,8 @@ describe("buildChannelInboundEventContext", () => {
       ReplyToId: "root-1",
       ReplyToBody: "quoted",
       ReplyToSender: "Quoted User",
+      ReplyToSenderId: "quoted-native",
+      ReplyToTimestamp: 456,
       MediaPath: "/tmp/image.png",
       MediaUrl: "/tmp/image.png",
       MediaType: "image/png",
@@ -365,6 +370,7 @@ describe("buildChannelInboundEventContext", () => {
   it("derives command turns from normalized command facts", async () => {
     const ctx = buildChannelInboundEventContext(
       createBaseContextParams({
+        conversation: { kind: "direct", id: "u1" },
         message: {
           rawBody: "/status",
           commandBody: "/status",
@@ -390,6 +396,47 @@ describe("buildChannelInboundEventContext", () => {
     });
     expect(ctx.CommandSource).toBe("text");
     expect(ctx.CommandAuthorized).toBe(true);
+  });
+
+  it("never lets a mention bypass authorize a bare command in a larger group", async () => {
+    const build = (mentions: { wasMentioned: boolean; addressed?: boolean }) =>
+      buildChannelInboundEventContext(
+        createBaseContextParams({
+          message: { rawBody: "/new", commandBody: "/new" },
+          command: { kind: "text-slash", name: "new" },
+          access: { commands: { authorized: true }, mentions: { canDetectMention: true, ...mentions } },
+        }),
+      );
+
+    // The bypass admitted the turn (wasMentioned) but nobody addressed the bot.
+    const bypassed = build({ wasMentioned: true, addressed: false });
+    expect(bypassed.CommandTurn?.kind).toBe("normal");
+    expect(bypassed.CommandAuthorized).toBe(false);
+    expect(bypassed.Body).toContain("[UNAUTHORIZED COMMAND]");
+
+    // A platform mention addressed the bot.
+    const addressed = build({ wasMentioned: true, addressed: true });
+    expect(addressed.CommandTurn?.kind).toBe("text-slash");
+    expect(addressed.CommandAuthorized).toBe(true);
+
+    // A channel that cannot split the two falls back to wasMentioned.
+    const legacy = build({ wasMentioned: true });
+    expect(legacy.CommandTurn?.kind).toBe("text-slash");
+  });
+
+  it("authorizes a bare command only in a proven duo room", async () => {
+    const build = (duoRoom: boolean | undefined) =>
+      buildChannelInboundEventContext(
+        createBaseContextParams({
+          conversation: { kind: "group", id: "room-1", duoRoom },
+          message: { rawBody: "/new", commandBody: "/new" },
+          command: { kind: "text-slash", name: "new" },
+          access: { commands: { authorized: true } },
+        }),
+      );
+    expect(build(true).CommandAuthorized).toBe(true);
+    expect(build(false).CommandAuthorized).toBe(false);
+    expect(build(undefined).CommandAuthorized).toBe(false);
   });
 
   it("keeps explicit command turns ahead of normalized command facts", async () => {
@@ -449,8 +496,8 @@ describe("buildChannelInboundEventContext", () => {
       }),
     );
 
-    expect(ctx.ReplyToBody).toBeUndefined();
-    expect(ctx.ReplyToSender).toBeUndefined();
+    expect(ctx.ReplyToBody).toBe("quoted");
+    expect(ctx.ReplyToSender).toBe("Quoted User");
     expect(ctx.ForwardedFrom).toBeUndefined();
     expect(ctx.ThreadStarterBody).toBeUndefined();
     expect(ctx.ThreadHistoryBody).toBeUndefined();
@@ -481,7 +528,7 @@ describe("buildChannelInboundEventContext", () => {
     expect(ctx.ThreadStarterBody).toBeUndefined();
   });
 
-  it("drops supplemental context with unknown sender allow state in restrictive modes", async () => {
+  it("keeps quotes with unknown sender allow state while filtering other supplemental context", async () => {
     const ctx = buildChannelInboundEventContext(
       createBaseContextParams({
         supplemental: {
@@ -504,8 +551,8 @@ describe("buildChannelInboundEventContext", () => {
       }),
     );
 
-    expect(ctx.ReplyToBody).toBeUndefined();
-    expect(ctx.ReplyToSender).toBeUndefined();
+    expect(ctx.ReplyToBody).toBe("quoted");
+    expect(ctx.ReplyToSender).toBe("Quoted User");
     expect(ctx.ForwardedFrom).toBeUndefined();
     expect(ctx.ThreadStarterBody).toBeUndefined();
     expect(ctx.ThreadHistoryBody).toBeUndefined();
@@ -539,12 +586,16 @@ describe("finalizeChannelInboundContext", () => {
       },
     });
 
-    expect(result.quoteHidden).toBe(true);
+    expect(result.quoteHidden).toBe(false);
     expect(result.threadHidden).toBe(false);
     expect(finalize).toHaveBeenCalledOnce();
     expect(finalize.mock.calls[0]?.[0]).toMatchObject({
       SupplementalContext: {
-        quote: undefined,
+        quote: {
+          id: "quote-1",
+          body: "hidden quote",
+          senderAllowed: false,
+        },
         thread: {
           starterBody: "allowed thread",
           senderAllowed: true,
@@ -604,7 +655,7 @@ describe("finalizeChannelInboundContext supplemental media resolution", () => {
     });
   });
 
-  it("suppresses self-authored quote body/media by default", async () => {
+  it("preserves self-authored quote body and media", async () => {
     const media = vi.fn(async () => [{ path: "/tmp/reply.png", contentType: "image/png" }]);
     const result = await finalizeChannelInboundContext({
       context: {
@@ -616,6 +667,8 @@ describe("finalizeChannelInboundContext supplemental media resolution", () => {
         ChatType: "group",
       },
       resolveSupplementalMedia: true,
+      suppressSelfQuoteBody: true,
+      suppressSelfQuoteMedia: true,
       media: [{ path: "/tmp/current.png", contentType: "image/png" }],
       contextVisibility: "all",
       supplemental: {
@@ -629,13 +682,37 @@ describe("finalizeChannelInboundContext supplemental media resolution", () => {
       },
     });
 
-    expect(media).not.toHaveBeenCalled();
-    expect(result.context.MediaPath).toBe("/tmp/current.png");
-    expect(result.context.MediaType).toBe("image/png");
-    expect(result.supplemental?.quote).toEqual({ id: "reply-1", sender: "Bot" });
+    expect(media).toHaveBeenCalledOnce();
+    expect(result.context.MediaPaths).toEqual(["/tmp/current.png", "/tmp/reply.png"]);
+    expect(result.context.ReplyToMediaPaths).toEqual(["/tmp/reply.png"]);
+    expect(result.context.ReplyToMediaSourceMessageIds).toEqual(["reply-1"]);
+    expect(result.supplemental?.quote).toEqual({
+      id: "reply-1",
+      body: "previous bot reply",
+      sender: "Bot",
+    });
   });
 
-  it("preserves self-authored quote media when only the body is suppressed", async () => {
+  it("keeps deprecated self-quote suppression flags as no-op compatibility inputs", async () => {
+    const result = await resolveChannelInboundSupplementalContext({
+      contextVisibility: "all",
+      suppressSelfQuoteBody: true,
+      suppressSelfQuoteMedia: true,
+      supplemental: {
+        quote: {
+          id: "reply-compat",
+          body: "retained body",
+          isSelf: true,
+          media: async () => [{ path: "/tmp/retained.png", contentType: "image/png" }],
+        },
+      },
+    });
+
+    expect(result.supplemental?.quote?.body).toBe("retained body");
+    expect(result.media).toEqual([{ path: "/tmp/retained.png", contentType: "image/png" }]);
+  });
+
+  it("preserves self-authored quote media as the only inbound media", async () => {
     const result = await finalizeChannelInboundContext({
       context: {
         Body: "hello",
@@ -647,7 +724,6 @@ describe("finalizeChannelInboundContext supplemental media resolution", () => {
       },
       resolveSupplementalMedia: true,
       contextVisibility: "all",
-      suppressSelfQuoteMedia: false,
       supplemental: {
         quote: {
           id: "reply-1",
@@ -661,10 +737,14 @@ describe("finalizeChannelInboundContext supplemental media resolution", () => {
 
     expect(result.context.MediaPath).toBe("/tmp/self.png");
     expect(result.context.MediaType).toBe("image/png");
-    expect(result.supplemental?.quote).toEqual({ id: "reply-1", sender: "Bot" });
+    expect(result.supplemental?.quote).toEqual({
+      id: "reply-1",
+      body: "previous bot reply",
+      sender: "Bot",
+    });
   });
 
-  it("does not resolve media for hidden quotes", async () => {
+  it("resolves quoted media from senders outside the allowlist", async () => {
     const media = vi.fn(async () => [{ path: "/tmp/hidden.png", contentType: "image/png" }]);
     const result = await finalizeChannelInboundContext({
       context: {
@@ -679,15 +759,17 @@ describe("finalizeChannelInboundContext supplemental media resolution", () => {
       contextVisibility: "allowlist",
       supplemental: {
         quote: {
-          body: "hidden",
+          id: "quote-outside-allowlist",
+          body: "quoted",
           senderAllowed: false,
           media,
         },
       },
     });
 
-    expect(media).not.toHaveBeenCalled();
-    expect(result.quoteHidden).toBe(true);
-    expect(result.supplemental?.quote).toBeUndefined();
+    expect(media).toHaveBeenCalledOnce();
+    expect(result.quoteHidden).toBe(false);
+    expect(result.supplemental?.quote?.body).toBe("quoted");
+    expect(result.context.ReplyToMediaPaths).toEqual(["/tmp/hidden.png"]);
   });
 });

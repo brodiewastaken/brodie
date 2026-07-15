@@ -114,6 +114,7 @@ import { resolveRuntimePolicySessionKey } from "./runtime-policy-session-key.js"
 import type { ReplySessionEntryHandle } from "./session-entry-handle.js";
 import { resolveBareSessionResetPromptState } from "./session-reset-prompt.js";
 import { resolveBareResetBootstrapFileAccess } from "./session-reset-prompt.js";
+import { buildSessionResetSystemMessage } from "./session-reset-system-message.js";
 import { drainFormattedSystemEvents } from "./session-system-events.js";
 import { isInternalSourceReplyChannel } from "./source-reply-delivery-mode.js";
 import { buildSessionStartupContextPrelude, shouldApplyStartupContext } from "./startup-context.js";
@@ -740,22 +741,47 @@ export async function runPreparedReply(
     typing.cleanup();
     return undefined;
   }
-  const isBareNewOrReset = /^\/(new|reset)$/i.test(normalizedCommandBody);
   const isBareSessionReset =
-    softResetTriggered ||
+    effectiveResetTriggered ||
     (isNewSession &&
-      (isBareNewOrReset ||
+      (isResetOrNewCommand ||
         (!hasCurrentReplyTargetContext &&
           baseBodyTrimmedRaw.length === 0 &&
           rawBodyTrimmed.length > 0)));
   const startupAction =
     softResetTriggered || /^\/reset(?:\s|$)/i.test(normalizedCommandBody) ? "reset" : "new";
+  const resetJournalMode =
+    startupAction === "reset"
+      ? "paths"
+      : (cfg.agents?.defaults?.models?.[`${provider}/${model}`]?.startupJournals ?? "paths");
+  const resetSystemMessage =
+    isBareSessionReset &&
+    isResetOrNewCommand &&
+    command.isAuthorizedSender &&
+    workspaceDir
+      ? await buildSessionResetSystemMessage({
+          cfg,
+          agentId,
+          sessionCtx: promptSessionCtx,
+          workspaceDir,
+          isGroupChat,
+          triggerCommand:
+            normalizeOptionalString(ctx.CommandTriggerBody) ?? rawBodyTrimmed,
+          journalMode: resetJournalMode,
+          maxInlineJournalChars: Math.max(
+            8_000,
+            Math.floor((cfg.agents?.defaults?.contextTokens ?? 128_000) * 2),
+          ),
+          onInlineOverflow: (reason) =>
+            logVerbose(`session reset journal mode downgraded to paths: ${reason}`),
+        })
+      : null;
   const spawnedWorkspaceOverride = resolveIngressWorkspaceOverrideForSpawnedRun({
     spawnedBy: sessionEntry?.spawnedBy,
     workspaceDir: sessionEntry?.spawnedWorkspaceDir,
   });
   const bareResetPromptState =
-    isBareSessionReset && workspaceDir
+    isBareSessionReset && workspaceDir && !resetSystemMessage
       ? await resolveBareSessionResetPromptState({
           cfg,
           workspaceDir,
@@ -772,19 +798,20 @@ export async function runPreparedReply(
             }),
         })
       : null;
-  const startupContextPrelude =
-    isBareSessionReset &&
-    bareResetPromptState?.shouldPrependStartupContext !== false &&
-    shouldApplyStartupContext({ cfg, action: startupAction })
-      ? await buildSessionStartupContextPrelude({
-          workspaceDir,
-          cfg,
-        })
+  const startupContextPrelude = resetSystemMessage
+    ? resetSystemMessage
+    : isBareSessionReset &&
+        bareResetPromptState?.shouldPrependStartupContext !== false &&
+        shouldApplyStartupContext({ cfg, action: startupAction })
+      ? await buildSessionStartupContextPrelude({ workspaceDir, cfg })
       : null;
   const baseBodyFinal = isBareSessionReset
-    ? (bareResetPromptState?.prompt ?? "")
+    ? resetSystemMessage
+      ? ""
+      : (bareResetPromptState?.prompt ?? "")
     : stripPromptThinkingDirectives(baseBody);
   const hasUserBody =
+    Boolean(resetSystemMessage) ||
     baseBodyFinal.trim().length > 0 ||
     softResetTail.length > 0 ||
     hasInboundHistoryBody(sessionCtx) ||
@@ -937,6 +964,7 @@ export async function runPreparedReply(
     : !isNewSession && threadStarterBody
       ? `[Thread starter - for context]\n${threadStarterBody}`
       : undefined;
+  const transcriptThreadContextNote = isFirstTurnInSession ? threadContextNote : undefined;
   const drainedSystemEventBlocks: string[] = [];
   const rebuildPromptBodies = async (): Promise<{
     prefixedCommandBody: string;
@@ -974,6 +1002,7 @@ export async function runPreparedReply(
       inboundEventKind,
       sourceReplyDeliveryMode,
       threadContextNote,
+      transcriptThreadContextNote,
       systemEventBlocks: drainedSystemEventBlocks,
     });
   };
@@ -1391,13 +1420,28 @@ export async function runPreparedReply(
   const userTurnMediaForPersistence = buildPersistedUserTurnMediaInputsFromFields(ctx);
   const inputProvenance = ctx.InputProvenance ?? sessionCtx.InputProvenance;
   const userTurnTimestamp = normalizeMessageTimestampMs(ctx.Timestamp);
-  const userTurnTranscriptText = resolvePersistedUserTurnText(transcriptBody, {
+  const authoredUserTurnText = resolvePersistedUserTurnText(transcriptBody, {
     hasMedia: userTurnMediaForPersistence.length > 0,
   });
+  const modelVisibleUserTurnText = transcriptThreadContextNote
+    ? resolvePersistedUserTurnText(transcriptCommandBody, {
+        hasMedia: userTurnMediaForPersistence.length > 0,
+      })
+    : authoredUserTurnText;
+  const persistedUserTurnText = isBareSessionReset
+    ? resolvePersistedUserTurnText(prefixedCommandBody, {
+        hasMedia: userTurnMediaForPersistence.length > 0,
+      })
+    : modelVisibleUserTurnText;
+  const sourceMessage =
+    authoredUserTurnText && authoredUserTurnText !== persistedUserTurnText
+      ? authoredUserTurnText
+      : undefined;
   const userTurnInput =
-    userTurnTranscriptText !== undefined || userTurnMediaForPersistence.length > 0
+    persistedUserTurnText !== undefined || userTurnMediaForPersistence.length > 0
       ? {
-          text: userTurnTranscriptText,
+          text: persistedUserTurnText,
+          ...(sourceMessage ? { sourceMessage } : {}),
           senderIsOwner: command.senderIsOwner,
           ...(inputProvenance ? { provenance: inputProvenance } : {}),
           ...(userTurnMediaForPersistence.length > 0

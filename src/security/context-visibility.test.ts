@@ -32,6 +32,19 @@ describe("evaluateSupplementalContextVisibility", () => {
       reason: "quote_override",
     });
   });
+
+  it("keeps explicit quotes regardless of restrictive mode or sender allow state", () => {
+    expect(
+      evaluateSupplementalContextVisibility({
+        mode: "allowlist",
+        kind: "quote",
+        senderAllowed: false,
+      }),
+    ).toEqual({
+      include: true,
+      reason: "quote_override",
+    });
+  });
 });
 
 describe("shouldIncludeSupplementalContext", () => {
@@ -59,6 +72,16 @@ describe("shouldIncludeSupplementalContext", () => {
     expect(
       shouldIncludeSupplementalContext({
         mode: "allowlist_quote",
+        kind: "quote",
+        senderAllowed: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps explicit quotes in allowlist mode", () => {
+    expect(
+      shouldIncludeSupplementalContext({
+        mode: "allowlist",
         kind: "quote",
         senderAllowed: false,
       }),

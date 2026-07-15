@@ -180,7 +180,7 @@ async function loadFreshGetReplyRunModuleForTest() {
 }
 
 const ROOM_EVENT_MESSAGE_TOOL_DIRECTIVE =
-  "Treat this as observed room activity. Default: no reply; most room events need no response from you. Send a visible reply via message(action=send) only when you are directly addressed or have concrete value to add; your final text here stays private either way.";
+  "Treat this as observed room activity. Default: no response; most room events need nothing from you. Reply via message(action=reply) only when directly addressed or you have concrete value to add; your final text stays private either way.";
 
 function baseParams(
   overrides: Partial<Parameters<typeof runPreparedReply>[0]> = {},
@@ -785,6 +785,43 @@ describe("runPreparedReply media-only handling", () => {
     const call = requireRunReplyAgentCall();
     expect(call.followupRun.prompt).toContain("[Thread history - for context]");
     expect(call.followupRun.prompt).toContain("Earlier message in this thread");
+  });
+
+  it("persists restored thread history as replayable model input", async () => {
+    const currentMessage = "use beanie's v2 file";
+    await runPreparedReply(
+      baseParams({
+        isNewSession: true,
+        ctx: {
+          Body: currentMessage,
+          RawBody: currentMessage,
+          CommandBody: currentMessage,
+          ThreadHistoryBody: "Earlier message with the v2 file path",
+          OriginatingChannel: "slack",
+          OriginatingTo: "C123",
+          ChatType: "group",
+        },
+        sessionCtx: {
+          Body: currentMessage,
+          BodyStripped: currentMessage,
+          ThreadHistoryBody: "Earlier message with the v2 file path",
+          Provider: "slack",
+          ChatType: "group",
+          OriginatingChannel: "slack",
+          OriginatingTo: "C123",
+        },
+      }),
+    );
+
+    const call = requireRunReplyAgentCall();
+    expect(call.followupRun.transcriptPrompt).toContain("[Thread history - for context]");
+    expect(call.followupRun.transcriptPrompt).toContain("Earlier message with the v2 file path");
+    expect(call.followupRun.transcriptPrompt).toContain(currentMessage);
+    expect(call.followupRun.userTurnTranscriptRecorder?.message).toMatchObject({
+      role: "user",
+      content: expect.stringContaining("Earlier message with the v2 file path"),
+      openclawSourceMessage: { text: currentMessage },
+    });
   });
 
   it("falls back to thread starter context on follow-up turns when history is absent", async () => {
@@ -1415,6 +1452,46 @@ describe("runPreparedReply media-only handling", () => {
     expect(call?.resetTriggered).toBe(true);
     expect(call?.replyThreadingOverride).toEqual({ implicitCurrentMessage: "deny" });
     expect(vi.mocked(routeReply)).not.toHaveBeenCalled();
+  });
+
+  it("preserves a command-recognized group /new as a reset run", async () => {
+    await runPreparedReply(
+      baseParams({
+        ctx: {
+          Body: "",
+          RawBody: "brodie /new",
+          CommandBody: "brodie /new",
+          CommandTriggerBody: "/new",
+        },
+        command: {
+          ...(baseParams().command as Record<string, unknown>),
+          commandBodyNormalized: "",
+          rawBodyNormalized: "brodie /new",
+          isAuthorizedSender: false,
+          resetTriggeredAction: "new",
+        } as never,
+        commandAuthorized: false,
+        resetTriggered: false,
+      }),
+    );
+
+    const call = requireRunReplyAgentCall();
+    expect(call.resetTriggered).toBe(true);
+    expect(call.commandBody).toContain("[SESSION RESET START]");
+    expect(call.commandBody).toContain("just sent `/new`");
+    expect(call.commandBody).not.toContain("brodie /new");
+    expect(call.transcriptCommandBody).toBe("brodie /new");
+    expect(call.followupRun.transcriptPrompt).toBe("brodie /new");
+    expect(call.transcriptCommandBody).not.toContain("[OpenClaw session");
+    expect(call.followupRun.userTurnTranscriptRecorder?.message).toMatchObject({
+      role: "user",
+      openclawSourceMessage: { text: "brodie /new" },
+    });
+    expect(call.followupRun.userTurnTranscriptRecorder?.message?.content).toContain(
+      "[SESSION RESET START]",
+    );
+    expect(call.followupRun.run.allowedConversationalActions).toEqual(["reply"]);
+    expect(call.followupRun.run.sourceReplyDeliveryMode).toBe("message_tool_only");
   });
 
   it("keeps /reset soft tails even when the bare reset prompt is empty", async () => {
@@ -2968,7 +3045,7 @@ describe("runPreparedReply media-only handling", () => {
       expect(heartbeatRun.sourceReplyDeliveryMode).toBe(stableMode);
       expect(roomEventRun.extraSystemPrompt).toBe(expectedPrompt);
       expect(requireRunReplyAgentCall(0).followupRun.currentInboundContext?.text).toContain(
-        "your final text here stays private either way",
+        "your final text stays private either way",
       );
       expect(roomEventRun.extraSystemPromptStatic).toBe(expectedPrompt);
       expect(primaryRun.extraSystemPromptStatic).toBe(roomEventRun.extraSystemPromptStatic);
@@ -3172,7 +3249,7 @@ describe("runPreparedReply media-only handling", () => {
     ["/new", "new"],
     ["/reset", "reset"],
   ] as const)(
-    "keeps inbound sender context in reply-targeted bare %s model prompt while hiding startup instructions from transcript prompt",
+    "keeps inbound sender context in reply-targeted bare %s model prompt while persisting the authored command separately",
     async (commandText, startupAction) => {
       vi.mocked(buildInboundUserContextPrefix).mockReturnValueOnce(
         [
@@ -3220,15 +3297,23 @@ describe("runPreparedReply media-only handling", () => {
       );
 
       const call = requireLastRunReplyAgentCall();
-      expect(call?.commandBody).toContain("A new session was started via /new or /reset.");
+      expect(call?.commandBody).toContain("[⚙️][SESSION RESET START]");
       expect(call?.commandBody).toContain("Conversation info (untrusted metadata):");
       expect(call?.commandBody).toContain("Sender (untrusted metadata):");
       expect(call?.commandBody).toContain("telegram-user-1");
-      expect(call?.followupRun.prompt).toContain("A new session was started via /new or /reset.");
+      expect(call?.followupRun.prompt).toContain("[⚙️][SESSION RESET START]");
       expect(call?.followupRun.prompt).toContain("Sender (untrusted metadata):");
-      expect(call?.transcriptCommandBody).toBe(`[OpenClaw session ${startupAction}]`);
-      expect(call?.followupRun.transcriptPrompt).toBe(`[OpenClaw session ${startupAction}]`);
+      expect(call?.transcriptCommandBody).toBe(commandText);
+      expect(call?.followupRun.transcriptPrompt).toBe(commandText);
+      expect(call?.transcriptCommandBody).not.toContain(`[OpenClaw session ${startupAction}]`);
       expect(call?.followupRun.transcriptPrompt).not.toContain("Sender (untrusted metadata):");
+      expect(call?.followupRun.userTurnTranscriptRecorder?.message).toMatchObject({
+        role: "user",
+        openclawSourceMessage: { text: commandText },
+      });
+      expect(call?.followupRun.userTurnTranscriptRecorder?.message?.content).toBe(
+        call?.followupRun.prompt,
+      );
     },
   );
 
@@ -3266,10 +3351,10 @@ describe("runPreparedReply media-only handling", () => {
     );
 
     const call = requireLastRunReplyAgentCall();
-    expect(call?.commandBody).toContain("A new session was started via /new or /reset.");
+    expect(call?.commandBody).toContain("[⚙️][SESSION RESET START]");
     expect(call?.commandBody).toContain("summarize my workspace");
-    expect(call?.transcriptCommandBody).toBe("summarize my workspace");
-    expect(call?.followupRun.transcriptPrompt).toBe("summarize my workspace");
+    expect(call?.transcriptCommandBody).toBe("/reset summarize my workspace");
+    expect(call?.followupRun.transcriptPrompt).toBe("/reset summarize my workspace");
   });
 
   it("uses inbound origin channel for run messageProvider", async () => {

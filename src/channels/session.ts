@@ -52,7 +52,7 @@ export async function recordInboundSession(params: {
     })
     .catch(params.onRecordError);
   params.trackSessionMetaTask?.(metaTask);
-  void metaTask;
+  await metaTask;
 
   const update = params.updateLastRoute;
   if (!update) {

@@ -224,6 +224,12 @@ export type CommandsConfig = {
    * Example: { "*": ["user1"], discord: ["user:123"] }
    */
   allowFrom?: CommandAllowFrom;
+  /** Text invocation policy for operator-name prefixes and stop-language aliases. */
+  invocation?: {
+    name?: string;
+    unauthorizedEnvelope?: string;
+    stopPhrases?: string[];
+  };
 };
 
 export type ProviderCommandsConfig = {

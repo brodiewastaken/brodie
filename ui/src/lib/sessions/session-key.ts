@@ -29,6 +29,102 @@ const VALID_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 const INVALID_CHARS_RE = /[^a-z0-9_-]+/g;
 const LEADING_DASH_RE = /^-+/;
 const TRAILING_DASH_RE = /-+$/;
+const LEGACY_CONVERSATION_MARKER = ":conversation-v1:";
+const CANONICAL_CONVERSATION_SEGMENT_SAFE_BYTE_RE = /^[A-Za-z0-9._~!$&'()*+,;=@-]$/u;
+
+function decodeLegacyConversationLane(lane: string): Array<string | undefined> | null {
+  const bytes = new TextEncoder().encode(lane);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const values: Array<string | undefined> = [];
+  let cursor = 0;
+  try {
+    while (cursor < bytes.length) {
+      if (bytes[cursor] === 45) {
+        values.push(undefined);
+        cursor += 1;
+      } else {
+        const lengthStart = cursor;
+        while (cursor < bytes.length && bytes[cursor]! >= 48 && bytes[cursor]! <= 57) {
+          cursor += 1;
+        }
+        if (cursor === lengthStart || bytes[cursor] !== 58) {
+          return null;
+        }
+        const byteLength = Number(decoder.decode(bytes.slice(lengthStart, cursor)));
+        cursor += 1;
+        const end = cursor + byteLength;
+        if (!Number.isSafeInteger(byteLength) || byteLength < 0 || end > bytes.length) {
+          return null;
+        }
+        values.push(decoder.decode(bytes.slice(cursor, end)));
+        cursor = end;
+      }
+      if (cursor === bytes.length) {
+        break;
+      }
+      if (bytes[cursor] !== 124) {
+        return null;
+      }
+      cursor += 1;
+    }
+  } catch {
+    return null;
+  }
+  return values;
+}
+
+function encodeCanonicalConversationSegment(value: string): string {
+  return [...new TextEncoder().encode(value)]
+    .map((byte) => {
+      const char = String.fromCharCode(byte);
+      return CANONICAL_CONVERSATION_SEGMENT_SAFE_BYTE_RE.test(char)
+        ? char
+        : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+    })
+    .join("");
+}
+
+export function migrateLegacyCanonicalConversationSessionKey(
+  sessionKey: string | undefined | null,
+): string {
+  const raw = normalizeOptionalString(sessionKey) ?? "";
+  const markerIndex = raw.indexOf(LEGACY_CONVERSATION_MARKER);
+  if (!raw.startsWith("agent:") || markerIndex <= "agent:".length) {
+    return raw;
+  }
+  const agentId = raw.slice("agent:".length, markerIndex);
+  const values = decodeLegacyConversationLane(
+    raw.slice(markerIndex + LEGACY_CONVERSATION_MARKER.length),
+  );
+  if (values?.length !== 5) {
+    return raw;
+  }
+  const [channel, accountId, conversationKind, conversationId, threadId] = values;
+  if (
+    !agentId ||
+    !channel ||
+    !accountId ||
+    !conversationId ||
+    (conversationKind !== "direct" &&
+      conversationKind !== "group" &&
+      conversationKind !== "channel")
+  ) {
+    return raw;
+  }
+  const readable = [
+    "agent",
+    encodeCanonicalConversationSegment(agentId),
+    "conversation",
+    encodeCanonicalConversationSegment(channel),
+    encodeCanonicalConversationSegment(accountId),
+    conversationKind,
+    encodeCanonicalConversationSegment(conversationId),
+  ];
+  if (threadId) {
+    readable.push("thread", encodeCanonicalConversationSegment(threadId));
+  }
+  return readable.join(":");
+}
 
 export function parseAgentSessionKey(
   sessionKey: string | undefined | null,

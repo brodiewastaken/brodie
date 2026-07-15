@@ -352,6 +352,7 @@ export type ChannelIngressActivationAccess = {
   effectiveWasMentioned?: boolean;
   /** True when mention gating was bypassed by policy or command facts. */
   shouldBypassMention?: boolean;
+  addressed?: boolean;
   /** Activation gate from the access graph, when one ran. */
   gate?: AccessGraphGate;
 };

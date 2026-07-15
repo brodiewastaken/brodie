@@ -31,6 +31,7 @@ export {
   type ResolvedInboundDirectDmAccess,
 } from "../channels/direct-dm.js";
 export {
+  formatEnvelopeTimestamp,
   formatInboundEnvelope,
   formatInboundFromLabel,
   resolveEnvelopeFormatOptions,

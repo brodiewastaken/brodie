@@ -361,6 +361,7 @@ export async function resolveSlackCommandIngress(params: {
   channelUsers?: Array<string | number>;
   allowTextCommands: boolean;
   hasControlCommand: boolean;
+  controlCommandExecutable?: boolean;
   mentionFacts?: ChannelIngressStateInput["mentionFacts"];
   activation?: NonNullable<ChannelIngressPolicyInput["activation"]>;
   eventKind?: ChannelIngressEventInput["kind"];
@@ -398,6 +399,9 @@ export async function resolveSlackCommandIngress(params: {
     command: {
       allowTextCommands: params.allowTextCommands,
       hasControlCommand: params.hasControlCommand,
+      ...(params.controlCommandExecutable !== undefined
+        ? { controlCommandExecutable: params.controlCommandExecutable }
+        : {}),
       modeWhenAccessGroupsOff: params.modeWhenAccessGroupsOff,
       ...(isDirectMessage ? { commandOwnerAllowFrom: params.ownerAllowFromLower } : {}),
     },

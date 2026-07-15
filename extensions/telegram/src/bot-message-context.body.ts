@@ -14,7 +14,10 @@ import {
   type NormalizedLocation,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { resolveChannelGroupPolicy } from "openclaw/plugin-sdk/channel-policy";
-import { hasControlCommand } from "openclaw/plugin-sdk/command-detection";
+import {
+  hasControlCommand,
+  isUnaddressedCommandExecutable,
+} from "openclaw/plugin-sdk/command-detection";
 import { isAbortRequestText } from "openclaw/plugin-sdk/command-primitives-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type {
@@ -129,6 +132,7 @@ function formatSavedMediaPlaceholder(allMedia: TelegramMediaRef[]): string | und
 function resolveTelegramMentionFacts(params: {
   canDetectMention: boolean;
   effectiveWasMentioned: boolean;
+  addressed: boolean;
   explicitlyMentionedBot: boolean;
   computedWasMentioned: boolean;
   implicitMentionKinds: TelegramMentionFacts["implicitMentionKinds"];
@@ -150,6 +154,7 @@ function resolveTelegramMentionFacts(params: {
   return {
     canDetectMention: params.canDetectMention,
     wasMentioned: params.effectiveWasMentioned,
+    addressed: params.addressed,
     explicitlyMentionedBot: params.explicitlyMentionedBot,
     mentionSource,
     implicitMentionKinds: params.implicitMentionKinds,
@@ -416,6 +421,15 @@ export async function resolveTelegramInboundBody(params: {
       requireMention: Boolean(requireMention),
       allowTextCommands: true,
       hasControlCommand: hasControlCommandInMessage,
+      // The bypass admits an owner control command only when the parser will
+      // execute it unaddressed (operator-name prefix or direct chat).
+      controlCommandExecutable: isUnaddressedCommandExecutable({
+        cfg,
+        agentId: routeAgentId,
+        text: messageTextParts.text,
+        authorized: commandAuthorized,
+        conversationKind: isGroup ? "group" : "direct",
+      }),
       commandAuthorized,
     },
   });
@@ -502,6 +516,7 @@ export async function resolveTelegramInboundBody(params: {
     mentionFacts: resolveTelegramMentionFacts({
       canDetectMention,
       effectiveWasMentioned,
+      addressed: mentionDecision.addressed,
       explicitlyMentionedBot: explicitlyMentioned,
       computedWasMentioned,
       implicitMentionKinds,

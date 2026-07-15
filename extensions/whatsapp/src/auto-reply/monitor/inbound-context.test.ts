@@ -72,7 +72,7 @@ describe("whatsapp inbound context visibility", () => {
     ]);
   });
 
-  it("redacts blocked quoted replies in allowlist mode", () => {
+  it("keeps quoted replies from senders outside the allowlist", () => {
     const reply = resolveVisibleWhatsAppReplyContext({
       msg: makeBlockedQuotedReplyMessage("msg-reply-1"),
       mode: "allowlist",
@@ -80,7 +80,16 @@ describe("whatsapp inbound context visibility", () => {
       groupAllowFrom: ["+111"],
     });
 
-    expect(reply).toBeNull();
+    expect(reply).toEqual({
+      id: "blocked-reply",
+      body: "Blocked quoted text",
+      sender: {
+        jid: "999@s.whatsapp.net",
+        lid: null,
+        e164: "+999",
+        label: "Mallory (+999)",
+      },
+    });
   });
 
   it("keeps blocked quoted replies in allowlist_quote mode", () => {

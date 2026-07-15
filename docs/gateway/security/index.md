@@ -209,10 +209,10 @@ Two separate concepts:
 `contextVisibility` controls the second:
 
 - `"all"` (default): supplemental context kept as received.
-- `"allowlist"`: supplemental context filtered to senders allowed by active allowlist checks.
-- `"allowlist_quote"`: like `allowlist`, but still keeps one explicit quoted reply.
+- `"allowlist"`: explicit quotes are kept from any sender; other supplemental context is filtered to senders allowed by active allowlist checks.
+- `"allowlist_quote"`: keep explicit quotes and filter other supplemental context by sender allowlist.
 
-Set per channel or per room/conversation - see [Groups](/channels/groups#context-visibility-and-allowlists). Reports that only show "model can see quoted/historical text from non-allowlisted senders" are hardening findings addressable with `contextVisibility`, not auth or sandbox bypasses by themselves; a security-impacting report still needs a demonstrated trust-boundary bypass.
+Set per channel or per room/conversation - see [Groups](/channels/groups#context-visibility-and-allowlists). A human reply explicitly selects its quote as untrusted turn context, regardless of whether the author is the agent, another bot, or a non-allowlisted sender. This does not grant the quote author trigger or tool authority. Historical, thread, and forwarded context remain filterable; a security-impacting report still needs a demonstrated trust-boundary bypass.
 
 ## Prompt injection
 

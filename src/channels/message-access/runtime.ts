@@ -497,6 +497,7 @@ function projectActivationAccess(params: {
     ...(gate?.activation?.shouldBypassMention !== undefined
       ? { shouldBypassMention: gate.activation.shouldBypassMention }
       : {}),
+    ...(gate?.activation?.addressed !== undefined ? { addressed: gate.activation.addressed } : {}),
     ...(gate ? { gate } : {}),
   };
 }

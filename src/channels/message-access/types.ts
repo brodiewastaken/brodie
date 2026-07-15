@@ -243,6 +243,7 @@ export type ChannelIngressPolicyInput = {
     useAccessGroups?: boolean;
     allowTextCommands: boolean;
     hasControlCommand: boolean;
+    controlCommandExecutable?: boolean;
     modeWhenAccessGroupsOff?: "allow" | "deny" | "configured";
   };
 };
@@ -336,6 +337,7 @@ export type AccessGraphGate = {
     implicitMentionKinds?: readonly InboundImplicitMentionKind[];
     effectiveWasMentioned?: boolean;
     shouldBypassMention?: boolean;
+    addressed?: boolean;
   };
 };
 

@@ -7,7 +7,7 @@ import type {
 } from "../api/gateway.ts";
 import { createStorageMock } from "../test-helpers/storage.ts";
 import { createApplicationGateway } from "./gateway-store.ts";
-import { loadSettings } from "./settings.ts";
+import { loadSettings, saveSettings } from "./settings.ts";
 
 const HELLO: GatewayHelloOk = {
   type: "hello-ok",
@@ -152,5 +152,22 @@ describe("createApplicationGateway reconnecting snapshot", () => {
 
     // The superseded client cannot demote the fresh attempt's snapshot.
     expect(gateway.snapshot.reconnecting).toBe(true);
+  });
+
+  it("persists readable replacements for browser-local conversation-v1 selections", () => {
+    const legacy =
+      "agent:main:conversation-v1:8:whatsapp|6:brodie|5:group|23:120363406331109499@g.us|-";
+    const readable = "agent:main:conversation:whatsapp:brodie:group:120363406331109499@g.us";
+    saveSettings({ ...loadSettings(), sessionKey: legacy, lastActiveSessionKey: legacy });
+    const { gateway, current } = createStore();
+
+    gateway.start();
+    current().opts.onHello?.(HELLO);
+
+    expect(gateway.snapshot.sessionKey).toBe(readable);
+    expect(loadSettings()).toMatchObject({
+      sessionKey: readable,
+      lastActiveSessionKey: readable,
+    });
   });
 });

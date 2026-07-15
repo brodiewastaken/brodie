@@ -481,6 +481,7 @@ export async function processMessage(params: {
         });
 
   const ctxPayload = await buildWhatsAppInboundContext({
+    cfg: params.cfg,
     bodyForAgent: msgForAgent.payload.body,
     combinedBody,
     commandBody,

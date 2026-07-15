@@ -51,6 +51,8 @@ export type SupplementalContextFacts = {
     fullId?: string;
     body?: string;
     sender?: string;
+    senderId?: string;
+    timestamp?: number;
     senderAllowed?: boolean;
     isExternal?: boolean;
     isQuote?: boolean;
@@ -102,6 +104,8 @@ export type MsgContext = {
    * Prefer for command detection; RawBody is treated as legacy alias.
    */
   CommandBody?: string;
+  /** Full normalized text invocation before an operator-name prefix is stripped. */
+  CommandTriggerBody?: string;
   /**
    * Command parsing body. Prefer this over CommandBody/RawBody when set.
    * Should be the "clean" text (no history/sender context).
@@ -157,6 +161,16 @@ export type MsgContext = {
   ReplyToBody?: string;
   ReplyToQuoteText?: string;
   ReplyToSender?: string;
+  ReplyToSenderId?: string;
+  ReplyToTimestamp?: number;
+  ReplyToMediaPath?: string;
+  ReplyToMediaPaths?: string[];
+  ReplyToMediaUrl?: string;
+  ReplyToMediaUrls?: string[];
+  ReplyToMediaType?: string;
+  ReplyToMediaTypes?: string[];
+  ReplyToMediaSourceMessageIds?: string[];
+  ReplyToMediaSourceIndexes?: number[];
   ReplyChain?: Array<{
     messageId?: string;
     threadId?: string;
