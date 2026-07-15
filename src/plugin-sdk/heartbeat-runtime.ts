@@ -2,4 +2,5 @@
 
 export * from "../infra/heartbeat-events.js";
 export * from "../infra/heartbeat-visibility.js";
+export { admitDurableSystemEventWake } from "../infra/durable-system-event-wake.js";
 export { requestHeartbeat } from "../infra/heartbeat-wake.js";

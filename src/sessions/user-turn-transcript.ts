@@ -737,13 +737,29 @@ export function createUserTurnTranscriptRecorder(
                 ? { beforeMessageWrite: params.beforeMessageWrite }
                 : {}),
             });
+      const admittedRuntimeMessage = runtimePersistedMessage ?? message;
+      const hasHumanInboundBatch = Boolean(
+        admittedRuntimeMessage &&
+        readOpenClawMessageMeta(admittedRuntimeMessage)?.humanInboundBatch,
+      );
       const lateMediaMessage =
-        sentToProvider && !resolvedBeforeProvider
+        sentToProvider && !resolvedBeforeProvider && !hasHumanInboundBatch
           ? buildLateResolvedMediaMessage({
               admittedMessage: runtimePersistedMessage ?? message,
               resolvedMessage,
             })
           : undefined;
+      if (sentToProvider && !resolvedBeforeProvider && hasHumanInboundBatch) {
+        if (!persisted && message) {
+          const admittedResult = await persistMessage(message, updateMode);
+          if (admittedResult) {
+            persisted = true;
+            persistedResult = admittedResult;
+            notifyMessagePersisted(admittedResult.message);
+          }
+        }
+        return persistedResult;
+      }
       if (lateMediaMessage) {
         // The admitted bytes already crossed the LLM boundary. Persisting media as a
         // second turn preserves that prefix; inline replacement would thrash cache tail (#99495).

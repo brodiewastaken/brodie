@@ -29,6 +29,11 @@ export type EmbeddedAgentQueueHandle = {
   cancel?: (reason?: "user_abort" | "restart" | "superseded") => void;
   abort: (reason?: "restart") => void;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
+  /** Exact native-image policy for steering turns accepted by this run. */
+  nativeImagePolicy?: {
+    maxNativeImages: number;
+    omissionReason: "policy_ceiling" | "model_not_image_capable";
+  };
 };
 
 export type EmbeddedAgentQueueMessageOptions = ReplyBackendQueueMessageOptions;

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { renderHumanInboundBatch, type HumanInboundBatch } from "../../scheduler/human-inbound.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import type { FollowupRun, QueueSettings } from "./queue.js";
 import {
@@ -23,6 +24,38 @@ import { resolveFollowupAuthorizationKey } from "./queue/drain.js";
 import { getExistingFollowupQueue } from "./queue/state.js";
 
 installQueueRuntimeErrorSilencer();
+
+function createHumanInboundBatch(messageId: string, body: string): HumanInboundBatch {
+  const sessionKey = "agent:main:conversation:discord:default:channel:C123";
+  return {
+    version: 1,
+    placement: "post_turn",
+    route: {
+      channel: "discord",
+      accountId: "default",
+      conversationKind: "channel",
+      conversationId: "C123",
+      sessionKey,
+      queueLaneKey: "discord:default:channel:C123",
+      transcriptOwner: { agentId: "main", sessionKey },
+    },
+    conversation: {
+      channel: "discord",
+      conversationType: "guild_channel",
+      sessionKey,
+    },
+    inbounds: [
+      {
+        sourceEventId: messageId,
+        messageId,
+        sender: { id: "U1", label: "Abhay" },
+        bodyForAgent: body,
+        media: [],
+        nativeMetadata: {},
+      },
+    ],
+  };
+}
 
 describe("followup queue collect routing", () => {
   it("retries lifecycle admission after a callback rejection", async () => {
@@ -179,6 +212,65 @@ describe("followup queue collect routing", () => {
     expect(calls[0]?.originatingChannel).toBe("slack");
     expect(calls[0]?.originatingTo).toBe("channel:A");
     expect(calls[0]?.originatingChatType).toBe("channel");
+  });
+
+  it("collects typed scheduler turns as one canonical plural envelope", async () => {
+    const key = `test-collect-human-inbound-${Date.now()}`;
+    const calls: FollowupRun[] = [];
+    const done = createDeferred<void>();
+    const settings: QueueSettings = {
+      mode: "collect",
+      debounceMs: 0,
+      cap: 50,
+      dropPolicy: "summarize",
+    };
+    for (const [messageId, body] of [
+      ["m1", "one"],
+      ["m2", "two"],
+    ] as const) {
+      const humanInboundBatch = createHumanInboundBatch(messageId, body);
+      enqueueFollowupRun(
+        key,
+        createRun({
+          prompt: renderHumanInboundBatch(humanInboundBatch),
+          humanInboundBatch,
+          currentInboundContext: {
+            text: "Active goal: finish rollout",
+            placement: "tail",
+          },
+          originatingChannel: "discord",
+          originatingTo: "channel:C123",
+          originatingChatType: "channel",
+        }),
+        settings,
+      );
+    }
+
+    scheduleFollowupDrain(key, async (run) => {
+      calls.push(run);
+      done.resolve();
+    });
+    await done.promise;
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.prompt.startsWith("[📋 QUEUE ENGINE]:")).toBe(true);
+    expect(calls[0]?.prompt).toContain(
+      "THE FOLLOWING MESSAGES ARRIVED WHILE YOU WERE STILL STREAMING",
+    );
+    expect(calls[0]?.prompt).not.toContain("[Queued messages while agent was busy]");
+    expect(calls[0]?.humanInboundBatch?.inbounds.map((inbound) => inbound.messageId)).toEqual([
+      "m1",
+      "m2",
+    ]);
+    expect(calls[0]?.currentInboundContext?.placement).toBe("tail");
+    const persisted = await calls[0]?.userTurnTranscriptRecorder?.resolveMessage();
+    expect(
+      (
+        (persisted as unknown as Record<string, unknown> | undefined)?.["__openclaw"] as
+          | { humanInboundBatch?: HumanInboundBatch }
+          | undefined
+      )?.humanInboundBatch?.inbounds,
+    ).toHaveLength(2);
   });
 
   it("collects Slack top-level messages when reply anchors are disabled", async () => {

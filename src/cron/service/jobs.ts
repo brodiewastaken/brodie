@@ -1231,6 +1231,9 @@ function mergeCronPayload(existing: CronPayload, patch: CronPayloadPatch): CronP
   } else if (patch.thinking === null) {
     delete next.thinking;
   }
+  if (typeof patch.fastMode === "boolean") {
+    next.fastMode = patch.fastMode;
+  }
   if (typeof patch.timeoutSeconds === "number") {
     next.timeoutSeconds = patch.timeoutSeconds;
   }
@@ -1277,6 +1280,7 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
     model: typeof patch.model === "string" ? patch.model : undefined,
     fallbacks: Array.isArray(patch.fallbacks) ? patch.fallbacks : undefined,
     thinking: typeof patch.thinking === "string" ? patch.thinking : undefined,
+    fastMode: typeof patch.fastMode === "boolean" ? patch.fastMode : undefined,
     timeoutSeconds: patch.timeoutSeconds,
     lightContext: patch.lightContext,
     allowUnsafeExternalContent: patch.allowUnsafeExternalContent,

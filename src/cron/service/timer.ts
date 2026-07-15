@@ -35,7 +35,9 @@ import {
   normalizeCronRunDiagnostics,
   summarizeCronRunDiagnostics,
 } from "../run-diagnostics.js";
+import { createCronExecutionId } from "../run-id.js";
 import { computeNextRunAtMs } from "../schedule.js";
+import { runCronThroughScheduler } from "../scheduler-admission.js";
 import { sweepCronRunSessions } from "../session-reaper.js";
 import type {
   CronAgentExecutionPhaseUpdate,
@@ -166,6 +168,8 @@ type ExecuteJobCoreOptions = {
   onExecutionStarted?: (info?: CronAgentExecutionStarted) => void;
   onExecutionPhase?: (info: CronAgentExecutionPhaseUpdate) => void;
   onLaneWait?: (info?: { waiting?: boolean }) => void;
+  producerGeneration?: string;
+  dueSlotMs?: number;
 };
 
 /**
@@ -193,8 +197,40 @@ function cronRunAttributionFromExecution(execution?: CronAgentExecutionStarted):
   };
 }
 
-/** Executes cron job core logic with the configured wall-clock timeout and watchdog cleanup. */
+/** Executes scheduler-owned cron work without charging durable queue time to the run watchdog. */
 export async function executeJobCoreWithTimeout(
+  state: CronServiceState,
+  job: CronJob,
+  opts?: { runId?: string; activeJobMarker?: CronActiveJobMarker },
+): Promise<CronCoreRunOutcome> {
+  if (state.deps.conversationScheduler) {
+    if (!isCronActiveJobMarkerCurrent(opts?.activeJobMarker)) {
+      const error = "Gateway restarting.";
+      return {
+        status: "error",
+        error,
+        diagnostics: createCronRunDiagnosticsFromError("cron-setup", error, {
+          nowMs: state.deps.nowMs,
+        }),
+      };
+    }
+    const dueSlotMs =
+      typeof job.state.runningAtMs === "number" ? job.state.runningAtMs : state.deps.nowMs();
+    const producerGeneration = opts?.runId ?? createCronExecutionId(job.id, dueSlotMs);
+    return await runCronThroughScheduler({
+      state,
+      job,
+      dueSlotMs,
+      producerGeneration,
+      runDirect: async (scheduledJob) =>
+        await executeJobCoreDirectWithTimeout(state, scheduledJob, opts),
+    });
+  }
+  return await executeJobCoreDirectWithTimeout(state, job, opts);
+}
+
+/** Executes admitted cron work with the configured wall-clock timeout and watchdog cleanup. */
+export async function executeJobCoreDirectWithTimeout(
   state: CronServiceState,
   job: CronJob,
   opts?: { runId?: string; activeJobMarker?: CronActiveJobMarker },
@@ -241,9 +277,10 @@ export async function executeJobCoreWithTimeout(
           activeExecution = { ...activeExecution, ...info };
         }
       };
-      const corePromise = executeJobCore(state, job, runAbortController.signal, {
+      const corePromise = executeJobCoreDirect(state, job, runAbortController.signal, {
         onExecutionStarted: accumulateExecution,
         onExecutionPhase: accumulateExecution,
+        producerGeneration: opts?.runId,
       });
       trackActiveCronTaskRunSettlement(corePromise);
       void corePromise.catch((err: unknown) => {
@@ -294,10 +331,11 @@ export async function executeJobCoreWithTimeout(
       }
       watchdog.noteLaneWait();
     };
-    const corePromise = executeJobCore(state, job, runAbortController.signal, {
+    const corePromise = executeJobCoreDirect(state, job, runAbortController.signal, {
       onExecutionStarted: deferTimeoutUntilExecutionStart ? watchdog.noteRunnerStarted : undefined,
       onExecutionPhase: deferTimeoutUntilExecutionStart ? watchdog.notePhase : undefined,
       onLaneWait: deferTimeoutUntilExecutionStart ? noteLaneState : undefined,
+      producerGeneration: opts?.runId,
     });
     trackActiveCronTaskRunSettlement(corePromise);
     watchdog.start();
@@ -2022,6 +2060,39 @@ async function applyStartupCatchupOutcomes(
 
 /** Executes a cron job without mutating persisted job state. */
 export async function executeJobCore(
+  state: CronServiceState,
+  job: CronJob,
+  abortSignal?: AbortSignal,
+  options?: ExecuteJobCoreOptions,
+): Promise<
+  CronRunOutcome &
+    CronRunTelemetry & {
+      delivered?: boolean;
+      deliveryAttempted?: boolean;
+      delivery?: CronDeliveryTrace;
+      triggerEval?: CronTriggerEvalOutcome;
+    }
+> {
+  if (state.deps.conversationScheduler) {
+    const dueSlotMs =
+      options?.dueSlotMs ??
+      (typeof job.state.runningAtMs === "number" ? job.state.runningAtMs : state.deps.nowMs());
+    const producerGeneration =
+      options?.producerGeneration ?? createCronExecutionId(job.id, dueSlotMs);
+    return await runCronThroughScheduler({
+      state,
+      job,
+      dueSlotMs,
+      producerGeneration,
+      runDirect: async (scheduledJob) =>
+        await executeJobCoreDirect(state, scheduledJob, abortSignal, options),
+    });
+  }
+  return await executeJobCoreDirect(state, job, abortSignal, options);
+}
+
+/** Executes an already scheduler-owned cron payload without admitting it again. */
+export async function executeJobCoreDirect(
   state: CronServiceState,
   job: CronJob,
   abortSignal?: AbortSignal,

@@ -39,4 +39,21 @@ describe("media-understanding selectAttachments guards", () => {
       }),
     ).toStrictEqual([]);
   });
+
+  it("selects every video even when legacy attachment policy says first", () => {
+    expect(
+      selectAttachments({
+        capability: "video",
+        attachments: [
+          { index: 0, path: "/tmp/one.mp4", mime: "video/mp4" },
+          { index: 1, path: "/tmp/two.mp4", mime: "video/mp4" },
+          { index: 2, path: "/tmp/image.png", mime: "image/png" },
+        ],
+        policy: { mode: "first", maxAttachments: 1 },
+      }),
+    ).toEqual([
+      { index: 0, path: "/tmp/one.mp4", mime: "video/mp4" },
+      { index: 1, path: "/tmp/two.mp4", mime: "video/mp4" },
+    ]);
+  });
 });

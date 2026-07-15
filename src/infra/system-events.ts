@@ -39,6 +39,8 @@ type SystemEventOptions = {
   deliveryContext?: DeliveryContext;
 };
 
+export type NormalizedSystemEvent = Pick<SystemEvent, "text" | "contextKey" | "deliveryContext">;
+
 function requireSessionKey(key?: string | null): string {
   const trimmed = normalizeOptionalString(key) ?? "";
   if (!trimmed) {
@@ -104,7 +106,50 @@ export function enqueueSystemEventEntry(
   options: SystemEventOptions,
 ): SystemEvent | null {
   const key = requireSessionKey(options.sessionKey);
+  const normalized = normalizeSystemEventEntry(text, options);
+  if (!normalized) {
+    return null;
+  }
+  return enqueueNormalizedSystemEventEntry(normalized, key);
+}
+
+/** Enqueues one already-normalized event without rebuilding its durable payload. */
+export function enqueueNormalizedSystemEventEntry(
+  normalized: NormalizedSystemEvent,
+  sessionKey: string,
+): SystemEvent | null {
+  const key = requireSessionKey(sessionKey);
   const entry = getOrCreateSessionQueue(key);
+  if (
+    findDuplicateInQueue(
+      entry.queue,
+      normalized.text,
+      normalized.contextKey ?? null,
+      normalized.deliveryContext,
+    )
+  ) {
+    return null;
+  }
+  if (normalized.contextKey !== null) {
+    entry.lastContextKey = normalized.contextKey ?? null;
+  }
+  const event: SystemEvent = {
+    ...normalized,
+    ts: Date.now(),
+  };
+  entry.queue.push(event);
+  if (entry.queue.length > MAX_EVENTS) {
+    entry.queue.shift();
+  }
+  return cloneSystemEvent(event);
+}
+
+/** Normalizes one persistable system event without depending on ephemeral queue dedupe. */
+export function normalizeSystemEventEntry(
+  text: string,
+  options: SystemEventOptions,
+): NormalizedSystemEvent | null {
+  requireSessionKey(options.sessionKey);
   // These entries are rendered as `System:` lines, so strip nested system-marker
   // spoofs at the queue boundary before any plugin/channel text reaches a prompt.
   const cleaned = sanitizeInboundSystemTags(text).trim();
@@ -113,23 +158,11 @@ export function enqueueSystemEventEntry(
   }
   const normalizedContextKey = normalizeContextKey(options.contextKey);
   const normalizedDeliveryContext = normalizeDeliveryContext(options.deliveryContext);
-  if (findDuplicateInQueue(entry.queue, cleaned, normalizedContextKey, normalizedDeliveryContext)) {
-    return null;
-  }
-  if (normalizedContextKey !== null) {
-    entry.lastContextKey = normalizedContextKey;
-  }
-  const event: SystemEvent = {
+  return {
     text: cleaned,
-    ts: Date.now(),
     contextKey: normalizedContextKey,
     deliveryContext: normalizedDeliveryContext,
   };
-  entry.queue.push(event);
-  if (entry.queue.length > MAX_EVENTS) {
-    entry.queue.shift();
-  }
-  return cloneSystemEvent(event);
 }
 
 export function enqueueSystemEvent(text: string, options: SystemEventOptions) {

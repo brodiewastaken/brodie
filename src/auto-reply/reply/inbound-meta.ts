@@ -641,8 +641,10 @@ export function buildInboundUserContextPrefix(
   ctx: TemplateContext,
   envelope?: EnvelopeFormatOptions,
   sessionEntry?: SessionEntry,
+  options?: { projection?: "default" | "human-inbound-supplemental" },
 ): string {
   const blocks: string[] = [];
+  const humanInboundSupplemental = options?.projection === "human-inbound-supplemental";
   const chatType = normalizeChatType(ctx.ChatType);
   const isDirect = !chatType || chatType === "direct";
   const directChannelValue = resolveInboundChannel(ctx);
@@ -726,14 +728,14 @@ export function buildInboundUserContextPrefix(
     history_media_count: historyMediaCount > 0 ? historyMediaCount : undefined,
     history_truncated: inboundHistory.length > MAX_UNTRUSTED_HISTORY_ENTRIES ? true : undefined,
   };
-  if (Object.values(conversationInfo).some((v) => v !== undefined)) {
+  if (!humanInboundSupplemental && Object.values(conversationInfo).some((v) => v !== undefined)) {
     blocks.push(
       formatUntrustedJsonBlock("Conversation info (untrusted metadata):", conversationInfo),
     );
   }
 
   const threadStarterBody = sanitizePromptBody(ctx.ThreadStarterBody);
-  if (threadStarterBody) {
+  if (!humanInboundSupplemental && threadStarterBody) {
     blocks.push(
       formatUntrustedJsonBlock("Thread starter (untrusted, for context):", {
         body: threadStarterBody,
@@ -743,14 +745,24 @@ export function buildInboundUserContextPrefix(
 
   const rawReplyToBody = sanitizePromptBody(ctx.ReplyToBody);
   const replyToBody = rawReplyToBody ? truncateBodyHeadTail(rawReplyToBody) : rawReplyToBody;
-  if (replyChainPayload.length > 0 && !chatWindowCoversReplyContext && !currentMessageContext) {
+  if (
+    !humanInboundSupplemental &&
+    replyChainPayload.length > 0 &&
+    !chatWindowCoversReplyContext &&
+    !currentMessageContext
+  ) {
     blocks.push(
       formatUntrustedJsonBlock(
         "Reply chain of current user message (untrusted, nearest first):",
         replyChainPayload,
       ),
     );
-  } else if (replyToBody && !chatWindowCoversReplyContext && !currentMessageContext) {
+  } else if (
+    !humanInboundSupplemental &&
+    replyToBody &&
+    !chatWindowCoversReplyContext &&
+    !currentMessageContext
+  ) {
     blocks.push(
       formatUntrustedJsonBlock("Reply target of current user message (untrusted, for context):", {
         sender_label: normalizePromptMetadataString(ctx.ReplyToSender),
@@ -770,14 +782,14 @@ export function buildInboundUserContextPrefix(
     chat_type: normalizePromptMetadataString(ctx.ForwardedFromChatType),
     date_ms: typeof ctx.ForwardedDate === "number" ? ctx.ForwardedDate : undefined,
   };
-  if (forwardedFrom) {
+  if (!humanInboundSupplemental && forwardedFrom) {
     blocks.push(
       formatUntrustedJsonBlock("Forwarded message context (untrusted metadata):", forwardedContext),
     );
   }
 
   const locationContext = buildLocationContextPayload(ctx);
-  if (locationContext) {
+  if (!humanInboundSupplemental && locationContext) {
     blocks.push(formatUntrustedJsonBlock("Location (untrusted metadata):", locationContext));
   }
 
@@ -837,7 +849,7 @@ export function buildInboundUserContextPrefix(
     blocks.push(pendingSkillSuggestionContext);
   }
 
-  if (currentMessageContext) {
+  if (!humanInboundSupplemental && currentMessageContext) {
     blocks.push(currentMessageContext);
   }
 

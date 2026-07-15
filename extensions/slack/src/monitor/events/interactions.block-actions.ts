@@ -1,10 +1,11 @@
 // Slack plugin module implements interactions.block actions behavior.
+import { createHash } from "node:crypto";
 import type { SlackActionMiddlewareArgs } from "@slack/bolt";
 import type { Block, KnownBlock } from "@slack/web-api";
 import { resolveApprovalOverGateway } from "openclaw/plugin-sdk/approval-gateway-runtime";
 import { parseExecApprovalCommandText } from "openclaw/plugin-sdk/approval-reply-runtime";
 import { resolveCommandAuthorization } from "openclaw/plugin-sdk/command-auth-native";
-import { requestHeartbeat } from "openclaw/plugin-sdk/heartbeat-runtime";
+import { admitDurableSystemEventWake } from "openclaw/plugin-sdk/heartbeat-runtime";
 import {
   parseStrictFiniteNumber,
   timestampMsToIsoString,
@@ -13,7 +14,6 @@ import {
   normalizeOptionalString,
   normalizeUniqueTrimmedStringList,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
 import { isSlackApprovalAuthorizedSender } from "../../approval-auth.js";
 import { isSlackExecApprovalAuthorizedSender } from "../../exec-approvals.js";
 import { dispatchSlackPluginInteractiveHandler } from "../../interactive-dispatch.js";
@@ -759,12 +759,12 @@ async function resolveSlackBlockActionCommandAuthorized(params: {
   return commandIngress.commandAccess.authorized;
 }
 
-function enqueueSlackBlockActionEvent(params: {
+async function enqueueSlackBlockActionEvent(params: {
   ctx: SlackMonitorContext;
   parsed: ParsedSlackBlockAction;
   auth: { channelType?: "im" | "mpim" | "channel" | "group" };
   formatSystemEvent: (payload: Record<string, unknown>) => string;
-}): void {
+}): Promise<void> {
   const eventPayload: InteractionSummary = {
     interactionType: "block_action",
     actionId: params.parsed.actionId,
@@ -793,30 +793,38 @@ function enqueueSlackBlockActionEvent(params: {
     params.parsed.messageTs,
     params.parsed.actionId,
   ].filter(Boolean);
-  const queued = enqueueSystemEvent(params.formatSystemEvent(eventPayload), {
+  const systemEventText = params.formatSystemEvent(eventPayload);
+  const deliveryContext = {
+    channel: "slack" as const,
+    to:
+      params.auth.channelType === "im"
+        ? `user:${params.parsed.userId}`
+        : params.parsed.channelId
+          ? `channel:${params.parsed.channelId}`
+          : undefined,
+    accountId: params.ctx.accountId,
+    threadId: params.parsed.threadTs,
+  };
+  const contextKey = contextParts.join(":");
+  await admitDurableSystemEventWake({
+    cfg: params.ctx.cfg,
     sessionKey,
-    contextKey: contextParts.join(":"),
-    deliveryContext: {
-      channel: "slack",
-      to:
-        params.auth.channelType === "im"
-          ? `user:${params.parsed.userId}`
-          : params.parsed.channelId
-            ? `channel:${params.parsed.channelId}`
-            : undefined,
-      accountId: params.ctx.accountId,
-      threadId: params.parsed.threadTs,
-    },
+    systemEvent: { text: systemEventText, contextKey, deliveryContext },
+    source: "hook",
+    intent: "immediate",
+    reason: "hook:slack-interaction",
+    sourceGeneration: createHash("sha256")
+      .update(params.ctx.accountId)
+      .update("\0")
+      .update(sessionKey)
+      .update("\0")
+      .update(contextKey)
+      .update("\0")
+      .update(params.parsed.typedBody.trigger_id ?? "")
+      .digest("hex"),
+    producerKind: "system",
+    heartbeat: { target: "last" },
   });
-  if (queued) {
-    requestHeartbeat({
-      source: "hook",
-      intent: "immediate",
-      reason: "hook:slack-interaction",
-      sessionKey,
-      heartbeat: { target: "last" },
-    });
-  }
 }
 
 function buildSlackConfirmationBlocks(params: {
@@ -973,7 +981,7 @@ async function handleSlackBlockAction(params: {
       return;
     }
   }
-  enqueueSlackBlockActionEvent({
+  await enqueueSlackBlockActionEvent({
     ctx: params.ctx,
     parsed,
     auth,

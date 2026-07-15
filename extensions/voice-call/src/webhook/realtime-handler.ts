@@ -44,6 +44,8 @@ import {
 
 export type ToolHandlerContext = {
   partialUserTranscript?: string;
+  turnId?: string;
+  toolCallId?: string;
 };
 type ToolHandlerFn = (
   args: unknown,
@@ -1416,6 +1418,8 @@ export class RealtimeCallHandler {
         await this.waitForConsultTranscriptSettle(callId, startedAt);
         const context = {
           partialUserTranscript: this.resolveUserTranscriptContext(callId),
+          turnId,
+          toolCallId: bridgeCallId,
         };
         state.partialUserTranscript = context.partialUserTranscript;
         const handlerArgs = withFallbackConsultQuestion(args, context.partialUserTranscript);
@@ -1458,6 +1462,8 @@ export class RealtimeCallHandler {
     );
     const context = {
       partialUserTranscript: this.resolveUserTranscriptContext(callId),
+      turnId,
+      toolCallId: bridgeCallId,
     };
     const handlerArgs =
       name === REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME

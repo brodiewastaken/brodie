@@ -3,6 +3,7 @@ import {
   createChannelInboundDebouncer,
   shouldDebounceTextInbound,
 } from "openclaw/plugin-sdk/channel-inbound";
+import { hasControlCommand } from "openclaw/plugin-sdk/command-detection";
 import { collectErrorGraphCandidates, formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import {
@@ -10,6 +11,7 @@ import {
   resolveExpiresAtMsFromDurationMs,
 } from "openclaw/plugin-sdk/number-runtime";
 import type { ResolvedSlackAccount } from "../accounts.js";
+import { admitSlackScheduledInbound } from "../scheduler-admission.js";
 import type { SlackSendIdentity } from "../send.js";
 import type { SlackMessageEvent } from "../types.js";
 import { stripSlackMentionsForCommandDetection } from "./commands.js";
@@ -117,31 +119,31 @@ export function createSlackMessageHandler(params: {
     buildKey: (entry) => buildSlackDebounceKey(entry.message, ctx.accountId),
     shouldDebounce: (entry) => shouldDebounceSlackMessage(entry.message, ctx.cfg),
     onFlush: async (entries) => {
+      let completedEntryCount = 0;
       const retryEntries = (sourceError: unknown): boolean => {
         if (!isRetryableSlackInboundError(sourceError)) {
           return false;
         }
-        const nextEntries = entries
-          .map((entry) => {
-            // Relay delivery owns retry until its dispatch completion is acknowledged.
-            // Scheduling here as well can race the router redelivery and duplicate a reply.
-            if (entry.opts.dispatchCompletion) {
-              return null;
-            }
-            const retryAttempt = entry.opts.retryAttempt ?? 0;
-            if (retryAttempt >= RETRYABLE_FLUSH_MAX_ATTEMPTS) {
-              return null;
-            }
-            const { dispatchCompletion: _dispatchCompletion, ...retryOpts } = entry.opts;
-            return {
-              ...entry,
-              opts: {
-                ...retryOpts,
-                retryAttempt: retryAttempt + 1,
-              },
-            };
-          })
-          .filter((entry) => entry !== null);
+        const nextEntries: Array<(typeof entries)[number]> = [];
+        for (const entry of entries.slice(completedEntryCount)) {
+          // Relay delivery owns retry until its dispatch completion is acknowledged.
+          // Scheduling here as well can race the router redelivery and duplicate a reply.
+          if (entry.opts.dispatchCompletion) {
+            continue;
+          }
+          const retryAttempt = entry.opts.retryAttempt ?? 0;
+          if (retryAttempt >= RETRYABLE_FLUSH_MAX_ATTEMPTS) {
+            continue;
+          }
+          const { dispatchCompletion: _dispatchCompletion, ...retryOpts } = entry.opts;
+          nextEntries.push({
+            message: entry.message,
+            opts: {
+              ...retryOpts,
+              retryAttempt: retryAttempt + 1,
+            },
+          });
+        }
         if (nextEntries.length === 0) {
           return false;
         }
@@ -157,9 +159,6 @@ export function createSlackMessageHandler(params: {
         retryTimer.unref?.();
         return true;
       };
-      const completions = entries
-        .map((entry) => entry.opts.dispatchCompletion)
-        .filter((completion) => completion !== undefined);
       try {
         await (async () => {
           const last = entries.at(-1);
@@ -180,107 +179,102 @@ export function createSlackMessageHandler(params: {
               }
             }
           }
-          const combinedText =
-            entries.length === 1
-              ? (last.message.text ?? "")
-              : entries
-                  .map((entry) => entry.message.text ?? "")
-                  .filter(Boolean)
-                  .join("\n");
-          const combinedMentioned = entries.some((entry) => Boolean(entry.opts.wasMentioned));
-          const syntheticMessage: SlackMessageEvent = {
-            ...last.message,
-            text: combinedText,
-          };
-          const seenMessageKey = buildSeenMessageKey(last.message.channel, last.message.ts);
           try {
             const { prepareSlackMessage, dispatchPreparedSlackMessage } =
               await loadSlackMessagePipeline();
-            const {
-              dispatchCompletion: _completion,
-              awaitDispatch: _awaitDispatch,
-              ...lastOpts
-            } = last.opts;
-            const appMentionRetryKey =
-              seenMessageKey && lastOpts.source === "app_mention" && !ctx.botUserId
-                ? seenMessageKey
-                : undefined;
-            if (appMentionRetryKey) {
-              // Keep a concurrent message copy from recording this timestamp while the trusted
-              // app_mention prepares and removes any already-recorded copy from its routed history.
-              appMentionPreparingKeys.add(appMentionRetryKey);
-            }
-            const prepared = await (async () => {
-              try {
-                const result = await prepareSlackMessage({
-                  ctx,
-                  account,
-                  message: syntheticMessage,
-                  opts: {
-                    ...lastOpts,
-                    wasMentioned: combinedMentioned || last.opts.wasMentioned,
-                    ...(seenMessageKey && lastOpts.source === "message"
-                      ? {
-                          shouldRecordDroppedHistory: () =>
-                            !appMentionPreparingKeys.has(seenMessageKey) &&
-                            !appMentionDispatchedKeys.has(seenMessageKey),
-                        }
-                      : {}),
-                  },
-                });
-                if (result && seenMessageKey) {
-                  pruneAppMentionRetryKeys(Date.now());
-                  if (last.opts.source === "app_mention") {
-                    // If app_mention wins the race and dispatches first, drop the later message.
-                    rememberExpiringAppMentionKey(appMentionDispatchedKeys, seenMessageKey);
-                  } else if (
-                    last.opts.source === "message" &&
-                    appMentionDispatchedKeys.has(seenMessageKey)
-                  ) {
-                    appMentionDispatchedKeys.delete(seenMessageKey);
+            for (const entry of entries) {
+              const seenMessageKey = buildSeenMessageKey(entry.message.channel, entry.message.ts);
+              const {
+                dispatchCompletion: _completion,
+                awaitDispatch: _awaitDispatch,
+                ...entryOpts
+              } = entry.opts;
+              const appMentionRetryKey =
+                seenMessageKey && entryOpts.source === "app_mention" && !ctx.botUserId
+                  ? seenMessageKey
+                  : undefined;
+              if (appMentionRetryKey) {
+                appMentionPreparingKeys.add(appMentionRetryKey);
+              }
+              const prepared = await (async () => {
+                try {
+                  const result = await prepareSlackMessage({
+                    ctx,
+                    account,
+                    message: entry.message,
+                    opts: {
+                      ...entryOpts,
+                      ...(seenMessageKey && entryOpts.source === "message"
+                        ? {
+                            shouldRecordDroppedHistory: () =>
+                              !appMentionPreparingKeys.has(seenMessageKey) &&
+                              !appMentionDispatchedKeys.has(seenMessageKey),
+                          }
+                        : {}),
+                    },
+                  });
+                  if (result && seenMessageKey) {
+                    pruneAppMentionRetryKeys(Date.now());
+                    if (entryOpts.source === "app_mention") {
+                      rememberExpiringAppMentionKey(appMentionDispatchedKeys, seenMessageKey);
+                    } else if (
+                      entryOpts.source === "message" &&
+                      appMentionDispatchedKeys.has(seenMessageKey)
+                    ) {
+                      appMentionDispatchedKeys.delete(seenMessageKey);
+                      appMentionRetryKeys.delete(seenMessageKey);
+                      return null;
+                    }
                     appMentionRetryKeys.delete(seenMessageKey);
-                    return null;
                   }
-                  appMentionRetryKeys.delete(seenMessageKey);
+                  return result;
+                } finally {
+                  if (appMentionRetryKey) {
+                    appMentionPreparingKeys.delete(appMentionRetryKey);
+                  }
                 }
-                return result;
-              } finally {
-                if (appMentionRetryKey) {
-                  appMentionPreparingKeys.delete(appMentionRetryKey);
+              })();
+              if (!prepared) {
+                completedEntryCount += 1;
+                entry.opts.dispatchCompletion?.resolve();
+                continue;
+              }
+              try {
+                const commandBody = prepared.ctxPayload.CommandBody ?? "";
+                const schedulerAdmission = hasControlCommand(commandBody, ctx.cfg)
+                  ? undefined
+                  : await admitSlackScheduledInbound({
+                      prepared,
+                      source: entryOpts.source,
+                      onError: (error) => {
+                        ctx.runtime.error?.(
+                          `slack scheduler admission failed open: ${formatErrorMessage(error)}`,
+                        );
+                      },
+                    });
+                if (!schedulerAdmission?.result.accepted) {
+                  await dispatchPreparedSlackMessage(prepared);
                 }
-              }
-            })();
-            if (!prepared) {
-              return;
-            }
-            if (entries.length > 1) {
-              const ids = entries.map((entry) => entry.message.ts).filter(Boolean) as string[];
-              if (ids.length > 0) {
-                prepared.ctxPayload.MessageSids = ids;
-                prepared.ctxPayload.MessageSidFirst = ids[0];
-                prepared.ctxPayload.MessageSidLast = ids[ids.length - 1];
-              }
-            }
-            try {
-              await dispatchPreparedSlackMessage(prepared);
-              await recordSlackInboundMessageDeliveries({
-                accountId: ctx.accountId,
-                messages: entries.map((entry) => entry.message),
-              });
-            } catch (error) {
-              if (!isRetryableSlackInboundError(error)) {
                 await recordSlackInboundMessageDeliveries({
                   accountId: ctx.accountId,
-                  messages: entries.map((entry) => entry.message),
+                  messages: [entry.message],
                 });
+                completedEntryCount += 1;
+                entry.opts.dispatchCompletion?.resolve();
+              } catch (error) {
+                if (!isRetryableSlackInboundError(error)) {
+                  await recordSlackInboundMessageDeliveries({
+                    accountId: ctx.accountId,
+                    messages: [entry.message],
+                  });
+                }
+                throw error;
               }
-              throw error;
             }
           } catch (error) {
             if (isRetryableSlackInboundError(error)) {
-              // Every buffered event passed the seen gate before this combined dispatch.
-              // Release all of them so the retry can rebuild the same batch.
-              for (const entry of entries) {
+              // Every buffered event passed the seen gate before this dispatch.
+              for (const entry of entries.slice(completedEntryCount)) {
                 const entrySeenKey = buildSeenMessageKey(entry.message.channel, entry.message.ts);
                 if (entrySeenKey) {
                   appMentionDispatchedKeys.delete(entrySeenKey);
@@ -291,13 +285,10 @@ export function createSlackMessageHandler(params: {
             throw error;
           }
         })();
-        for (const completion of completions) {
-          completion.resolve();
-        }
       } catch (error) {
         retryEntries(error);
-        for (const completion of completions) {
-          completion.reject(error);
+        for (const entry of entries.slice(completedEntryCount)) {
+          entry.opts.dispatchCompletion?.reject(error);
         }
         throw error;
       }

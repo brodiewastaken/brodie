@@ -1364,4 +1364,47 @@ CREATE INDEX IF NOT EXISTS idx_worktrees_repo_fingerprint
   ON worktrees(repo_fingerprint);
 
 CREATE INDEX IF NOT EXISTS idx_worktrees_removed_at
-  ON worktrees(removed_at);\n`;
+  ON worktrees(removed_at);
+
+CREATE TABLE IF NOT EXISTS conversation_scheduler_events (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  receipt_id TEXT NOT NULL UNIQUE,
+  lane_key TEXT NOT NULL,
+  session_key TEXT NOT NULL,
+  route_json TEXT NOT NULL,
+  producer_kind TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  durable_at INTEGER NOT NULL,
+  human INTEGER NOT NULL,
+  media INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  payload_bytes INTEGER NOT NULL,
+  ready_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN (
+    'pending', 'reserved', 'dispatching', 'running', 'delivered',
+    'failed', 'storage_error', 'cancelled'
+  )),
+  revision INTEGER NOT NULL DEFAULT 0,
+  dispatch_attempt_id TEXT,
+  run_correlation_id TEXT,
+  transcript_evidence TEXT,
+  callback_state TEXT NOT NULL DEFAULT 'pending' CHECK (callback_state IN (
+    'pending', 'settled', 'not_applicable'
+  )),
+  failure_json TEXT,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_scheduler_lane_state_sequence
+  ON conversation_scheduler_events(lane_key, state, sequence);
+
+CREATE INDEX IF NOT EXISTS idx_conversation_scheduler_ready
+  ON conversation_scheduler_events(state, ready_at, sequence);
+
+CREATE TABLE IF NOT EXISTS conversation_scheduler_lanes (
+  lane_key TEXT NOT NULL PRIMARY KEY,
+  revision INTEGER NOT NULL DEFAULT 0,
+  active_event_id TEXT,
+  updated_at INTEGER NOT NULL
+);\n`;

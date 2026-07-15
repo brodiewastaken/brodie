@@ -778,6 +778,66 @@ describe("user turn transcript persistence", () => {
       ]);
     });
 
+    it("keeps late scheduler media on its canonical typed user turn", async () => {
+      const dir = createTempDir("openclaw-user-turn-recorder-late-scheduler-media-");
+      const transcriptPath = path.join(dir, "session.jsonl");
+      const humanInboundBatch = { inbounds: [] } as unknown as NonNullable<
+        UserTurnInput["humanInboundBatch"]
+      >;
+      const admittedInput: UserTurnInput = {
+        text: "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]",
+        timestamp: 123,
+        idempotencyKey: "scheduler-late:user",
+        humanInboundBatch,
+      };
+      let resolveMedia!: (input: UserTurnInput) => void;
+      let markResolverStarted!: () => void;
+      const resolverStarted = new Promise<void>((resolve) => {
+        markResolverStarted = resolve;
+      });
+      const mediaInput = new Promise<UserTurnInput>((resolve) => {
+        resolveMedia = resolve;
+      });
+      const recorder = createUserTurnTranscriptRecorder({
+        input: admittedInput,
+        resolveInput: async () => {
+          markResolverStarted();
+          return await mediaInput;
+        },
+        target: {
+          transcriptPath,
+          sessionId: "session-1",
+          sessionKey: "main",
+          cwd: dir,
+        },
+      });
+      const persistence = recorder.persistFallback();
+      await resolverStarted;
+      await appendUserTurnTranscriptMessage({
+        transcriptPath,
+        input: admittedInput,
+        sessionId: "session-1",
+        sessionKey: "main",
+        cwd: dir,
+      });
+      recorder.markRuntimePersisted(recorder.message);
+      recorder.markSentToProvider?.();
+      resolveMedia({
+        ...admittedInput,
+        media: [{ path: path.join(dir, "image.png"), contentType: "image/png" }],
+      });
+
+      await persistence;
+
+      expect(readTranscriptMessages(transcriptPath)).toEqual([
+        expect.objectContaining({
+          content: admittedInput.text,
+          idempotencyKey: "scheduler-late:user",
+          __openclaw: expect.objectContaining({ humanInboundBatch }),
+        }),
+      ]);
+    });
+
     it("keeps #99495 media inline when it resolves before first serialization", async () => {
       const dir = createTempDir("openclaw-user-turn-recorder-early-media-");
       const transcriptPath = path.join(dir, "session.jsonl");

@@ -6,6 +6,7 @@ import type {
   MediaUnderstandingOutput,
 } from "../media-understanding/types.js";
 import type { PluginHookChannelContext } from "../plugins/hook-channel-context.types.js";
+import type { HumanInboundBatch } from "../scheduler/human-inbound.js";
 import type { InputProvenance } from "../sessions/input-provenance.js";
 import type { CommandTurnContext } from "./command-turn-context.js";
 import type { CommandArgs } from "./commands-args.types.js";
@@ -88,6 +89,8 @@ export type MsgContext = {
    * Should use real newlines (`\n`), not escaped `\\n`.
    */
   BodyForAgent?: string;
+  /** Canonical scheduler-owned human input used by model and operator projections. */
+  HumanInboundBatch?: HumanInboundBatch;
   /**
    * Recent chat history for context (untrusted user content). Prefer passing this
    * as structured context blocks in the user prompt rather than rendering plaintext envelopes.

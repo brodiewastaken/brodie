@@ -6,6 +6,17 @@ import type {
 } from "../auto-reply/reply/session-fork.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import { runExclusiveSessionLifecycleMutation } from "../sessions/session-lifecycle-admission.js";
+
+const runRuntimeTurnThroughSchedulerMock = vi.hoisted(() =>
+  vi.fn(async (params: { execute: (runId: string) => Promise<unknown> }) =>
+    params.execute("talk:test-run"),
+  ),
+);
+
+vi.mock("../scheduler/runtime-turn-admission.js", () => ({
+  runRuntimeTurnThroughScheduler: runRuntimeTurnThroughSchedulerMock,
+}));
+
 import {
   setRealtimeVoiceAgentConsultDepsForTest,
   consultRealtimeVoiceAgent,
@@ -183,6 +194,14 @@ describe("realtime voice agent consult runtime", () => {
     });
 
     expect(result).toEqual({ text: "Speak this." });
+    expect(runRuntimeTurnThroughSchedulerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        producerKind: "talk",
+        sessionKey: "voice:15550001234",
+        callId: "voice-realtime-consult:call-1",
+        turnId: expect.stringMatching(/^input:[a-f0-9]{64}$/),
+      }),
+    );
     const voiceSession = sessionStore["voice:15550001234"];
     if (!voiceSession) {
       throw new Error("Expected voice consult session entry");
@@ -203,6 +222,7 @@ describe("realtime voice agent consult runtime", () => {
     expect(call.thinkLevel).toBe("high");
     expect(call.fastMode).toBe(true);
     expect(call.timeoutMs).toBe(10_000);
+    expect(call.runId).toBe("talk:test-run");
     expect(call.prompt).toBe(
       [
         "Live voice request from the caller during a live phone call.",

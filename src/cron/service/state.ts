@@ -1,6 +1,8 @@
 /** Cron service dependency, event, state, and public result types. */
 import type { CronConfig } from "../../config/types.cron.js";
 import type { HeartbeatRunResult, HeartbeatWakeRequest } from "../../infra/heartbeat-wake.js";
+import type { ConversationScheduler } from "../../scheduler/conversation-scheduler.js";
+import type { SchedulerProducerRegistration } from "../../scheduler/scheduler-producer-registry.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import type { QuarantinedCronConfigJob } from "../store.js";
 import type {
@@ -69,6 +71,11 @@ export type CronServiceDeps = {
   cronEnabled: boolean;
   /** CronConfig for session retention settings. */
   cronConfig?: CronConfig;
+  /** Production runtime scheduler. Omitted by standalone and unit callers. */
+  conversationScheduler?: Pick<ConversationScheduler, "admit" | "waitForReceiptTerminal">;
+  registerConversationSchedulerProducer?: (
+    registration: SchedulerProducerRegistration,
+  ) => () => void;
   evaluateCronTrigger?: (params: {
     job: CronJob;
     script: string;
@@ -118,6 +125,11 @@ export type CronServiceDeps = {
     sessionKey?: string;
     agentId?: string;
   }) => DeliveryContext | undefined;
+  /** Resolve operator wake ownership before the system event and heartbeat are emitted. */
+  resolveOperatorWakeTarget?: (params: { sessionKey?: string; agentId?: string }) => {
+    sessionKey?: string;
+    agentId?: string;
+  };
   requestHeartbeat: (opts: HeartbeatWakeRequest) => void;
   runHeartbeatOnce?: (opts?: {
     source?: HeartbeatWakeRequest["source"];

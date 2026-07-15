@@ -1,6 +1,6 @@
 // Gateway node event dispatcher.
 // Handles device/node-originated events and routes them to sessions/channels.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -8,6 +8,7 @@ import {
 import { sliceUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { updatePairedDeviceMetadata } from "../infra/device-pairing.js";
+import { admitDurableSystemEventWake } from "../infra/durable-system-event-wake.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import {
   resolveEventSessionKeyForPolicy,
@@ -27,7 +28,6 @@ import {
   createOutboundSendDeps,
   defaultRuntime,
   deleteMediaBuffer,
-  enqueueSystemEvent,
   formatForLog,
   getRuntimeConfig,
   loadOrCreateProcessDeviceIdentity,
@@ -37,7 +37,6 @@ import {
   normalizeRpcAttachmentsToChatAttachments,
   parseMessageWithAttachments,
   registerApnsRegistration,
-  requestHeartbeat,
   resolveChatAttachmentMaxBytes,
   resolveGatewayModelSupportsImages,
   resolveOutboundTarget,
@@ -73,6 +72,48 @@ type NodeAgentCommandInput = Parameters<typeof agentCommandFromIngress>[0];
 
 function normalizeFiniteInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : null;
+}
+
+function resolveNodeEventSourceGeneration(nodeId: string, evt: NodeEvent): string {
+  return createHash("sha256")
+    .update(nodeId, "utf8")
+    .update("\0")
+    .update(evt.event, "utf8")
+    .update("\0")
+    .update(evt.payloadJSON ?? "", "utf8")
+    .digest("hex");
+}
+
+async function admitNodeHeartbeatWakeOrFallback(params: {
+  ctx: NodeEventContext;
+  cfg: OpenClawConfig;
+  agentId: string;
+  sessionKey: string;
+  systemEvent: { text: string; contextKey?: string | null };
+  wake: {
+    source: "notifications-event" | "exec-event";
+    intent: "event";
+    reason: string;
+    sourceGeneration: string;
+    producerKind: "node";
+    coalesceMs?: number;
+  };
+}): Promise<void> {
+  const admission = await admitDurableSystemEventWake({
+    cfg: params.cfg,
+    agentId: params.agentId,
+    ...params.wake,
+    sessionKey: params.sessionKey,
+    systemEvent: params.systemEvent,
+  });
+  if (!admission.accepted) {
+    return;
+  }
+  void admission.completion.then((result) => {
+    if (result.status === "failed") {
+      params.ctx.logGateway.warn(`scheduled node wake failed: ${result.reason}`);
+    }
+  });
 }
 
 function dispatchNodeAgentCommand(
@@ -648,6 +689,7 @@ export const handleNodeEvent = async (
       const key = sanitizeInboundSystemTags(keyRaw);
       const sessionKeyRaw = normalizeOptionalString(obj.sessionKey) ?? `node-${nodeId}`;
       const { canonicalKey: sessionKey } = loadSessionEntry(sessionKeyRaw);
+      const cfg = getRuntimeConfig();
       const packageNameRaw = normalizeOptionalString(obj.packageName);
       const packageName = packageNameRaw ? sanitizeInboundSystemTags(packageNameRaw) : null;
       const title = compactNotificationEventText(
@@ -669,18 +711,20 @@ export const handleNodeEvent = async (
         }
       }
 
-      const queued = enqueueSystemEvent(summary, {
+      await admitNodeHeartbeatWakeOrFallback({
+        ctx,
+        cfg,
+        agentId: resolveSessionAgentId({ sessionKey, config: cfg }),
         sessionKey,
-        contextKey: `notification:${keyRaw}`,
-      });
-      if (queued) {
-        requestHeartbeat({
+        systemEvent: { text: summary, contextKey: `notification:${keyRaw}` },
+        wake: {
           source: "notifications-event",
           intent: "event",
           reason: "notifications-event",
-          sessionKey,
-        });
-      }
+          sourceGeneration: resolveNodeEventSourceGeneration(nodeId, evt),
+          producerKind: "node",
+        },
+      });
       return undefined;
     }
     case "chat.subscribe": {
@@ -801,27 +845,29 @@ export const handleNodeEvent = async (
       }
 
       const eventRouting = resolveEventSessionRoutingPolicy({ cfg, sessionKey });
-      const queued = enqueueSystemEvent(text, {
-        sessionKey: resolveEventSessionKeyForPolicy(sessionKey, eventRouting),
-        contextKey: runId ? `exec:${runId}` : "exec",
+      const eventSessionKey = resolveEventSessionKeyForPolicy(sessionKey, eventRouting);
+      // Scope only the native fallback for canonical agent sessions. Durable
+      // admission always owns the exact event session and its model-visible text.
+      const wake = scopedHeartbeatWakeOptionsForPolicy(
+        sessionKey,
+        {
+          source: "exec-event" as const,
+          intent: "event" as const,
+          reason: "exec-event",
+          coalesceMs: 0,
+          sourceGeneration: resolveNodeEventSourceGeneration(nodeId, evt),
+          producerKind: "node" as const,
+        },
+        eventRouting,
+      );
+      await admitNodeHeartbeatWakeOrFallback({
+        ctx,
+        cfg,
+        agentId: resolveSessionAgentId({ sessionKey: eventSessionKey, config: cfg }),
+        sessionKey: eventSessionKey,
+        systemEvent: { text, contextKey: runId ? `exec:${runId}` : "exec" },
+        wake,
       });
-      if (queued) {
-        // Scope wakes only for canonical agent sessions. Synthetic node-* fallback
-        // keys should keep legacy unscoped behavior so enabled non-main heartbeat
-        // agents still run when no explicit agent session is provided.
-        requestHeartbeat(
-          scopedHeartbeatWakeOptionsForPolicy(
-            sessionKey,
-            {
-              source: "exec-event",
-              intent: "event",
-              reason: "exec-event",
-              coalesceMs: 0,
-            },
-            eventRouting,
-          ),
-        );
-      }
       return undefined;
     }
     case "push.apns.register": {

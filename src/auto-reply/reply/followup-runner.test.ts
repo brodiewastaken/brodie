@@ -732,6 +732,38 @@ describe("createFollowupRunner reply-lane admission", () => {
     expect(events).toEqual(["admission-started", "admitted", "run", "complete"]);
   });
 
+  it("preserves an admission-owned run id through queued model execution", async () => {
+    const onAgentRunStart = vi.fn();
+    const onConversationOutcome = vi.fn();
+    runEmbeddedAgentMock.mockImplementationOnce(
+      async (params: { onExecutionStarted?: () => void }) => {
+        params.onExecutionStarted?.();
+        return {
+          payloads: [],
+          meta: {},
+          conversationOutcome: "implicit_silence" as const,
+        };
+      },
+    );
+    const runner = createFollowupRunner({
+      typing: createMockTypingController(),
+      typingMode: "instant",
+      sessionKey: "main",
+      defaultModel: "anthropic/claude",
+      opts: { runId: "scheduler-attempt", onAgentRunStart, onConversationOutcome },
+    });
+
+    await runner(createQueuedRun({ run: { provider: "anthropic", model: "claude" } }));
+
+    expect(requireLastMockCallArg(runEmbeddedAgentMock, "run embedded agent").runId).toBe(
+      "scheduler-attempt",
+    );
+    expect(onAgentRunStart).toHaveBeenCalledOnce();
+    expect(onAgentRunStart).toHaveBeenCalledWith("scheduler-attempt");
+    expect(onConversationOutcome).toHaveBeenCalledOnce();
+    expect(onConversationOutcome).toHaveBeenCalledWith("implicit_silence");
+  });
+
   it("stops an aborted queued followup after asynchronous owner admission", async () => {
     const events: string[] = [];
     const abortController = new AbortController();

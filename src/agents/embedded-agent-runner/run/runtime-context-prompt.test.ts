@@ -618,6 +618,15 @@ describe("runtime context prompt submission", () => {
 
     expect(
       buildCurrentInboundPrompt({
+        context: { text: "Active goal: finish rollout", placement: "tail" },
+        prompt: "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]",
+      }),
+    ).toBe(
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n\nActive goal: finish rollout",
+    );
+
+    expect(
+      buildCurrentInboundPrompt({
         context: {
           text: "Room context:\nAlice: lunch?\n\nCurrent event:\nBob: yes",
           resumableText: "Current event:\nBob: yes",

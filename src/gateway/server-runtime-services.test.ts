@@ -20,8 +20,32 @@ const hoisted = vi.hoisted(() => {
     recoverPendingDeliveries: vi.fn(async () => undefined),
     recoverPendingRestartContinuationDeliveries: vi.fn(async () => undefined),
     deliverOutboundPayloads: vi.fn(),
+    getRuntimeConversationScheduler: vi.fn(() => ({})),
+    ensureMediaGenerationCompletionSchedulerProducerRegistered: vi.fn(),
+    ensureRuntimeTurnSchedulerProducerRegistered: vi.fn(),
+    ensureSessionsSendSchedulerProducerRegistered: vi.fn(),
+    installGatewayOperatorTurnRecovery: vi.fn(),
   };
 });
+
+vi.mock("../agents/tools/media-generate-background-scheduler-registration.js", () => ({
+  ensureMediaGenerationCompletionSchedulerProducerRegistered:
+    hoisted.ensureMediaGenerationCompletionSchedulerProducerRegistered,
+}));
+
+vi.mock("../agents/tools/sessions-send-tool.scheduler-registration.js", () => ({
+  ensureSessionsSendSchedulerProducerRegistered:
+    hoisted.ensureSessionsSendSchedulerProducerRegistered,
+}));
+
+vi.mock("../scheduler/runtime-turn-admission.js", () => ({
+  ensureRuntimeTurnSchedulerProducerRegistered:
+    hoisted.ensureRuntimeTurnSchedulerProducerRegistered,
+}));
+
+vi.mock("./operator-turn-recovery.js", () => ({
+  installGatewayOperatorTurnRecovery: hoisted.installGatewayOperatorTurnRecovery,
+}));
 
 vi.mock("../infra/heartbeat-runner.js", () => ({
   startHeartbeatRunner: hoisted.startHeartbeatRunner,
@@ -38,6 +62,10 @@ vi.mock("../infra/outbound/deliver.js", () => ({
 
 vi.mock("../infra/outbound/delivery-queue.js", () => ({
   recoverPendingDeliveries: hoisted.recoverPendingDeliveries,
+}));
+
+vi.mock("../scheduler/runtime-conversation-scheduler.js", () => ({
+  getRuntimeConversationScheduler: hoisted.getRuntimeConversationScheduler,
 }));
 
 vi.mock("./server-restart-sentinel.js", () => ({
@@ -78,6 +106,11 @@ describe("server-runtime-services", () => {
     hoisted.recoverPendingDeliveries.mockClear();
     hoisted.recoverPendingRestartContinuationDeliveries.mockClear();
     hoisted.deliverOutboundPayloads.mockClear();
+    hoisted.getRuntimeConversationScheduler.mockClear();
+    hoisted.ensureSessionsSendSchedulerProducerRegistered.mockClear();
+    hoisted.ensureMediaGenerationCompletionSchedulerProducerRegistered.mockClear();
+    hoisted.ensureRuntimeTurnSchedulerProducerRegistered.mockClear();
+    hoisted.installGatewayOperatorTurnRecovery.mockClear();
   });
 
   afterEach(() => {
@@ -114,6 +147,7 @@ describe("server-runtime-services", () => {
     });
 
     expect(hoisted.startChannelHealthMonitor).toHaveBeenCalledTimes(1);
+    expect(hoisted.getRuntimeConversationScheduler).toHaveBeenCalledTimes(1);
     expect(hoisted.loadModelPricingCacheModule).not.toHaveBeenCalled();
     expect(hoisted.startGatewayModelPricingRefresh).not.toHaveBeenCalled();
     expect(hoisted.startHeartbeatRunner).not.toHaveBeenCalled();
@@ -133,6 +167,11 @@ describe("server-runtime-services", () => {
     });
 
     expect(hoisted.startHeartbeatRunner).toHaveBeenCalledTimes(1);
+    expect(hoisted.ensureSessionsSendSchedulerProducerRegistered).toHaveBeenCalledTimes(1);
+    expect(
+      hoisted.ensureMediaGenerationCompletionSchedulerProducerRegistered,
+    ).toHaveBeenCalledTimes(1);
+    expect(hoisted.ensureRuntimeTurnSchedulerProducerRegistered).toHaveBeenCalledTimes(1);
     expect(cron.start).toHaveBeenCalledTimes(1);
     await vi.dynamicImportSettled();
     expect(hoisted.startGatewayModelPricingRefresh).toHaveBeenCalledWith({
@@ -141,6 +180,16 @@ describe("server-runtime-services", () => {
     });
     services.stopModelPricingRefresh();
     expect(hoisted.stopModelPricingRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("installs operator recovery before producer registration wakes durable rows", () => {
+    activateScheduledServicesForTest({ gatewayRequestContext: {} as never });
+
+    expect(hoisted.installGatewayOperatorTurnRecovery).toHaveBeenCalledTimes(1);
+    expect(hoisted.ensureRuntimeTurnSchedulerProducerRegistered).toHaveBeenCalledTimes(1);
+    expect(hoisted.installGatewayOperatorTurnRecovery.mock.invocationCallOrder[0]).toBeLessThan(
+      hoisted.ensureRuntimeTurnSchedulerProducerRegistered.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("runs cron afterStart after startup succeeds", async () => {
@@ -320,6 +369,16 @@ describe("server-runtime-services", () => {
   it("keeps scheduled services disabled for minimal test gateways", () => {
     const cron = { start: vi.fn(async () => undefined) };
 
+    startGatewayRuntimeServices({
+      minimalTestGateway: true,
+      cfgAtStart: {} as never,
+      channelManager: {
+        getRuntimeSnapshot: vi.fn(),
+        isHealthMonitorEnabled: vi.fn(),
+        isManuallyStopped: vi.fn(),
+      } as never,
+      log: createLog(),
+    });
     const services = activateGatewayScheduledServices({
       minimalTestGateway: true,
       cfgAtStart: {} as never,
@@ -334,6 +393,12 @@ describe("server-runtime-services", () => {
     expect(cron.start).not.toHaveBeenCalled();
     expect(hoisted.recoverPendingDeliveries).not.toHaveBeenCalled();
     expect(hoisted.recoverPendingRestartContinuationDeliveries).not.toHaveBeenCalled();
+    expect(hoisted.getRuntimeConversationScheduler).not.toHaveBeenCalled();
+    expect(hoisted.ensureSessionsSendSchedulerProducerRegistered).not.toHaveBeenCalled();
+    expect(
+      hoisted.ensureMediaGenerationCompletionSchedulerProducerRegistered,
+    ).not.toHaveBeenCalled();
+    expect(hoisted.ensureRuntimeTurnSchedulerProducerRegistered).not.toHaveBeenCalled();
 
     services.heartbeatRunner.stop();
     expect(hoisted.heartbeatRunner.stop).not.toHaveBeenCalled();

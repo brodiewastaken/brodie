@@ -85,6 +85,12 @@ export function selectAttachments(params: {
   }
 
   const ordered = orderAttachments(matches, policy?.prefer);
+  // Video understanding is an all-source contract. A channel batch may carry
+  // several clips and each one must retain its own source identity and result.
+  // Legacy first/max policy remains valid for image and audio only.
+  if (capability === "video") {
+    return ordered;
+  }
   const mode = policy?.mode ?? "first";
   const maxAttachments = policy?.maxAttachments ?? DEFAULT_MAX_ATTACHMENTS;
   if (mode === "all") {

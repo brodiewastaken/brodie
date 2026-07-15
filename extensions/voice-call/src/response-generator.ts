@@ -4,6 +4,7 @@
  */
 
 import crypto from "node:crypto";
+import { runRuntimeTurnThroughScheduler } from "openclaw/plugin-sdk/conversation-scheduler";
 import { applyModelOverrideToSessionEntry } from "openclaw/plugin-sdk/model-session-runtime";
 import {
   isRecord,
@@ -34,6 +35,8 @@ type VoiceResponseParams = {
   transcript: Array<{ speaker: "user" | "bot"; text: string }>;
   /** Latest user message */
   userMessage: string;
+  /** Stable carrier or media-stream turn identity. */
+  turnId?: string;
   /** Delivers completed reply blocks while post-turn work is still running. */
   onEarlyText?: (text: string) => Promise<boolean>;
 };
@@ -232,6 +235,44 @@ function resolveVoiceSandboxSessionKey(agentId: string, sessionKey: string): str
 export async function generateVoiceResponse(
   params: VoiceResponseParams,
 ): Promise<VoiceResponseResult> {
+  if (!params.coreConfig) {
+    return {
+      text: null,
+      deliveredEarly: false,
+      error: "Core config unavailable for voice response",
+    };
+  }
+  const agentId = resolveCallAgentId({ agentId: params.agentId }, params.voiceConfig);
+  const resolvedSessionKey = resolveVoiceCallSessionKey({
+    config: { ...params.voiceConfig, agentId },
+    callId: params.callId,
+    phone: params.from,
+    explicitSessionKey: params.sessionKey,
+    coreSession: params.coreConfig.session,
+  });
+  const fallbackTurnId = `input:${crypto
+    .createHash("sha256")
+    .update(JSON.stringify({ transcript: params.transcript, userMessage: params.userMessage }))
+    .digest("hex")}`;
+  try {
+    return await runRuntimeTurnThroughScheduler({
+      producerKind: "voice",
+      agentId,
+      sessionKey: resolvedSessionKey,
+      callId: params.callId,
+      turnId: params.turnId?.trim() || fallbackTurnId,
+      execute: async (runId) => await generateVoiceResponseDirect(params, runId),
+    });
+  } catch (error) {
+    console.error("[voice-call] Response scheduler failed:", error);
+    return { text: null, deliveredEarly: false, error: String(error) };
+  }
+}
+
+async function generateVoiceResponseDirect(
+  params: VoiceResponseParams,
+  schedulerRunId: string,
+): Promise<VoiceResponseResult> {
   const {
     voiceConfig,
     callId,
@@ -348,8 +389,6 @@ export async function generateVoiceResponse(
         // Resolve timeout
         const timeoutMs =
           voiceConfig.responseTimeoutMs ?? agentRuntime.resolveAgentTimeoutMs({ cfg });
-        const runId = `voice:${callId}:${Date.now()}`;
-
         const blockReplyPayloads: VoiceResponsePayload[] = [];
         let latestToolBoundaryMessageIndex: number | undefined;
         let blockReplyBoundariesReliable = true;
@@ -376,7 +415,7 @@ export async function generateVoiceResponse(
           thinkLevel,
           verboseLevel: "off",
           timeoutMs,
-          runId,
+          runId: schedulerRunId,
           lane: "voice",
           extraSystemPrompt,
           agentDir,

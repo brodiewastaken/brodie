@@ -105,6 +105,22 @@ import {
   toAgentStoreSessionKey,
 } from "../routing/session-key.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
+import type {
+  JsonValue,
+  SchedulerDispatchBatch,
+  SchedulerDispatchResult,
+  SchedulerProducerKind,
+} from "../scheduler/conversation-scheduler.js";
+import {
+  getRuntimeConversationScheduler,
+  registerRuntimeConversationSchedulerProducer,
+} from "../scheduler/runtime-conversation-scheduler.js";
+import {
+  beginRuntimeProducerDispatch,
+  buildRuntimeProducerEvent,
+  completeRuntimeProducerDispatch,
+  resolveRuntimeProducerRoute,
+} from "../scheduler/runtime-producer-admission.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { escapeRegExp } from "../utils.js";
 import { MAX_SAFE_TIMEOUT_DELAY_MS, resolveSafeTimeoutDelayMs } from "../utils/timer-delay.js";
@@ -155,6 +171,7 @@ import {
 } from "./outbound/targets.js";
 import {
   consumeSelectedSystemEventEntries,
+  enqueueSystemEventEntry,
   peekSystemEventEntries,
   resolveSystemEventDeliveryContext,
   type SystemEvent,
@@ -180,6 +197,328 @@ const loadHeartbeatRunnerRuntime = createLazyRuntimeModule(
 
 const HEARTBEAT_ALWAYS_BUSY_LANES = [CommandLane.Cron, CommandLane.CronNested] as const;
 const DEFAULT_HEARTBEAT_TIMEOUT_SECONDS = 10 * 60;
+
+type ScheduledHeartbeatPayload = {
+  version: 1;
+  kind: "heartbeat_wake";
+  agentId: string;
+  sessionKey: string;
+  source?: HeartbeatWakeSource;
+  intent?: HeartbeatWakeIntent;
+  reason?: string;
+  runScope?: HeartbeatRunScope;
+  heartbeat?: HeartbeatConfig;
+  sourceGeneration: string;
+  dueSlotMs?: number;
+  producerKind: SchedulerProducerKind;
+  systemEvent?: Pick<SystemEvent, "text" | "contextKey" | "deliveryContext">;
+};
+
+type PendingHeartbeatResult = {
+  resolve: (result: HeartbeatRunResult) => void;
+};
+
+const pendingHeartbeatResults = new Map<string, Set<PendingHeartbeatResult>>();
+let unregisterHeartbeatSchedulerProducer: (() => void) | undefined;
+
+function normalizeScheduledHeartbeatPayload(payload: ScheduledHeartbeatPayload): JsonValue {
+  // JSON normalization intentionally strips optional undefined values before durable admission.
+  // eslint-disable-next-line unicorn/prefer-structured-clone
+  return JSON.parse(JSON.stringify(payload)) as JsonValue;
+}
+
+function parseScheduledHeartbeatPayload(value: JsonValue): ScheduledHeartbeatPayload {
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    throw new Error("scheduled heartbeat payload must be an object");
+  }
+  const payload = value as Record<string, JsonValue>;
+  if (
+    payload.version !== 1 ||
+    payload.kind !== "heartbeat_wake" ||
+    typeof payload.agentId !== "string" ||
+    typeof payload.sessionKey !== "string" ||
+    typeof payload.sourceGeneration !== "string" ||
+    typeof payload.producerKind !== "string" ||
+    (payload.systemEvent !== undefined &&
+      (payload.systemEvent === null ||
+        Array.isArray(payload.systemEvent) ||
+        typeof payload.systemEvent !== "object" ||
+        typeof payload.systemEvent.text !== "string"))
+  ) {
+    throw new Error("scheduled heartbeat payload is invalid");
+  }
+  return payload as unknown as ScheduledHeartbeatPayload;
+}
+
+async function dispatchScheduledHeartbeatBatch(
+  batch: SchedulerDispatchBatch,
+  deps: {
+    cfg?: OpenClawConfig;
+    runtime?: RuntimeEnv;
+    runOnce?: typeof runHeartbeatOnce;
+    retryDelayMs?: number;
+  } = {},
+): Promise<SchedulerDispatchResult> {
+  const runCorrelationId = beginRuntimeProducerDispatch(batch);
+  const failures: Array<{ eventId: string; reason: string }> = [];
+  for (const event of batch.events) {
+    const result = await executeScheduledHeartbeatEvent(event, deps);
+    if (result.status === "failed") {
+      failures.push({ eventId: event.id, reason: result.reason });
+    }
+  }
+  if (failures.length > 0) {
+    return {
+      outcome: "failed",
+      failure: { kind: "heartbeat_failed", failures },
+      runCorrelationId,
+    };
+  }
+  return completeRuntimeProducerDispatch({ batch, runCorrelationId });
+}
+
+export async function executeScheduledHeartbeatEvent(
+  event: SchedulerDispatchBatch["events"][number],
+  deps: {
+    cfg?: OpenClawConfig;
+    runtime?: RuntimeEnv;
+    runOnce?: typeof runHeartbeatOnce;
+    retryDelayMs?: number;
+  } = {},
+): Promise<HeartbeatRunResult> {
+  let result: HeartbeatRunResult;
+  try {
+    const payload = parseScheduledHeartbeatPayload(event.payload);
+    if (payload.systemEvent) {
+      enqueueSystemEventEntry(payload.systemEvent.text, {
+        sessionKey: payload.sessionKey,
+        contextKey: payload.systemEvent.contextKey,
+        deliveryContext: payload.systemEvent.deliveryContext,
+      });
+    }
+    for (;;) {
+      result = await (deps.runOnce ?? runHeartbeatOnce)({
+        cfg: deps.cfg ?? getRuntimeConfig(),
+        agentId: payload.agentId,
+        sessionKey: payload.sessionKey,
+        source: payload.source,
+        intent: payload.intent,
+        reason: payload.reason,
+        runScope: payload.runScope,
+        heartbeat: payload.heartbeat,
+        deps: { runtime: deps.runtime ?? defaultRuntime },
+      });
+      if (result.status !== "skipped" || !isRetryableHeartbeatBusySkipReason(result.reason)) {
+        break;
+      }
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, deps.retryDelayMs ?? 1_000);
+      });
+    }
+  } catch (error) {
+    result = { status: "failed", reason: formatErrorMessage(error) };
+  }
+  for (const pending of pendingHeartbeatResults.get(event.id) ?? []) {
+    pending.resolve(result);
+  }
+  pendingHeartbeatResults.delete(event.id);
+  return result;
+}
+
+function resolveHeartbeatProducerKind(
+  source: HeartbeatWakeSource | undefined,
+  explicit?: SchedulerProducerKind,
+): SchedulerProducerKind {
+  if (explicit) {
+    return explicit;
+  }
+  switch (source) {
+    case "exec-event":
+    case "cli-watchdog":
+      return "exec_completion";
+    case "cron":
+      return "cron";
+    case "hook":
+      return "hook";
+    case "restart-sentinel":
+      return "restart";
+    case "notifications-event":
+    case "background-task":
+    case "background-task-blocked":
+    case "acp-spawn":
+      return "system";
+    default:
+      return "heartbeat";
+  }
+}
+
+function buildScheduledHeartbeatEvent(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  sessionKey?: string;
+  heartbeat?: HeartbeatConfig;
+  source?: HeartbeatWakeSource;
+  intent?: HeartbeatWakeIntent;
+  reason?: string;
+  runScope?: HeartbeatRunScope;
+  sourceGeneration: string;
+  dueSlotMs?: number;
+  producerKind?: SchedulerProducerKind;
+  systemEvent?: Pick<SystemEvent, "text" | "contextKey" | "deliveryContext">;
+}) {
+  const sourceSessionKey =
+    params.sessionKey ??
+    resolveHeartbeatSession(params.cfg, params.agentId, params.heartbeat).sessionKey;
+  const producerKind = resolveHeartbeatProducerKind(params.source, params.producerKind);
+  const eventId = createHash("sha256")
+    .update(`${producerKind}\0`)
+    .update(params.agentId)
+    .update("\0")
+    .update(sourceSessionKey)
+    .update("\0")
+    .update(params.source ?? "other")
+    .update("\0")
+    .update(params.intent ?? "event")
+    .update("\0")
+    .update(params.runScope ?? "global")
+    .update("\0")
+    .update(params.sourceGeneration)
+    .update("\0")
+    .update(params.dueSlotMs === undefined ? "explicit" : String(params.dueSlotMs))
+    .digest("hex");
+  return buildRuntimeProducerEvent({
+    id: eventId,
+    route: resolveRuntimeProducerRoute({
+      sessionKey: sourceSessionKey,
+      agentId: params.agentId,
+    }),
+    producerKind,
+    payload: normalizeScheduledHeartbeatPayload({
+      version: 1,
+      kind: "heartbeat_wake",
+      agentId: params.agentId,
+      sessionKey: sourceSessionKey,
+      ...(params.source ? { source: params.source } : {}),
+      ...(params.intent ? { intent: params.intent } : {}),
+      ...(params.reason ? { reason: params.reason } : {}),
+      ...(params.runScope ? { runScope: params.runScope } : {}),
+      ...(params.heartbeat ? { heartbeat: params.heartbeat } : {}),
+      sourceGeneration: params.sourceGeneration,
+      ...(params.dueSlotMs === undefined ? {} : { dueSlotMs: params.dueSlotMs }),
+      producerKind,
+      ...(params.systemEvent
+        ? {
+            systemEvent: {
+              text: params.systemEvent.text,
+              ...(params.systemEvent.contextKey === undefined
+                ? {}
+                : { contextKey: params.systemEvent.contextKey }),
+              ...(params.systemEvent.deliveryContext
+                ? { deliveryContext: params.systemEvent.deliveryContext }
+                : {}),
+            },
+          }
+        : {}),
+    }),
+  });
+}
+
+function ensureHeartbeatSchedulerProducerRegistered(): void {
+  unregisterHeartbeatSchedulerProducer ??= registerRuntimeConversationSchedulerProducer({
+    producerKinds: ["heartbeat", "exec_completion", "node", "restart", "system"],
+    dispatch: dispatchScheduledHeartbeatBatch,
+  });
+}
+
+type RuntimeHeartbeatWakeParams = {
+  cfg: OpenClawConfig;
+  agentId: string;
+  sessionKey?: string;
+  heartbeat?: HeartbeatConfig;
+  source?: HeartbeatWakeSource;
+  intent?: HeartbeatWakeIntent;
+  reason?: string;
+  runScope?: HeartbeatRunScope;
+  deps?: HeartbeatDeps;
+  sourceGeneration: string;
+  dueSlotMs?: number;
+  producerKind?: SchedulerProducerKind;
+  systemEvent?: Pick<SystemEvent, "text" | "contextKey" | "deliveryContext">;
+};
+
+/** Durably transfers one explicit wake to its typed scheduler owner. */
+export async function admitRuntimeHeartbeatWake(
+  params: RuntimeHeartbeatWakeParams,
+): Promise<
+  | { accepted: true; completion: Promise<HeartbeatRunResult> }
+  | { accepted: false; reason: "disabled" | "invalid" | "storage_failed" }
+> {
+  ensureHeartbeatSchedulerProducerRegistered();
+  const event = buildScheduledHeartbeatEvent(params);
+  const eventId = event.id;
+  let resolveResult!: (result: HeartbeatRunResult) => void;
+  const resultPromise = new Promise<HeartbeatRunResult>((resolve) => {
+    resolveResult = resolve;
+  });
+  const pendingResult = { resolve: resolveResult };
+  const pending = pendingHeartbeatResults.get(eventId) ?? new Set<PendingHeartbeatResult>();
+  pending.add(pendingResult);
+  pendingHeartbeatResults.set(eventId, pending);
+  const scheduler = getRuntimeConversationScheduler();
+  const admission = await scheduler.admit(event);
+  if (admission.accepted) {
+    const settleFromDurableReceipt = async () => {
+      const receiptState = await scheduler.waitForReceiptTerminal?.(admission.receiptId);
+      if (
+        receiptState !== "delivered" &&
+        receiptState !== "failed" &&
+        receiptState !== "storage_error" &&
+        receiptState !== "cancelled"
+      ) {
+        return;
+      }
+      if (!pendingHeartbeatResults.get(eventId)?.has(pendingResult)) {
+        return;
+      }
+      pending.delete(pendingResult);
+      if (pending.size === 0) {
+        pendingHeartbeatResults.delete(eventId);
+      }
+      resolveResult(
+        receiptState === "delivered"
+          ? { status: "skipped", reason: "duplicate-terminal" }
+          : { status: "failed", reason: `duplicate-${receiptState}` },
+      );
+    };
+    void settleFromDurableReceipt();
+    return { accepted: true, completion: resultPromise };
+  }
+  pending.delete(pendingResult);
+  if (pending.size === 0) {
+    pendingHeartbeatResults.delete(eventId);
+  }
+  return admission;
+}
+
+async function runHeartbeatThroughScheduler(
+  params: RuntimeHeartbeatWakeParams,
+): Promise<HeartbeatRunResult> {
+  const admission = await admitRuntimeHeartbeatWake(params);
+  if (admission.accepted) {
+    return await admission.completion;
+  }
+  return await runHeartbeatOnce({
+    cfg: params.cfg,
+    agentId: params.agentId,
+    sessionKey: params.sessionKey,
+    heartbeat: params.heartbeat,
+    source: params.source,
+    intent: params.intent,
+    reason: params.reason,
+    runScope: params.runScope,
+    deps: params.deps,
+  });
+}
 
 function hasQueuedWorkInLanes(
   lanes: readonly string[],
@@ -2381,7 +2720,12 @@ export async function runHeartbeatOnce(opts: {
   }
 }
 
-export const testing = { truncateHeartbeatPreview };
+export const testing = {
+  truncateHeartbeatPreview,
+  buildScheduledHeartbeatEvent,
+  dispatchScheduledHeartbeatBatch,
+  parseScheduledHeartbeatPayload,
+};
 
 export function startHeartbeatRunner(opts: {
   cfg?: OpenClawConfig;
@@ -2393,6 +2737,9 @@ export function startHeartbeatRunner(opts: {
 }): HeartbeatRunner {
   const runtime = opts.runtime ?? defaultRuntime;
   const runOnce = opts.runOnce ?? runHeartbeatOnce;
+  if (!opts.runOnce) {
+    ensureHeartbeatSchedulerProducerRegistered();
+  }
   const state = {
     cfg: opts.cfg ?? getRuntimeConfig(),
     runtime,
@@ -2639,6 +2986,7 @@ export function startHeartbeatRunner(opts: {
     const requestedSessionKey = normalizeOptionalString(params?.sessionKey);
     const requestedHeartbeat = params?.heartbeat;
     const isInterval = reason === "interval";
+    const executeHeartbeatRun = !opts.runOnce ? runHeartbeatThroughScheduler : runOnce;
     const startedAt = Date.now();
     const now = startedAt;
     const wakeConfig = readCurrentConfig();
@@ -2660,7 +3008,7 @@ export function startHeartbeatRunner(opts: {
           return { status: "skipped", reason: deferral.reason };
         }
         try {
-          const res = await runOnce({
+          const res = await executeHeartbeatRun({
             cfg: wakeConfig,
             agentId: targetAgent.agentId,
             heartbeat: resolveHeartbeatForWake({
@@ -2677,6 +3025,9 @@ export function startHeartbeatRunner(opts: {
             runScope: "global",
             sessionKey: requestedSessionKey,
             deps: { runtime: state.runtime },
+            sourceGeneration: params.sourceGeneration ?? `${startedAt}`,
+            producerKind: params.producerKind,
+            ...(params.source === "interval" ? { dueSlotMs: targetAgent.nextDueMs } : {}),
           });
           if (res.status === "skipped" && isRetryableHeartbeatBusySkipReason(res.reason)) {
             // Retryable busy — do NOT record run bookkeeping. The wake layer
@@ -2725,7 +3076,7 @@ export function startHeartbeatRunner(opts: {
 
         let res: HeartbeatRunResult;
         try {
-          res = await runOnce({
+          res = await executeHeartbeatRun({
             cfg: wakeConfig,
             agentId: agent.agentId,
             heartbeat: agent.heartbeat,
@@ -2734,6 +3085,9 @@ export function startHeartbeatRunner(opts: {
             reason,
             runScope: "global",
             deps: { runtime: state.runtime },
+            sourceGeneration: params.sourceGeneration ?? `${startedAt}`,
+            producerKind: params.producerKind,
+            ...(params.source === "interval" ? { dueSlotMs: agent.nextDueMs } : {}),
           });
         } catch (err) {
           const errMsg = formatErrorMessage(err);
@@ -2777,13 +3131,19 @@ export function startHeartbeatRunner(opts: {
           }
           let commitmentRes: HeartbeatRunResult;
           try {
-            commitmentRes = await runOnce({
+            commitmentRes = await executeHeartbeatRun({
               cfg: wakeConfig,
               agentId: agent.agentId,
               heartbeat: agent.heartbeat,
+              source: params.source,
+              intent,
+              reason,
               runScope: "commitment-only",
               sessionKey: dueSessionKey,
               deps: { runtime: state.runtime },
+              sourceGeneration: params.sourceGeneration ?? `${startedAt}`,
+              producerKind: params.producerKind,
+              ...(params.source === "interval" ? { dueSlotMs: agent.nextDueMs } : {}),
             });
           } catch (err) {
             const errMsg = formatErrorMessage(err);

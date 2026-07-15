@@ -1,12 +1,235 @@
 // Coverage for sanitizing replay messages at the LLM boundary.
 import { describe, expect, it } from "vitest";
+import { convertToLlm } from "../../../../packages/agent-core/src/harness/messages.js";
 import { buildTimestampPrefix } from "../../../gateway/server-methods/agent-timestamp.js";
 import {
+  buildUserTurnModelInputSnapshot,
+  collapseDuplicateActiveHumanInboundUserMessage,
   installModelPromptTransform,
   insertRuntimeContextMessageForPrompt,
   normalizeCurrentPromptTextForLlmBoundary,
   normalizeMessagesForLlmBoundary,
+  prepareMessagesForLlmBoundaryConversion,
 } from "./attempt.llm-boundary.js";
+
+describe("buildUserTurnModelInputSnapshot", () => {
+  it("captures the normalized user text and exact wrapped tail runtime context", () => {
+    expect(
+      buildUserTurnModelInputSnapshot({
+        currentUserText: "[Fri 2026-07-31 11:05 JST] current ask",
+        runtimeContextText: "exact wrapped runtime context",
+      }),
+    ).toEqual({
+      version: 1,
+      items: [
+        {
+          kind: "current-user",
+          role: "user",
+          content: "[Fri 2026-07-31 11:05 JST] current ask",
+        },
+        {
+          kind: "runtime-context",
+          role: "user",
+          placement: "tail",
+          content: "exact wrapped runtime context",
+        },
+      ],
+    });
+  });
+
+  it("omits the tail item when the current turn has no runtime context", () => {
+    expect(buildUserTurnModelInputSnapshot({ currentUserText: "current ask" })).toEqual({
+      version: 1,
+      items: [{ kind: "current-user", role: "user", content: "current ask" }],
+    });
+  });
+});
+
+describe("collapseDuplicateActiveHumanInboundUserMessage", () => {
+  const queueEnvelope =
+    "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n\nMessage Body:\nhello";
+
+  it("keeps the canonical media turn and removes its text-only ephemeral copy", () => {
+    const canonical = {
+      role: "user",
+      content: [
+        { type: "text", text: queueEnvelope },
+        { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+      ],
+      __openclaw: { humanInboundBatch: { version: 1 } },
+    };
+    const duplicate = {
+      role: "user",
+      content: [{ type: "text", text: queueEnvelope }],
+    };
+    const toolCall = {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+    };
+    const input = [canonical, duplicate, toolCall] as Parameters<
+      typeof collapseDuplicateActiveHumanInboundUserMessage
+    >[0];
+
+    const output = collapseDuplicateActiveHumanInboundUserMessage(input);
+
+    expect(output).toEqual([canonical, toolCall]);
+    expect(output[0]?.content).toEqual(canonical.content);
+  });
+
+  it("does not collapse distinct queue envelopes", () => {
+    const input = [
+      {
+        role: "user",
+        content: queueEnvelope,
+        __openclaw: { humanInboundBatch: { version: 1 } },
+      },
+      { role: "user", content: `${queueEnvelope}\n\nsecond source` },
+    ] as Parameters<typeof collapseDuplicateActiveHumanInboundUserMessage>[0];
+
+    expect(collapseDuplicateActiveHumanInboundUserMessage(input)).toBe(input);
+  });
+
+  it("does not collapse a second attachment-bearing user item", () => {
+    const input = [
+      {
+        role: "user",
+        content: [{ type: "text", text: queueEnvelope }],
+        __openclaw: { humanInboundBatch: { version: 1 } },
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: queueEnvelope },
+          { type: "image", data: "c2Vjb25k", mimeType: "image/png" },
+        ],
+      },
+    ] as Parameters<typeof collapseDuplicateActiveHumanInboundUserMessage>[0];
+
+    expect(collapseDuplicateActiveHumanInboundUserMessage(input)).toBe(input);
+  });
+
+  it("does not collapse ordinary repeated user messages", () => {
+    const input = [
+      { role: "user", content: queueEnvelope },
+      { role: "user", content: queueEnvelope },
+    ] as Parameters<typeof collapseDuplicateActiveHumanInboundUserMessage>[0];
+
+    expect(collapseDuplicateActiveHumanInboundUserMessage(input)).toBe(input);
+  });
+
+  it("collapses the exact staged-media shape before harness conversion", () => {
+    const understanding = "\n\nAttachment understanding: image";
+    const canonical = {
+      role: "user",
+      content: [
+        { type: "text", text: queueEnvelope },
+        { type: "text", text: understanding },
+        { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+      ],
+      __openclaw: { humanInboundBatch: { version: 1 } },
+    };
+    const ephemeral = {
+      role: "user",
+      content: [
+        { type: "text", text: queueEnvelope },
+        { type: "text", text: understanding },
+      ],
+    };
+
+    const converted = convertToLlm(
+      prepareMessagesForLlmBoundaryConversion([canonical, ephemeral] as Parameters<
+        typeof prepareMessagesForLlmBoundaryConversion
+      >[0]),
+    );
+
+    expect(converted).toHaveLength(1);
+    expect(converted[0]?.role).toBe("user");
+    expect(converted[0]?.content).toEqual(canonical.content);
+  });
+
+  it("collapses the final provider copy when the current typed batch supplies proof", () => {
+    const understanding = "\n\nAttachment understanding: image";
+    const canonical = {
+      role: "user",
+      content: [
+        { type: "text", text: queueEnvelope },
+        { type: "text", text: understanding },
+        { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+      ],
+    };
+    const duplicate = {
+      role: "user",
+      content: [
+        { type: "text", text: queueEnvelope },
+        { type: "text", text: understanding },
+      ],
+    };
+
+    expect(
+      collapseDuplicateActiveHumanInboundUserMessage(
+        [canonical, duplicate] as Parameters<
+          typeof collapseDuplicateActiveHumanInboundUserMessage
+        >[0],
+        { currentHumanInboundBatch: { version: 1 } },
+      ),
+    ).toEqual([canonical]);
+  });
+
+  it("collapses the exact provider-shaped input_text copy", () => {
+    const understanding = "\n\nAttachment understanding: image";
+    const canonical = {
+      role: "user",
+      content: [
+        { type: "input_text", text: queueEnvelope },
+        { type: "input_text", text: understanding },
+        { type: "input_image", image_url: "data:image/png;base64,aW1hZ2U=" },
+      ],
+    };
+    const duplicate = {
+      role: "user",
+      content: [
+        { type: "input_text", text: queueEnvelope },
+        { type: "input_text", text: understanding },
+      ],
+    };
+
+    expect(
+      collapseDuplicateActiveHumanInboundUserMessage(
+        [canonical, duplicate] as Parameters<
+          typeof collapseDuplicateActiveHumanInboundUserMessage
+        >[0],
+        { currentHumanInboundBatch: { version: 1 } },
+      ),
+    ).toEqual([canonical]);
+  });
+
+  it("uses canonical native media as proof after the typed-batch sidecar is stripped", () => {
+    const canonical = {
+      role: "user",
+      content: [
+        { type: "text", text: queueEnvelope },
+        { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+      ],
+    };
+    const duplicate = { role: "user", content: [{ type: "text", text: queueEnvelope }] };
+
+    expect(
+      collapseDuplicateActiveHumanInboundUserMessage([canonical, duplicate] as Parameters<
+        typeof collapseDuplicateActiveHumanInboundUserMessage
+      >[0]),
+    ).toEqual([canonical]);
+  });
+
+  it("does not collapse text-only final provider copies without typed-batch proof", () => {
+    const canonical = { role: "user", content: [{ type: "text", text: queueEnvelope }] };
+    const duplicate = { role: "user", content: [{ type: "text", text: queueEnvelope }] };
+    const input = [canonical, duplicate] as Parameters<
+      typeof collapseDuplicateActiveHumanInboundUserMessage
+    >[0];
+
+    expect(collapseDuplicateActiveHumanInboundUserMessage(input)).toBe(input);
+  });
+});
 
 describe("normalizeMessagesForLlmBoundary", () => {
   it("strips inbound metadata from historical user turns before model replay", () => {
@@ -325,6 +548,98 @@ describe("normalizeMessagesForLlmBoundary", () => {
       input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
     ) as unknown as Array<{ content?: string }>;
     expect(output[0]?.content).toBe("bare ask");
+  });
+
+  it("keeps a typed human inbound queue header at byte zero", () => {
+    const queueEnvelope = [
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]",
+      "",
+      "[Conversation Metadata]:",
+      '```json\n{"channel":"discord"}\n```',
+    ].join("\n");
+    const input = [
+      {
+        role: "user",
+        content: [{ type: "text", text: queueEnvelope }],
+        timestamp: 1717570860000,
+        __openclaw: {
+          humanInboundBatch: {
+            version: 1,
+            placement: "idle",
+            inbounds: [{}],
+          },
+        },
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+      { timezone: "Asia/Tokyo" },
+    ) as unknown as Array<{ content?: string }>;
+
+    expect(output[0]?.content).toBe(queueEnvelope);
+    expect(output[0]?.content?.startsWith("[📋 QUEUE ENGINE]:")).toBe(true);
+  });
+
+  it("keeps the ephemeral provider prompt queue-first when sidecar metadata is absent", () => {
+    const queueEnvelope =
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n\nMessage Body:\nhello";
+    const input = [
+      {
+        role: "user",
+        content: queueEnvelope,
+        timestamp: 1717570860000,
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+      { timezone: "Asia/Tokyo" },
+    ) as unknown as Array<{ content?: string }>;
+
+    expect(output[0]?.content).toBe(queueEnvelope);
+  });
+
+  it("reanchors a late ephemeral provider prefix without sidecar metadata", () => {
+    const queueEnvelope =
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n\nMessage Body:\nhello";
+    const latePrefix = "hook context that arrived after the operator snapshot";
+    const input = [
+      {
+        role: "user",
+        content: `${latePrefix}\n\n${queueEnvelope}`,
+        timestamp: 1717570860000,
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+      { timezone: "Asia/Tokyo" },
+    ) as unknown as Array<{ content?: string }>;
+
+    expect(output[0]?.content).toBe(`${queueEnvelope}\n\n${latePrefix}`);
+  });
+
+  it("moves any late scheduler prefix behind the typed queue envelope", () => {
+    const queueEnvelope =
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n\nMessage Media:\nstructured descriptor";
+    const latePrefix =
+      "[media attached: /tmp/openclaw-staged.png (image/png) | media://inbound/image.png]";
+    const input = [
+      {
+        role: "user",
+        content: `${latePrefix}\n\n${queueEnvelope}`,
+        timestamp: 1717570860000,
+        __openclaw: { humanInboundBatch: { version: 1 } },
+      },
+    ];
+
+    const output = normalizeMessagesForLlmBoundary(
+      input as Parameters<typeof normalizeMessagesForLlmBoundary>[0],
+      { timezone: "Asia/Tokyo" },
+    ) as unknown as Array<{ content?: string }>;
+
+    expect(output[0]?.content).toBe(`${queueEnvelope}\n\n${latePrefix}`);
   });
 
   it("keeps inter-session provenance headers before timestamp context", () => {
@@ -702,7 +1017,7 @@ describe("normalizeMessagesForLlmBoundary", () => {
         content: [{ type: "text", text: "visible transcript prompt" }],
         timestamp: 1,
       },
-    ] as Parameters<typeof normalizeMessagesForLlmBoundary>[0];
+    ] as unknown as Parameters<typeof normalizeMessagesForLlmBoundary>[0];
     const captured: (typeof messages)[] = [];
     const session = {
       agent: {
@@ -739,6 +1054,41 @@ describe("normalizeMessagesForLlmBoundary", () => {
     );
     expect(captured).toHaveLength(2);
     expect(session.agent.transformContext).not.toBeUndefined();
+  });
+
+  it("keeps hook prepend context behind a typed scheduler envelope", async () => {
+    const queueEnvelope =
+      "[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n\nMessage Body:\n```text\nhello\n```";
+    const messages = [
+      {
+        role: "user",
+        content: [{ type: "text", text: queueEnvelope }],
+        timestamp: 1_717_570_860_000,
+        __openclaw: { humanInboundBatch: { version: 1 } },
+      },
+    ] as Parameters<typeof normalizeMessagesForLlmBoundary>[0];
+    const session = {
+      agent: {
+        transformContext: async (nextMessages: typeof messages) =>
+          normalizeMessagesForLlmBoundary(nextMessages, { timezone: "Asia/Tokyo" }),
+      },
+    };
+    const cleanup = installModelPromptTransform({
+      session,
+      transcriptPrompt: queueEnvelope,
+      prependContext: "dynamic hook context",
+      appendContext: "dynamic hook tail",
+      shouldCapturePrompt: () => true,
+    });
+
+    const output = (await session.agent.transformContext(messages)) as unknown as Array<{
+      content?: string;
+    }>;
+    cleanup();
+
+    expect(output[0]?.content).toBe(
+      `${queueEnvelope}\n\ndynamic hook tail\n\ndynamic hook context`,
+    );
   });
 
   it("restores the original model prompt transform on cleanup", async () => {

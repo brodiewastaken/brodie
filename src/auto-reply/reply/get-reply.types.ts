@@ -15,6 +15,8 @@ type InternalReplySessionOptions = {
   requestedSessionId?: string;
   resumeRequestedSession?: boolean;
   sessionPromptSourceReplyDeliveryMode?: GetReplyOptions["sourceReplyDeliveryMode"];
+  /** Forces scheduler-owned turns behind active work instead of steering or dropping them. */
+  queueModeOverride?: "steer" | "followup" | "collect" | "interrupt";
   /** Marks queued follow-up admission waits on an older owner's delivery barrier. */
   onFollowupAdmissionWaitChange?: (waiting: boolean) => void;
 };

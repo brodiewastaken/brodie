@@ -2133,7 +2133,11 @@ describe("VoiceCallWebhookServer barge-in suppression during initial message", (
       expect(event.providerCallId).toBe("CA-inbound");
       expect(event.transcript).toBe("hello");
       expect(event.isFinal).toBe(true);
-      expect(handleInboundResponse).toHaveBeenCalledWith("call-inbound", "hello");
+      expect(handleInboundResponse).toHaveBeenCalledWith(
+        "call-inbound",
+        "hello",
+        expect.stringMatching(/^stream-transcript-\d+$/),
+      );
     } finally {
       await server.stop();
     }
@@ -2222,6 +2226,7 @@ describe("VoiceCallWebhookServer webhook event path auto-response (#79118)", () 
       expect(handleInboundResponse).toHaveBeenCalledWith(
         inboundCall.callId,
         "hallo wie geht es dir",
+        "evt-79118",
       );
     } finally {
       await server.stop();

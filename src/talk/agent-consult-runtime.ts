@@ -1,5 +1,5 @@
 // Agent consult runtime starts agent consultation flows from talk sessions.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { RunEmbeddedAgentParams } from "../agents/embedded-agent-runner/run/params.js";
 import { forkSessionEntryFromParent } from "../auto-reply/reply/session-fork.js";
 import { resolveSessionWorkStartError } from "../config/sessions/lifecycle.js";
@@ -8,6 +8,7 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { RuntimeLogger, PluginRuntimeCore } from "../plugins/runtime/types-core.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
+import { runRuntimeTurnThroughScheduler } from "../scheduler/runtime-turn-admission.js";
 import { beginSessionWorkAdmission } from "../sessions/session-lifecycle-admission.js";
 import {
   deliveryContextFromSession,
@@ -206,10 +207,7 @@ async function resolveRealtimeVoiceAgentConsultSessionEntry(params: {
   throw new Error("realtime voice agent consult session could not be initialized");
 }
 
-/**
- * Runs an embedded agent consult and returns concise speakable text for realtime voice playback.
- */
-export async function consultRealtimeVoiceAgent(params: {
+type RealtimeVoiceAgentConsultParams = {
   cfg: OpenClawConfig;
   agentRuntime: RealtimeVoiceAgentConsultRuntime;
   logger: Pick<RuntimeLogger, "warn">;
@@ -234,7 +232,41 @@ export async function consultRealtimeVoiceAgent(params: {
   toolsAllow?: string[];
   extraSystemPrompt?: string;
   fallbackText?: string;
-}): Promise<RealtimeVoiceAgentConsultResult> {
+  /** Stable provider turn or tool-call identity. */
+  turnId?: string;
+};
+
+function fallbackRealtimeVoiceConsultTurnId(params: RealtimeVoiceAgentConsultParams): string {
+  let input: string;
+  try {
+    input = JSON.stringify({ args: params.args, transcript: params.transcript });
+  } catch {
+    input = `${String(params.args)}\0${params.transcript.length}`;
+  }
+  return `input:${createHash("sha256").update(input).digest("hex")}`;
+}
+
+/**
+ * Runs an embedded agent consult and returns concise speakable text for realtime voice playback.
+ */
+export async function consultRealtimeVoiceAgent(
+  params: RealtimeVoiceAgentConsultParams,
+): Promise<RealtimeVoiceAgentConsultResult> {
+  const agentId = params.agentId ?? "main";
+  return await runRuntimeTurnThroughScheduler({
+    producerKind: "talk",
+    agentId,
+    sessionKey: params.sessionKey,
+    callId: params.runIdPrefix,
+    turnId: params.turnId?.trim() || fallbackRealtimeVoiceConsultTurnId(params),
+    execute: async (runId) => await consultRealtimeVoiceAgentDirect(params, runId),
+  });
+}
+
+async function consultRealtimeVoiceAgentDirect(
+  params: RealtimeVoiceAgentConsultParams,
+  runId: string,
+): Promise<RealtimeVoiceAgentConsultResult> {
   const agentId = params.agentId ?? "main";
   const agentDir = params.agentRuntime.resolveAgentDir(params.cfg, agentId);
   const workspaceDir = params.agentRuntime.resolveAgentWorkspaceDir(params.cfg, agentId);
@@ -343,7 +375,7 @@ export async function consultRealtimeVoiceAgent(params: {
         toolsAllow: params.toolsAllow,
         timeoutMs:
           params.timeoutMs ?? params.agentRuntime.resolveAgentTimeoutMs({ cfg: params.cfg }),
-        runId: `${params.runIdPrefix}:${Date.now()}`,
+        runId,
         lane: params.lane,
         extraSystemPrompt:
           params.extraSystemPrompt ??

@@ -31,6 +31,7 @@ import type { TelegramBotOptions } from "./bot.types.js";
 import { buildTelegramThreadParams } from "./bot/helpers.js";
 import type { TelegramContext, TelegramStreamMode } from "./bot/types.js";
 import type { TelegramReplyChainEntry } from "./message-cache.js";
+import { admitTelegramScheduledInbound } from "./scheduler-admission.js";
 import { resolveSpooledUpdatePersistenceRetryDelayMs } from "./spooled-update-retry-policy.js";
 
 const telegramInboundLog = createSubsystemLogger("gateway/channels/telegram").child("inbound");
@@ -215,6 +216,32 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         mediaType: allMedia[0]?.contentType,
       }),
     );
+    const commandTurn = context.ctxPayload.CommandTurn;
+    const isControlCommand =
+      commandTurn && typeof commandTurn === "object" && commandTurn.kind !== "normal";
+    const schedulerAdmission = isControlCommand
+      ? undefined
+      : await admitTelegramScheduledInbound({
+          cfg,
+          context,
+          allMedia,
+          onError: (error) => {
+            logVerbose(`telegram scheduler admission failed open: ${String(error)}`);
+          },
+        });
+    if (schedulerAdmission?.result.accepted) {
+      context.statusReactionController?.cancelPending();
+      if (context.statusReactionController) {
+        await Promise.resolve(context.statusReactionController.restoreInitial()).catch(
+          (error: unknown) => {
+            logVerbose(`telegram scheduler status-reaction cleanup failed: ${String(error)}`);
+          },
+        );
+      }
+      const result: TelegramMessageProcessingResult = { kind: "completed" };
+      recordCurrentUpdateProcessingResult(result);
+      return result;
+    }
     const spooledReplay =
       options?.spooledReplay === true || isTelegramSpooledReplayUpdate(primaryCtx.update);
     if (!spooledReplay) {

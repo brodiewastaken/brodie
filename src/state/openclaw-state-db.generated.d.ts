@@ -274,6 +274,38 @@ export interface ConfigHealthEntries {
   updated_at_ms: number;
 }
 
+export interface ConversationSchedulerEvents {
+  callback_state: Generated<string>;
+  created_at: number;
+  dispatch_attempt_id: string | null;
+  durable_at: number;
+  event_id: string;
+  failure_json: string | null;
+  human: number;
+  lane_key: string;
+  media: number;
+  payload_bytes: number;
+  payload_json: string;
+  producer_kind: string;
+  ready_at: number;
+  receipt_id: string;
+  revision: Generated<number>;
+  route_json: string;
+  run_correlation_id: string | null;
+  sequence: Generated<number>;
+  session_key: string;
+  state: string;
+  transcript_evidence: string | null;
+  updated_at: number;
+}
+
+export interface ConversationSchedulerLanes {
+  active_event_id: string | null;
+  lane_key: string;
+  revision: Generated<number>;
+  updated_at: number;
+}
+
 export interface CronJobs {
   agent_id: string | null;
   anchor_ms: number | null;
@@ -1076,6 +1108,8 @@ export interface DB {
   command_log_entries: CommandLogEntries;
   commitments: Commitments;
   config_health_entries: ConfigHealthEntries;
+  conversation_scheduler_events: ConversationSchedulerEvents;
+  conversation_scheduler_lanes: ConversationSchedulerLanes;
   cron_jobs: CronJobs;
   cron_run_logs: CronRunLogs;
   current_conversation_bindings: CurrentConversationBindings;

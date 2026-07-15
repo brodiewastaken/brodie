@@ -755,18 +755,14 @@ export async function runPreparedReply(
       ? "paths"
       : (cfg.agents?.defaults?.models?.[`${provider}/${model}`]?.startupJournals ?? "paths");
   const resetSystemMessage =
-    isBareSessionReset &&
-    isResetOrNewCommand &&
-    command.isAuthorizedSender &&
-    workspaceDir
+    isBareSessionReset && isResetOrNewCommand && command.isAuthorizedSender && workspaceDir
       ? await buildSessionResetSystemMessage({
           cfg,
           agentId,
           sessionCtx: promptSessionCtx,
           workspaceDir,
           isGroupChat,
-          triggerCommand:
-            normalizeOptionalString(ctx.CommandTriggerBody) ?? rawBodyTrimmed,
+          triggerCommand: normalizeOptionalString(ctx.CommandTriggerBody) ?? rawBodyTrimmed,
           journalMode: resetJournalMode,
           maxInlineJournalChars: Math.max(
             8_000,
@@ -874,11 +870,20 @@ export async function runPreparedReply(
     sessionStore?.[sessionKey] ?? sessionEntryHandle?.getCurrent() ?? sessionEntry,
   );
   let activeGoalContext = formatActiveGoalContext(inboundContextSessionEntry);
-  let inboundUserContext = buildInboundUserContextPrefix(
-    inboundUserContextSessionCtx,
-    envelopeOptions,
-    inboundContextSessionEntry,
-  );
+  const buildCurrentInboundUserContext = () =>
+    ctx.HumanInboundBatch
+      ? buildInboundUserContextPrefix(
+          inboundUserContextSessionCtx,
+          envelopeOptions,
+          inboundContextSessionEntry,
+          { projection: "human-inbound-supplemental" },
+        )
+      : buildInboundUserContextPrefix(
+          inboundUserContextSessionCtx,
+          envelopeOptions,
+          inboundContextSessionEntry,
+        );
+  let inboundUserContext = buildCurrentInboundUserContext();
   const refreshInboundContextAfterAdmissionWait = async () => {
     if (isHeartbeat) {
       return;
@@ -889,11 +894,7 @@ export async function runPreparedReply(
         : (sessionEntryHandle?.getCurrent() ?? sessionStore?.[sessionKey] ?? sessionEntry);
     inboundContextSessionEntry = await resolveContextSessionEntry(latestSessionEntry);
     activeGoalContext = formatActiveGoalContext(inboundContextSessionEntry);
-    inboundUserContext = buildInboundUserContextPrefix(
-      inboundUserContextSessionCtx,
-      envelopeOptions,
-      inboundContextSessionEntry,
-    );
+    inboundUserContext = buildCurrentInboundUserContext();
   };
   const inboundUserContextPromptJoiner = resolveInboundUserContextPromptJoiner(sessionCtx);
   const promptEnvelopeBase = buildReplyPromptEnvelopeBase({
@@ -1428,6 +1429,12 @@ export async function runPreparedReply(
         hasMedia: userTurnMediaForPersistence.length > 0,
       })
     : authoredUserTurnText;
+  const scheduledSourceMessage =
+    ctx.ExplicitDeliverRoute === true
+      ? resolvePersistedUserTurnText(ctx.RawBody ?? ctx.CommandBody ?? "", {
+          hasMedia: userTurnMediaForPersistence.length > 0,
+        })
+      : undefined;
   const persistedUserTurnText = isBareSessionReset
     ? resolvePersistedUserTurnText(prefixedCommandBody, {
         hasMedia: userTurnMediaForPersistence.length > 0,
@@ -1436,7 +1443,9 @@ export async function runPreparedReply(
   const sourceMessage =
     authoredUserTurnText && authoredUserTurnText !== persistedUserTurnText
       ? authoredUserTurnText
-      : undefined;
+      : scheduledSourceMessage && scheduledSourceMessage !== persistedUserTurnText
+        ? scheduledSourceMessage
+        : undefined;
   const userTurnInput =
     persistedUserTurnText !== undefined || userTurnMediaForPersistence.length > 0
       ? {
@@ -1510,6 +1519,7 @@ export async function runPreparedReply(
     currentInboundEventKind: inboundEventKind,
     currentInboundAudio: hasInboundAudio(sessionCtx),
     currentInboundContext,
+    ...(ctx.HumanInboundBatch ? { humanInboundBatch: ctx.HumanInboundBatch } : {}),
     ...(queuedFollowupAbortSignal ? { abortSignal: queuedFollowupAbortSignal } : {}),
     deliveryCorrelations: opts?.queuedDeliveryCorrelations,
     queuedLifecycle: opts?.queuedFollowupLifecycle,

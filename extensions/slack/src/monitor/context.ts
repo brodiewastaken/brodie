@@ -117,6 +117,7 @@ export type SlackMonitorContext = {
   allowNameMatching: boolean;
   groupDmEnabled: boolean;
   groupDmChannels: string[];
+  requireOwnerPresence: boolean;
   defaultRequireMention: boolean;
   channelsConfig?: SlackChannelConfigEntries;
   channelsConfigKeys: string[];
@@ -205,6 +206,7 @@ export function createSlackMonitorContext(params: {
   allowNameMatching: boolean;
   groupDmEnabled: boolean;
   groupDmChannels: Array<string | number> | undefined;
+  requireOwnerPresence?: boolean;
   defaultRequireMention?: boolean;
   channelsConfig?: SlackMonitorContext["channelsConfig"];
   groupPolicy: SlackMonitorContext["groupPolicy"];
@@ -623,6 +625,7 @@ export function createSlackMonitorContext(params: {
     allowNameMatching: params.allowNameMatching,
     groupDmEnabled: params.groupDmEnabled,
     groupDmChannels,
+    requireOwnerPresence: params.requireOwnerPresence ?? false,
     defaultRequireMention,
     channelsConfig: params.channelsConfig,
     channelsConfigKeys,

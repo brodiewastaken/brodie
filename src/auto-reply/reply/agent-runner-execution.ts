@@ -2687,6 +2687,7 @@ async function runAgentTurnWithFallbackInternal(
                       return isMarkdownCapableMessageChannel(channel) ? "markdown" : "plain";
                     })(),
                     toolProgressDetail: params.toolProgressDetail,
+                    onToolStreamBoundary: params.opts?.onToolStreamBoundary,
                     suppressToolErrorWarnings:
                       params.opts?.shouldSuppressToolErrorWarnings ??
                       params.opts?.suppressToolErrorWarnings,

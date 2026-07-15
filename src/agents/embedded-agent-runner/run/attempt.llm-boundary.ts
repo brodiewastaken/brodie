@@ -4,6 +4,7 @@
 import { stripInboundMetadata } from "../../../auto-reply/reply/strip-inbound-meta.js";
 import { buildTimestampPrefix } from "../../../gateway/server-methods/agent-timestamp.js";
 import { INTER_SESSION_PROMPT_PREFIX_BASE } from "../../../sessions/input-provenance.js";
+import type { UserTurnModelInputSnapshot } from "../../../sessions/user-turn-transcript.types.js";
 import { stripHistoricalRuntimeContextCustomMessages } from "../../internal-runtime-context.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { stripToolResultDetails } from "../../session-transcript-repair.js";
@@ -22,6 +23,147 @@ type LlmBoundaryOptions = {
     runtimeTimestamp?: number;
   };
 };
+
+const HUMAN_INBOUND_QUEUE_HEADER = "[📋 QUEUE ENGINE]:";
+
+function hasHumanInboundBatch(message: AgentMessage): boolean {
+  const metadata = (message as unknown as Record<string, unknown>)["__openclaw"] as
+    | { humanInboundBatch?: unknown }
+    | undefined;
+  return Boolean(metadata?.humanInboundBatch);
+}
+
+function messageContentHasHumanInboundQueueHeader(content: unknown): boolean {
+  if (typeof content === "string") {
+    return content.includes(HUMAN_INBOUND_QUEUE_HEADER);
+  }
+  if (!Array.isArray(content)) {
+    return false;
+  }
+  return content.some((block) => {
+    if (!block || typeof block !== "object") {
+      return false;
+    }
+    const text = (block as { type?: unknown; text?: unknown }).text;
+    return typeof text === "string" && text.includes(HUMAN_INBOUND_QUEUE_HEADER);
+  });
+}
+
+function joinedUserTextContent(message: AgentMessage): string | undefined {
+  if (message.role !== "user") {
+    return undefined;
+  }
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  return content
+    .flatMap((block) => {
+      if (!block || typeof block !== "object") {
+        return [];
+      }
+      const text = (block as { type?: unknown; text?: unknown }).text;
+      return typeof text === "string" ? [text] : [];
+    })
+    .join("");
+}
+
+function userContentHasNonTextBlock(message: AgentMessage): boolean {
+  if (message.role !== "user") {
+    return false;
+  }
+  const content = (message as { content?: unknown }).content;
+  return (
+    Array.isArray(content) &&
+    content.some((block) => {
+      if (!block || typeof block !== "object") {
+        return false;
+      }
+      const type = (block as { type?: unknown }).type;
+      return typeof type !== "string" || !["text", "input_text"].includes(type);
+    })
+  );
+}
+
+/**
+ * Removes the text-only prompt copy that AgentSession can append after an
+ * already-persisted typed media turn. The earlier row is the canonical turn and
+ * owns the native image blocks; the later row exists only because media staging
+ * committed the recorder before AgentSession constructed its ephemeral prompt.
+ */
+export function collapseDuplicateActiveHumanInboundUserMessage(
+  messages: AgentMessage[],
+  options?: { currentHumanInboundBatch?: unknown },
+): AgentMessage[] {
+  const activeUserIndex = findActiveUserMessageIndex(messages);
+  if (activeUserIndex <= 0) {
+    return messages;
+  }
+  const activeMessage = messages[activeUserIndex];
+  const canonicalMessage = messages[activeUserIndex - 1];
+  if (
+    !activeMessage ||
+    !canonicalMessage ||
+    activeMessage.role !== "user" ||
+    canonicalMessage.role !== "user" ||
+    (!hasHumanInboundBatch(canonicalMessage) &&
+      !options?.currentHumanInboundBatch &&
+      !userContentHasNonTextBlock(canonicalMessage)) ||
+    hasHumanInboundBatch(activeMessage) ||
+    userContentHasNonTextBlock(activeMessage)
+  ) {
+    return messages;
+  }
+  const activeText = joinedUserTextContent(activeMessage);
+  const canonicalText = joinedUserTextContent(canonicalMessage);
+  if (
+    !activeText ||
+    activeText !== canonicalText ||
+    !messageContentHasHumanInboundQueueHeader(activeText)
+  ) {
+    return messages;
+  }
+  return [...messages.slice(0, activeUserIndex), ...messages.slice(activeUserIndex + 1)];
+}
+
+function anchorHumanInboundQueueHeader(text: string): string {
+  const headerIndex = text.indexOf(HUMAN_INBOUND_QUEUE_HEADER);
+  if (headerIndex <= 0) {
+    return text;
+  }
+  const before = text.slice(0, headerIndex).trim();
+  const envelope = text.slice(headerIndex).trimEnd();
+  return before ? `${envelope}\n\n${before}` : envelope;
+}
+
+export function buildUserTurnModelInputSnapshot(params: {
+  currentUserText: string;
+  runtimeContextText?: string;
+}): UserTurnModelInputSnapshot {
+  return {
+    version: 1,
+    items: [
+      {
+        kind: "current-user",
+        role: "user",
+        content: params.currentUserText,
+      },
+      ...(params.runtimeContextText
+        ? [
+            {
+              kind: "runtime-context" as const,
+              role: "user" as const,
+              placement: "tail" as const,
+              content: params.runtimeContextText,
+            },
+          ]
+        : []),
+    ],
+  };
+}
 
 /**
  * Matches a leading `[... YYYY-MM-DD HH:MM ...]` timestamp envelope — either
@@ -53,6 +195,17 @@ export function normalizeMessagesForLlmBoundary(
   return stripHistoricalRuntimeContextCustomMessages(withoutHistoricalInboundMetadata);
 }
 
+/** Prepares AgentMessage rows at the last boundary before harness conversion. */
+export function prepareMessagesForLlmBoundaryConversion(
+  messages: AgentMessage[],
+  options?: LlmBoundaryOptions,
+): AgentMessage[] {
+  return normalizeMessagesForLlmBoundary(
+    collapseDuplicateActiveHumanInboundUserMessage(messages),
+    options,
+  );
+}
+
 /** Normalizes existing transcript messages as if the current prompt were appended last. */
 export function normalizeMessagesForCurrentPromptBoundary(params: {
   messages: AgentMessage[];
@@ -60,6 +213,7 @@ export function normalizeMessagesForCurrentPromptBoundary(params: {
   timezone?: string;
   includeTimestamp?: boolean;
   currentUserTimestamp?: number;
+  humanInboundBatch?: boolean;
 }): AgentMessage[] {
   const { message, options } = buildCurrentPromptBoundaryInput(params);
   return normalizeMessagesForLlmBoundary([...params.messages, message], options).slice(0, -1);
@@ -70,6 +224,7 @@ export function normalizeCurrentPromptTextForLlmBoundary(params: {
   timezone?: string;
   includeTimestamp?: boolean;
   currentUserTimestamp?: number;
+  humanInboundBatch?: boolean;
 }): string {
   const { message, options } = buildCurrentPromptBoundaryInput(params);
   const [normalized] = normalizeMessagesForLlmBoundary([message], options);
@@ -82,6 +237,7 @@ function buildCurrentPromptBoundaryInput(params: {
   timezone?: string;
   includeTimestamp?: boolean;
   currentUserTimestamp?: number;
+  humanInboundBatch?: boolean;
 }): { message: AgentMessage; options?: LlmBoundaryOptions } {
   const options =
     params.timezone || params.includeTimestamp === false
@@ -95,6 +251,7 @@ function buildCurrentPromptBoundaryInput(params: {
       role: "user",
       content: [{ type: "text", text: params.prompt }],
       timestamp: params.currentUserTimestamp ?? Date.now(),
+      ...(params.humanInboundBatch ? { __openclaw: { humanInboundBatch: { version: 1 } } } : {}),
     },
     options,
   };
@@ -463,6 +620,13 @@ function stripHistoricalInboundMetadataFromUserMessages(
       return message;
     }
     const content = (message as { content?: unknown }).content;
+    // The session library creates a fresh active prompt message before
+    // convertToLlm and does not copy OpenClaw's sidecar metadata onto it. The
+    // canonical queue header therefore remains the final-wire identity for
+    // that ephemeral message. Without this fallback, the timestamp boundary
+    // re-prefixed the exact queue-first text after the operator snapshot.
+    const isHumanInboundBatch =
+      hasHumanInboundBatch(message) || messageContentHasHumanInboundQueueHeader(content);
     const isActive = index === activeUserMessageIndex;
     const override = options?.currentUserTimestampOverride;
     const runtimeTimestamp = (message as { timestamp?: unknown }).timestamp;
@@ -487,6 +651,9 @@ function stripHistoricalInboundMetadataFromUserMessages(
     // keeps such messages byte-stable across current↔historical (the envelope is
     // present in both forms) and avoids double-stamping.
     const transformText = (raw: string): string => {
+      if (isHumanInboundBatch) {
+        return anchorHumanInboundQueueHeader(raw);
+      }
       const envelopeMatch = raw.match(BOUNDARY_LEADING_ENVELOPE_CAPTURE);
       if (envelopeMatch || raw.includes(BOUNDARY_CRON_TIME_MARKER)) {
         if (isActive) {

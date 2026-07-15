@@ -17,6 +17,7 @@ export {
   queueEmbeddedAgentMessage,
   queueEmbeddedAgentMessageWithOutcome,
   resolveActiveEmbeddedAgentRunSessionId,
+  resolveActiveEmbeddedRunCorrelationId,
   resolveActiveEmbeddedRunSessionId,
   resolveActiveEmbeddedRunSessionIdBySessionFile,
   resolveEmbeddedSessionLane,
