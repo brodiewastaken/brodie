@@ -69,6 +69,7 @@ import { getSubagentDepthFromSessionStore } from "./subagent-depth.js";
 import { buildSubagentInitialUserMessage } from "./subagent-initial-user-message.js";
 import {
   countActiveRunsForSession,
+  getLatestSubagentRunByChildSessionKey,
   registerSubagentRun,
   releaseSubagentRun,
   replaceSubagentRunAfterSteer,
@@ -351,6 +352,9 @@ function buildDirectChildSessionPatch(patch: Record<string, unknown>): Partial<S
   }
   if (typeof patch.thinkingLevel === "string" && patch.thinkingLevel.trim()) {
     entry.thinkingLevel = patch.thinkingLevel.trim();
+  }
+  if (typeof patch.fastMode === "boolean") {
+    entry.fastMode = patch.fastMode;
   }
   if (typeof patch.model === "string" && patch.model.trim()) {
     const { provider, model } = splitModelRef(patch.model.trim());
@@ -1323,6 +1327,7 @@ export async function spawnSubagentDirect(
     callerThinkingRaw,
     callerFastMode,
     callerIsCron: isCronSessionKey(requesterInternalKey),
+    parentRunPolicy: getLatestSubagentRunByChildSessionKey(requesterInternalKey)?.resolvedRunPolicy,
   });
   if (plan.status === "error") {
     return {
@@ -1591,6 +1596,7 @@ export async function spawnSubagentDirect(
       expectsCompletionMessage: shouldAnnounceCompletion,
       spawnMode,
       contextMode,
+      resolvedRunPolicy: plan.resolvedRunPolicy,
       deferCompletionWait: true,
       attachmentsDir: attachmentAbsDir,
       attachmentsRootDir: attachmentRootDir,

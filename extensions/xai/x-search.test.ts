@@ -247,6 +247,39 @@ describe("xai x_search tool", () => {
     expect(firstFetchUrl(mockFetch)).toBe("https://api.x.ai/xai-search/v1/responses");
   });
 
+  it("sends configured x_search reasoning effort", async () => {
+    const mockFetch = installXSearchFetch();
+    const tool = createXSearchTool({
+      config: {
+        plugins: {
+          entries: {
+            xai: {
+              config: {
+                webSearch: {
+                  apiKey: "xai-config-test", // pragma: allowlist secret
+                },
+                xSearch: {
+                  enabled: true,
+                  model: "grok-4.6",
+                  reasoningEffort: "low",
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    await tool?.execute?.("x-search:reasoning-effort", {
+      query: "reasoning effort route",
+    });
+
+    expect(parseFirstRequestBody(mockFetch)).toMatchObject({
+      model: "grok-4.6",
+      reasoning: { effort: "low" },
+    });
+  });
+
   it("falls back to Grok web search baseUrl for x_search", async () => {
     const mockFetch = installXSearchFetch();
     const tool = createXSearchTool({

@@ -26,9 +26,17 @@ describe("OpenAI reasoning effort support", () => {
     expect(resolveOpenAIReasoningEffortForModel({ model: luna, effort: "off" })).toBe("none");
   });
 
+  it("preserves disabled and max effort for GPT-6 Astra", () => {
+    const astra = { provider: "openai", id: "gpt-6-astra" };
+
+    expect(resolveOpenAISupportedReasoningEfforts(astra)).toContain("max");
+    expect(resolveOpenAIReasoningEffortForModel({ model: astra, effort: "max" })).toBe("max");
+    expect(resolveOpenAIReasoningEffortForModel({ model: astra, effort: "off" })).toBe("none");
+  });
+
   it.each([
     { provider: "openai", id: "gpt-5.5" },
-    { provider: "openai", id: "gpt-5.5" },
+    { provider: "openai", id: "gpt-6-astra" },
   ])("preserves xhigh for $provider/$id", (model) => {
     expect(resolveOpenAISupportedReasoningEfforts(model)).toContain("xhigh");
     expect(resolveOpenAIReasoningEffortForModel({ model, effort: "xhigh" })).toBe("xhigh");

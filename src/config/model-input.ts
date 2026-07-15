@@ -10,14 +10,19 @@ import {
   resolvePrimaryStringValue,
 } from "@openclaw/normalization-core/string-coerce";
 import { modelKey } from "../shared/model-key.js";
-import type { AgentModelConfig, AgentToolModelConfig } from "./types.agents-shared.js";
+import type {
+  AgentDefaultModelConfig,
+  AgentModelConfig,
+  AgentToolModelConfig,
+} from "./types.agents-shared.js";
 
 type AgentModelListLike = {
   primary?: string;
   fallbacks?: string[];
 };
 
-type AgentModelInput = AgentModelConfig | AgentToolModelConfig;
+type AgentModelInput = AgentDefaultModelConfig | AgentModelConfig | AgentToolModelConfig;
+type AgentDefaultModelObject = Exclude<AgentDefaultModelConfig, string>;
 
 /** Returns the primary model ref from either string or object-style agent model config. */
 export function resolveAgentModelPrimaryValue(model?: AgentModelInput): string | undefined {
@@ -30,6 +35,27 @@ export function resolveAgentModelFallbackValues(model?: AgentModelInput): string
     return [];
   }
   return Array.isArray(model.fallbacks) ? model.fallbacks : [];
+}
+
+/** Resolves whether model fallback transition and recovery notices are user-visible. */
+export function resolveAgentModelFallbackNotice(
+  model?: AgentDefaultModelConfig,
+): "visible" | "silent" {
+  if (!model || typeof model !== "object") {
+    return "visible";
+  }
+  return model.fallbackNotice === "silent" ? "silent" : "visible";
+}
+
+/** Patches global model defaults without discarding independent fallback presentation policy. */
+export function patchAgentDefaultModelConfig(
+  model: AgentDefaultModelConfig | undefined,
+  patch: AgentDefaultModelObject,
+): AgentDefaultModelObject {
+  return {
+    ...(typeof model === "string" ? { primary: model } : model),
+    ...patch,
+  };
 }
 
 /** Returns a positive finite tool timeout rounded down to whole milliseconds. */

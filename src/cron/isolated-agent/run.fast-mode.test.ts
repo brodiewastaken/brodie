@@ -45,6 +45,7 @@ function requireFirstMockCall<T>(mock: { mock: { calls: T[][] } }, label: string
 
 async function runFastModeCase(params: {
   configFastMode: boolean | "auto";
+  cronFastMode?: boolean;
   configFastAutoOnSeconds?: number;
   expectedFastMode: boolean | "auto";
   expectedFastModeAutoOnSeconds?: number;
@@ -112,6 +113,7 @@ async function runFastModeCase(params: {
           kind: "agentTurn",
           message: params.message,
           model: OPENAI_GPT4_MODEL,
+          ...(params.cronFastMode === undefined ? {} : { fastMode: params.cronFastMode }),
         },
       }),
     }),
@@ -220,6 +222,16 @@ describe("runCronIsolatedAgentTurn — fast mode", () => {
       configFastMode: true,
       expectedFastMode: true,
       message: "test fast mode",
+    });
+  });
+
+  it("lets an explicit cron Fast policy override session and model policy", async () => {
+    await runFastModeCase({
+      configFastMode: true,
+      cronFastMode: false,
+      expectedFastMode: false,
+      message: "test explicit cron fast mode",
+      sessionFastMode: true,
     });
   });
 

@@ -341,6 +341,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Troubleshooting
   - H2: Configuration reference
   - H2: Safety and operations
+  - H2: v2026.7.1 absorption
   - H2: Related
 
 ## channels/feishu.md
@@ -1027,6 +1028,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Troubleshooting
   - H2: System prompts
   - H2: Configuration reference pointers
+  - H2: v2026.7.1 absorption
   - H2: Related
 
 ## channels/yuanbao.md
@@ -2228,6 +2230,23 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Invariants
   - H2: Related
 
+## concepts/atomic-conversational-actions.md
+
+- Route: /concepts/atomic-conversational-actions
+- Headings:
+  - H1: Atomic conversational actions
+  - H2: Authored messages and routing
+  - H2: Delivery and outcomes
+  - H2: v2026.7.1 absorption
+
+## concepts/canonical-conversation-sessions.md
+
+- Route: /concepts/canonical-conversation-sessions
+- Headings:
+  - H1: Canonical conversation sessions
+  - H2: operator commands
+  - H2: reset context
+
 ## concepts/channel-docking.md
 
 - Route: /concepts/channel-docking
@@ -2311,6 +2330,15 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: What /context actually reports
   - H2: Related
 
+## concepts/conversation-scheduler.md
+
+- Route: /concepts/conversation-scheduler
+- Headings:
+  - H1: Conversation scheduler
+  - H2: Ordering and concurrency
+  - H2: Debounce
+  - H2: Durability and recovery
+
 ## concepts/delegate-architecture.md
 
 - Route: /concepts/delegate-architecture
@@ -2354,6 +2382,16 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Key defaults
   - H2: Dreams UI
   - H2: Related
+
+## concepts/durable-delegated-work.md
+
+- Route: /concepts/durable-delegated-work
+- Headings:
+  - H1: Durable delegated work
+  - H2: Controller ownership
+  - H2: Completion and waiting
+  - H2: Restart recovery
+  - H2: v2026.7.1 absorption
 
 ## concepts/experimental-features.md
 
@@ -2929,6 +2967,16 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Configuration
   - H2: Notes
   - H2: Related
+
+## concepts/unified-run-policy.md
+
+- Route: /concepts/unified-run-policy
+- Headings:
+  - H1: Unified run policy
+  - H2: Brain catalog
+  - H2: Cron and child policy
+  - H2: Images and provider evidence
+  - H2: Opus 5 backport
 
 ## concepts/usage-tracking.md
 
@@ -7273,7 +7321,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Headings:
   - H2: Usage and cost tracking
   - H2: Getting started
-  - H2: Thinking defaults (Claude Sonnet 5, Mythos 5, Fable 5, 4.8, and 4.6)
+  - H2: Thinking defaults (Claude Opus 5, Sonnet 5, Mythos 5, Fable 5, 4.8, and 4.6)
   - H2: Safety refusal fallback (Claude Fable 5)
   - H3: Why this exists
   - H3: How it works
@@ -9708,7 +9756,6 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Delegation prompt mode
   - H3: Tool parameters
   - H3: Task names and targeting
-  - H2: Tool: sessionsyield
   - H2: Tool: subagents
   - H2: Thread-bound sessions
   - H3: Thread supporting channels

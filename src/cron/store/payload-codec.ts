@@ -68,6 +68,7 @@ export function bindPayloadColumns(
   | "payload_allow_unsafe_external_content"
   | "payload_external_content_source_json"
   | "payload_fallbacks_json"
+  | "payload_fast_mode"
   | "payload_kind"
   | "payload_light_context"
   | "payload_message"
@@ -83,6 +84,7 @@ export function bindPayloadColumns(
       payload_message: payload.text,
       payload_model: null,
       payload_fallbacks_json: null,
+      payload_fast_mode: null,
       payload_thinking: null,
       payload_timeout_seconds: null,
       payload_allow_unsafe_external_content: null,
@@ -99,6 +101,7 @@ export function bindPayloadColumns(
       payload_message: serializeJson(payloadMessage),
       payload_model: null,
       payload_fallbacks_json: null,
+      payload_fast_mode: null,
       payload_thinking: null,
       payload_timeout_seconds: payload.timeoutSeconds ?? null,
       payload_allow_unsafe_external_content: null,
@@ -113,6 +116,7 @@ export function bindPayloadColumns(
     payload_message: payload.message,
     payload_model: payload.model ?? null,
     payload_fallbacks_json: serializeJson(payload.fallbacks),
+    payload_fast_mode: payload.fastMode === undefined ? null : String(payload.fastMode),
     payload_thinking: payload.thinking ?? null,
     payload_timeout_seconds: payload.timeoutSeconds ?? null,
     payload_allow_unsafe_external_content: booleanToInteger(payload.allowUnsafeExternalContent),
@@ -138,6 +142,12 @@ export function payloadFromRow(row: CronJobRow): CronPayload | null {
       ? parseJsonArray(row.payload_fallbacks_json)
       : undefined;
     const timeoutSeconds = normalizeNumber(row.payload_timeout_seconds);
+    const fastMode =
+      row.payload_fast_mode === "true"
+        ? true
+        : row.payload_fast_mode === "false"
+          ? false
+          : undefined;
     const allowUnsafeExternalContent =
       row.payload_allow_unsafe_external_content != null
         ? integerToBoolean(row.payload_allow_unsafe_external_content)
@@ -160,6 +170,7 @@ export function payloadFromRow(row: CronJobRow): CronPayload | null {
       ...(row.payload_model ? { model: row.payload_model } : {}),
       ...(fallbacks ? { fallbacks } : {}),
       ...(row.payload_thinking ? { thinking: row.payload_thinking } : {}),
+      ...(fastMode !== undefined ? { fastMode } : {}),
       ...(timeoutSeconds != null ? { timeoutSeconds } : {}),
       ...(allowUnsafeExternalContent != null ? { allowUnsafeExternalContent } : {}),
       ...(externalContentSource ? { externalContentSource } : {}),

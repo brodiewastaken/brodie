@@ -459,6 +459,26 @@ describe("normalizeCronJobCreate", () => {
     expect(payload.timeoutSeconds).toBe(0);
   });
 
+  it("accepts boolean cron Fast policy and drops the removed auto value", () => {
+    const explicit = normalizeCronJobCreate({
+      name: "fast",
+      schedule: { kind: "every", everyMs: 60_000 },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      payload: { kind: "agentTurn", message: "hello", fastMode: false },
+    });
+    expect(explicit?.payload).toMatchObject({ fastMode: false });
+
+    const legacy = normalizeCronJobCreate({
+      name: "legacy",
+      schedule: { kind: "every", everyMs: 60_000 },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      payload: { kind: "agentTurn", message: "hello", fastMode: "auto" },
+    });
+    expect(legacy?.payload).not.toHaveProperty("fastMode");
+  });
+
   it("preserves fractional timeoutSeconds for short agentTurn deadlines", () => {
     const normalized = normalizeCronJobCreate({
       name: "fractional timeout",

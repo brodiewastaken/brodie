@@ -105,6 +105,20 @@ describe("anthropic provider replay hooks", () => {
     });
   });
 
+  it("publishes Claude Opus 5 CLI metadata without downgrading its API contract", () => {
+    expect(
+      buildClaudeCliCatalogEntries().find((model) => model.id === "claude-opus-5"),
+    ).toMatchObject({
+      id: "claude-opus-5",
+      name: "Claude Opus 5 (Claude CLI)",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+      mediaInput: {
+        image: { maxSidePx: 2576, preferredSidePx: 2576, tokenMode: "provider" },
+      },
+    });
+  });
+
   it("owns native reasoning output mode for Claude transports", async () => {
     const provider = await registerSingleProviderPlugin(anthropicPlugin);
 
@@ -694,6 +708,28 @@ describe("anthropic provider replay hooks", () => {
       contextTokens: 1_000_000,
       maxTokens: 128_000,
     });
+  });
+
+  it("normalizes a Sonnet 5 model without cost metadata instead of crashing", async () => {
+    const provider = await registerSingleProviderPlugin(anthropicPlugin);
+    const resolved = provider.resolveDynamicModel?.({
+      provider: "anthropic",
+      modelId: "claude-sonnet-5",
+      modelRegistry: createModelRegistry([]),
+    } as ProviderResolveDynamicModelContext);
+
+    const costlessModel = {
+      ...(resolved as ProviderRuntimeModel),
+      cost: undefined,
+    } as unknown as ProviderRuntimeModel;
+    const normalized = provider.normalizeResolvedModel?.({
+      provider: "anthropic",
+      modelId: "claude-sonnet-5",
+      model: costlessModel,
+    } as never);
+    // Compare against the resolver's own cost so the assertion survives the
+    // promotional -> standard pricing cutover.
+    expect(normalized?.cost).toEqual((resolved as ProviderRuntimeModel).cost);
   });
 
   it("resolves Claude Mythos 5 with its direct-only mandatory-adaptive contract", async () => {

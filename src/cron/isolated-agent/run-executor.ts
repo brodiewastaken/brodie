@@ -509,7 +509,7 @@ export function createCronPromptExecutor(params: {
               sessionEntry: params.cronSession.sessionEntry,
             });
             return {
-              fastMode: fastModeState.mode,
+              fastMode: params.agentPayload?.fastMode ?? fastModeState.mode,
               fastModeAutoOnSeconds: fastModeState.fastAutoOnSeconds,
               fastModeStartedAtMs,
               fastModeAutoProgressState,

@@ -93,7 +93,7 @@ describe("OpenAI provider Codex transport hooks", () => {
     });
   });
 
-  it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
+  it.each(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
     "resolves %s through the Codex Responses transport without live catalog metadata",
     (modelId) => {
       const provider = buildOpenAIProvider();

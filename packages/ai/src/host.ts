@@ -11,6 +11,15 @@ export interface OpenAIStrictToolSettingOptions {
   supportsStrictMode?: boolean;
 }
 
+export interface AiRawByteCapture {
+  appendBytes(params: {
+    event: string;
+    bytes: string | Uint8Array;
+    metadata?: Record<string, unknown>;
+  }): void;
+  wrapFetch(fetchFn: typeof fetch): typeof fetch;
+}
+
 /** Narrow host ports consumed by the built-in provider adapters. */
 export interface AiTransportHost {
   /**
@@ -22,6 +31,12 @@ export interface AiTransportHost {
     timeoutMs?: number,
     options?: { sanitizeSse?: boolean },
   ): typeof fetch | undefined;
+  /** Creates a correlated raw-wire recorder when the embedding host enables capture. */
+  createRawByteCapture(params: {
+    provider: string;
+    modelId: string;
+    traceContext?: Record<string, unknown>;
+  }): AiRawByteCapture | undefined;
   /** Resolves host-owned process-local secret sentinel substrings immediately before egress. */
   resolveSecretSentinel(value: string): string;
   /** Redacts secrets inside structured tool-result payloads. */
@@ -48,6 +63,7 @@ export interface AiTransportHost {
 
 const inertAiTransportHost: AiTransportHost = {
   buildModelFetch: () => undefined,
+  createRawByteCapture: () => undefined,
   resolveSecretSentinel: (value) => value,
   redactSecrets: (value) => value,
   redactToolPayloadText: (text) => text,

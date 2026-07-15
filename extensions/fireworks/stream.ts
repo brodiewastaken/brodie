@@ -3,38 +3,71 @@ import type { StreamFn } from "openclaw/plugin-sdk/agent-core";
 import { streamSimple } from "openclaw/plugin-sdk/llm";
 import type { ProviderWrapStreamFnContext } from "openclaw/plugin-sdk/plugin-entry";
 import { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
-import { streamWithPayloadPatch } from "openclaw/plugin-sdk/provider-stream-shared";
-import { isFireworksKimiModelId } from "./model-id.js";
+import { resolveFireworksReasoningDispatch } from "./reasoning-contract.js";
 
 function isFireworksProviderId(providerId: string): boolean {
   const normalized = normalizeProviderId(providerId);
   return normalized === "fireworks" || normalized === "fireworks-ai";
 }
 
-export function createFireworksKimiThinkingDisabledWrapper(
-  baseStreamFn: StreamFn | undefined,
-): StreamFn {
-  const underlying = baseStreamFn ?? streamSimple;
-  return (model, context, options) =>
-    streamWithPayloadPatch(underlying, model, context, options, (payloadObj) => {
-      // Fireworks Kimi can emit chain-of-thought in visible `content` unless
-      // the Anthropic-style thinking toggle is explicitly disabled.
-      payloadObj.thinking = { type: "disabled" };
-      delete payloadObj.reasoning;
-      delete payloadObj.reasoning_effort;
-      delete payloadObj.reasoningEffort;
-    });
+function patchAfterCaller(params: {
+  payload: Record<string, unknown>;
+  patchPayload: (payload: Record<string, unknown>) => void;
+  result: unknown;
+}): unknown {
+  const patchResult = (result: unknown): unknown => {
+    if (result && typeof result === "object") {
+      params.patchPayload(result as Record<string, unknown>);
+    } else {
+      params.patchPayload(params.payload);
+    }
+    return result;
+  };
+  if (params.result && typeof (params.result as Promise<unknown>).then === "function") {
+    return Promise.resolve(params.result).then(patchResult);
+  }
+  return patchResult(params.result);
 }
 
 export function wrapFireworksProviderStream(
   ctx: ProviderWrapStreamFnContext,
 ): StreamFn | undefined {
-  if (
-    !isFireworksProviderId(ctx.provider) ||
-    ctx.model?.api !== "openai-completions" ||
-    !isFireworksKimiModelId(ctx.modelId)
-  ) {
+  if (!isFireworksProviderId(ctx.provider) || ctx.model?.api !== "openai-completions") {
     return undefined;
   }
-  return createFireworksKimiThinkingDisabledWrapper(ctx.streamFn);
+  const dispatch = resolveFireworksReasoningDispatch({
+    modelId: ctx.modelId,
+    thinkingLevel: ctx.thinkingLevel,
+  });
+  if (!dispatch) {
+    return undefined;
+  }
+
+  const underlying = ctx.streamFn ?? streamSimple;
+  return (model, context, options) => {
+    const runtimeModel =
+      model.reasoning === dispatch.reasoning
+        ? model
+        : {
+            ...model,
+            reasoning: dispatch.reasoning,
+          };
+    const originalOnPayload = options?.onPayload;
+    return underlying(runtimeModel, context, {
+      ...options,
+      onPayload: (payload, payloadModel) => {
+        if (!payload || typeof payload !== "object") {
+          return originalOnPayload?.(payload, payloadModel);
+        }
+        const payloadObject = payload as Record<string, unknown>;
+        dispatch.patchPayload(payloadObject);
+        const result = originalOnPayload?.(payload, payloadModel);
+        return patchAfterCaller({
+          payload: payloadObject,
+          patchPayload: dispatch.patchPayload,
+          result,
+        });
+      },
+    });
+  };
 }

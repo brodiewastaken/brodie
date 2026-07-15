@@ -1885,7 +1885,11 @@ describe("collectCodexRouteWarnings", () => {
         channels: {
           modelByChannel: {
             telegram: {
-              default: "openai-codex/gpt-5.4",
+              default: {
+                model: "openai-codex/gpt-5.4",
+                thinking: "high",
+                fastMode: false,
+              },
             },
           },
         },
@@ -1924,7 +1928,7 @@ describe("collectCodexRouteWarnings", () => {
         "- agents.defaults.compaction.memoryFlush.model: openai-codex/gpt-5.4-mini -> openai/gpt-5.4-mini.",
         "- agents.defaults.models.openai-codex/gpt-5.5: openai-codex/gpt-5.5 -> openai/gpt-5.5.",
         "- agents.list.worker.model: openai-codex/gpt-5.4 -> openai/gpt-5.4.",
-        "- channels.modelByChannel.telegram.default: openai-codex/gpt-5.4 -> openai/gpt-5.4.",
+        "- channels.modelByChannel.telegram.default.model: openai-codex/gpt-5.4 -> openai/gpt-5.4.",
         "- hooks.mappings.0.model: openai-codex/gpt-5.4-mini -> openai/gpt-5.4-mini.",
         "- hooks.gmail.model: openai-codex/gpt-5.4 -> openai/gpt-5.4.",
         "- messages.tts.summaryModel: openai-codex/gpt-5.4-mini -> openai/gpt-5.4-mini.",
@@ -1965,7 +1969,11 @@ describe("collectCodexRouteWarnings", () => {
     expect(result.cfg.agents?.list?.[0]?.models).toEqual({
       "openai/gpt-5.4": { agentRuntime: { id: "codex" } },
     });
-    expect(result.cfg.channels?.modelByChannel?.telegram?.default).toBe("openai/gpt-5.4");
+    expect(result.cfg.channels?.modelByChannel?.telegram?.default).toEqual({
+      model: "openai/gpt-5.4",
+      thinking: "high",
+      fastMode: false,
+    });
     expect(result.cfg.hooks?.mappings?.[0]?.model).toBe("openai/gpt-5.4-mini");
     expect(result.cfg.hooks?.gmail?.model).toBe("openai/gpt-5.4");
     expect(result.cfg.messages?.tts?.summaryModel).toBe("openai/gpt-5.4-mini");

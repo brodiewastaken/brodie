@@ -387,7 +387,7 @@ function shouldApplyDefaultOpenAIGptRuntimeParams(params: {
   if (params.provider !== "openai") {
     return false;
   }
-  return /^gpt-5(?:[.-]|$)/i.test(params.modelId);
+  return /^gpt-(?:5|6)(?:[.-]|$)/i.test(params.modelId);
 }
 
 function applyDefaultOpenAIGptRuntimeParams(

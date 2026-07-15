@@ -112,11 +112,14 @@ see [legacy compatibility aliases](#legacy-compatibility-aliases).
 | -------------- | ------------------------------------------------------------------------ |
 | Grok Build 0.1 | `grok-build-0.1`                                                         |
 | Grok 4.3       | `grok-4.3`                                                               |
+| Grok 4.5       | `grok-4.5`                                                               |
+| Grok 4.6       | `grok-4.6`                                                               |
 | Grok 4.20 Beta | `grok-4.20-beta-latest-reasoning`, `grok-4.20-beta-latest-non-reasoning` |
 
 <Tip>
-Use `grok-4.3` for general chat and `grok-build-0.1` for build/coding-focused
-workloads unless you need a Grok 4.20 beta alias.
+Use `grok-4.6` for the current general chat route and `grok-build-0.1` for
+build/coding-focused workloads unless you need a pinned family or Grok 4.20
+reasoning mode.
 </Tip>
 
 ## Feature coverage
@@ -406,6 +409,7 @@ Legacy aliases normalize to the canonical bundled ids:
     | `model`           | string  | `grok-4-1-fast-non-reasoning` | Model used for x_search requests     |
     | `baseUrl`         | string  | -                              | xAI Responses base URL override      |
     | `inlineCitations` | boolean | -                              | Include inline citations in results  |
+    | `reasoningEffort` | string  | -                              | Explicit Responses reasoning effort  |
     | `maxTurns`        | number  | -                              | Maximum conversation turns            |
     | `timeoutSeconds`  | number  | `30`                           | Request timeout in seconds            |
     | `cacheTtlMinutes` | number  | `15`                           | Cache time-to-live in minutes         |
@@ -421,6 +425,7 @@ Legacy aliases normalize to the canonical bundled ids:
                 model: "grok-4-1-fast-non-reasoning",
                 baseUrl: "https://api.x.ai/v1",
                 inlineCitations: true,
+                reasoningEffort: "low",
               },
             },
           },
@@ -493,11 +498,30 @@ Legacy aliases normalize to the canonical bundled ids:
       `agents.defaults.models["xai/<model>"].params.tool_stream` to `false`
       to disable it.
     - The bundled xAI wrapper strips unsupported strict tool-schema flags and
-      reasoning *effort* payload keys before sending native xAI requests. Only
-      `grok-4.3` / `grok-4.3-*` advertise configurable reasoning effort; all
-      other reasoning-capable xAI models still request
-      `include: ["reasoning.encrypted_content"]` so prior encrypted reasoning
-      can be replayed on follow-up turns.
+      reasoning *effort* payload keys before sending native xAI requests.
+      OpenClaw maps its common thinking levels onto each Grok family's native
+      controls:
+
+      | Model family | `off` | `minimal` | `low` | `medium` | `high` | `xhigh` | `max` | Default |
+      | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+      | Grok 4.3 | `none` | `low` | `low` | `medium` | `high` | `high` | `high` | `low` |
+      | Grok 4.5 | `low` | `low` | `low` | `medium` | `high` | `high` | `high` | `high` |
+      | Grok 4.6 | `low` | `low` | `low` | `medium` | `high` | `xhigh` | `xhigh` | `high` |
+      | Grok Build 0.1 | fixed | fixed | fixed | fixed | fixed | fixed | fixed | fixed |
+      | Grok 4.20 reasoning | fixed | fixed | fixed | fixed | fixed | fixed | fixed | fixed |
+      | Grok 4.20 non-reasoning | off | off | off | off | off | off | off | off |
+
+      Grok 4.5 and 4.6 cannot disable reasoning, so `off` maps to their lowest
+      native effort. Grok Build 0.1 and the Grok 4.20 reasoning variant use
+      fixed reasoning because xAI does not publish an adjustable effort for
+      those models; OpenClaw accepts every common level but omits the effort
+      field. The Grok 4.20 non-reasoning variant similarly accepts every
+      common level and keeps reasoning off. Reasoning-capable models still
+      request `include: ["reasoning.encrypted_content"]` so prior encrypted
+      reasoning can be replayed on follow-up turns. See xAI's
+      [reasoning controls](https://docs.x.ai/developers/model-capabilities/text/reasoning),
+      [Grok 4.6](https://docs.x.ai/developers/grok-4-6), and the
+      [Grok 4.3 model card](https://docs.x.ai/developers/models/grok-4.3).
     - `web_search`, `x_search`, and `code_execution` are exposed as OpenClaw
       tools. OpenClaw attaches only the specific xAI built-in each tool needs
       to that tool's request instead of attaching every native tool to every
@@ -509,13 +533,16 @@ Legacy aliases normalize to the canonical bundled ids:
       rather than hardcoded into the core model runtime.
     - `code_execution` is remote xAI sandbox execution, not local
       [`exec`](/tools/exec).
+
   </Accordion>
 </AccordionGroup>
 
 ## Live testing
 
 The xAI media paths are covered by unit tests and opt-in live suites. Export
-`XAI_API_KEY` in the process environment before running live probes.
+`XAI_API_KEY` in the process environment before running API-key live probes.
+Subscription OAuth can be exercised through the normal CLI and gateway infer
+commands after `openclaw models auth login --provider xai --method oauth`.
 
 ```bash
 pnpm test extensions/xai

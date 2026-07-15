@@ -367,6 +367,7 @@ export async function loadSubagentSpawnModuleForTest(params: {
     registerSubagentRun:
       params.registerSubagentRunMock ?? vi.fn((_record: Record<string, unknown>) => undefined),
     replaceSubagentRunAfterSteer: params.replaceSubagentRunAfterSteerMock ?? vi.fn(() => true),
+    getLatestSubagentRunByChildSessionKey: () => undefined,
     releaseSubagentRun: params.releaseSubagentRunMock ?? vi.fn(),
     resetSubagentRegistryForTests,
   }));

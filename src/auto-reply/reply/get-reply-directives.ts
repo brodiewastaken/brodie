@@ -19,6 +19,7 @@ import { shouldHandleTextCommands } from "../commands-text-routing.js";
 import { markCommandReplyForDelivery } from "../reply-payload.js";
 import type { MsgContext, TemplateContext } from "../templating.js";
 import {
+  normalizeFastMode,
   normalizeThinkLevel,
   type ElevatedLevel,
   type FastMode,
@@ -181,6 +182,8 @@ export async function resolveReplyDirectives(params: {
   aliasIndex: ModelAliasIndex;
   provider: string;
   model: string;
+  channelThinkingDefault?: ThinkLevel;
+  channelFastModeDefault?: boolean;
   hasOneTurnModelOverride?: boolean;
   skipStoredModelOverride?: boolean;
   hasResolvedHeartbeatModelOverride: boolean;
@@ -212,6 +215,8 @@ export async function resolveReplyDirectives(params: {
     primaryModel,
     provider: initialProvider,
     model: initialModel,
+    channelThinkingDefault,
+    channelFastModeDefault,
     hasOneTurnModelOverride,
     skipStoredModelOverride,
     hasResolvedHeartbeatModelOverride,
@@ -450,6 +455,7 @@ export async function resolveReplyDirectives(params: {
     normalizeThinkLevel(agentEntry?.thinkingDefault) ??
     normalizeThinkLevel(agentCfg?.thinkingDefault);
   const resolvedThinkLevel = thinkingLevelOverride ?? directives.thinkLevel ?? sessionThinkLevel;
+  const resolvedThinkLevelWithChannelDefault = resolvedThinkLevel ?? channelThinkingDefault;
 
   const resolvedVerboseLevel =
     directives.verboseLevel ??
@@ -635,7 +641,7 @@ export async function resolveReplyDirectives(params: {
     sessionEntry: targetSessionEntry,
   });
   const resolvedThinkLevelWithDefault =
-    resolvedThinkLevel ??
+    resolvedThinkLevelWithChannelDefault ??
     (await modelState.resolveDefaultThinkingLevel({
       provider,
       model,
@@ -647,6 +653,7 @@ export async function resolveReplyDirectives(params: {
     thinkingLevelOverride !== undefined ||
     directives.thinkLevel !== undefined ||
     sessionThinkLevel !== undefined ||
+    channelThinkingDefault !== undefined ||
     configuredThinkingDefault !== undefined ||
     modelState.hasConfiguredThinkingDefault === true;
 
@@ -679,12 +686,26 @@ export async function resolveReplyDirectives(params: {
     agentId,
     sessionEntry: directives.clearFastMode ? undefined : targetSessionEntry,
   });
+  const sessionFastMode = directives.clearFastMode
+    ? undefined
+    : normalizeFastMode(targetSessionEntry?.fastMode);
+  const channelFastModeApplied =
+    opts?.fastModeOverride === undefined &&
+    directives.fastMode === undefined &&
+    sessionFastMode === undefined &&
+    channelFastModeDefault !== undefined;
   const resolvedFastMode =
-    opts?.fastModeOverride ?? directives.fastMode ?? resolvedFastModeState.mode;
+    opts?.fastModeOverride ??
+    directives.fastMode ??
+    sessionFastMode ??
+    channelFastModeDefault ??
+    resolvedFastModeState.mode;
   const resolvedFastModeAutoOnSeconds =
     opts?.fastModeAutoOnSecondsOverride ?? resolvedFastModeState.fastAutoOnSeconds;
   const resolvedFastModeOverride =
-    opts?.fastModeOverride !== undefined || directives.fastMode !== undefined;
+    opts?.fastModeOverride !== undefined ||
+    directives.fastMode !== undefined ||
+    channelFastModeApplied;
   const resolvedFastModeAutoOnSecondsOverride = opts?.fastModeAutoOnSecondsOverride !== undefined;
   const execOverrides = resolveReplyExecOverrides({
     directives,

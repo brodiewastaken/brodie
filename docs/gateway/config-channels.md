@@ -40,7 +40,7 @@ If a provider block is missing entirely (`channels.<provider>` absent), runtime 
 
 ### Channel model overrides
 
-Use `channels.modelByChannel` to pin specific channel IDs or direct-message peers to a model. Values accept `provider/model` or configured model aliases. The channel mapping only applies when a session does not already have an active model override (for example, one set via `/model`).
+Use `channels.modelByChannel` to pin specific channel IDs or direct-message peers to a model. Values accept `provider/model`, a configured model alias, or an object with `model` plus optional `thinking` and `fastMode` defaults. The channel mapping only applies when a session does not already have an active model override (for example, one set via `/model`). Stored or inline `/think` and `/fast` selections take precedence over the corresponding channel defaults.
 
 For group/thread conversations, keys are channel-specific group IDs, topic IDs, or channel names. For direct-message (DM) conversations, keys are peer identifiers derived from the channel's sender identity (`nativeDirectUserId`, `origin.from`, `origin.to`, `OriginatingTo`, `From`, or `SenderId`). The exact key form depends on the channel:
 
@@ -61,7 +61,11 @@ For group/thread conversations, keys are channel-specific group IDs, topic IDs, 
         "123456789012345678": "anthropic/claude-opus-4-6",
       },
       slack: {
-        C1234567890: "openai/gpt-5.5",
+        C1234567890: {
+          model: "anthropic/claude-fable-5",
+          thinking: "low",
+          fastMode: false,
+        },
         "user:U12345": "openai/gpt-5.4-mini",
       },
       telegram: {

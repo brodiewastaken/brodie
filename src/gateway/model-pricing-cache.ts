@@ -1,5 +1,6 @@
 // Gateway model-pricing refresh and normalization.
 // Fetches, normalizes, and schedules cached pricing for model usage estimates.
+import { readChannelModelOverrideRef } from "@openclaw/model-catalog-core/configured-model-refs";
 import type { ModelCatalogCost } from "@openclaw/model-catalog-core/model-catalog-types";
 import {
   normalizeOptionalString,
@@ -1030,7 +1031,7 @@ export function collectConfiguredModelPricingRefs(
     }
     for (const raw of Object.values(channelMap)) {
       addResolvedModelRef({
-        raw: typeof raw === "string" ? raw : undefined,
+        raw: readChannelModelOverrideRef(raw),
         aliasIndex,
         refs,
         ...normalizationParams,

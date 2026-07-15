@@ -38,6 +38,35 @@ describe("agent defaults schema", () => {
     expect(agent.utilityModel).toBe("google/gemini-3.1-flash-lite-preview");
   });
 
+  it("accepts fallback notice policy only on the global default model", () => {
+    const defaults = AgentDefaultsSchema.parse({
+      model: {
+        primary: "openai/gpt-5.5",
+        fallbacks: ["anthropic/claude-sonnet-4-6"],
+        fallbackNotice: "silent",
+      },
+    });
+
+    expect(defaults?.model).toEqual({
+      primary: "openai/gpt-5.5",
+      fallbacks: ["anthropic/claude-sonnet-4-6"],
+      fallbackNotice: "silent",
+    });
+    expectSchemaFailurePath(
+      AgentDefaultsSchema.safeParse({
+        model: { primary: "openai/gpt-5.5", fallbackNotice: "invalid" },
+      }),
+      "model",
+    );
+    expectSchemaFailurePath(
+      AgentEntrySchema.safeParse({
+        id: "worker",
+        model: { primary: "openai/gpt-5.5", fallbackNotice: "silent" },
+      }),
+      "model",
+    );
+  });
+
   it("accepts subagent archiveAfterMinutes=0 to disable archiving", () => {
     expectSchemaSuccess(
       AgentDefaultsSchema.safeParse({

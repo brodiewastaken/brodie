@@ -245,7 +245,7 @@ troubleshooting, see the main [FAQ](/help/faq).
 
     | Alias | Resolves to |
     | --- | --- |
-    | `opus` | `anthropic/claude-opus-4-8` |
+    | `opus` | `anthropic/claude-opus-5` |
     | `sonnet` | `anthropic/claude-sonnet-4-6` |
     | `gpt` | `openai/gpt-5.4` |
     | `gpt-mini` | `openai/gpt-5.4-mini` |

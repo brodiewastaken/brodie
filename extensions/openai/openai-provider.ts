@@ -58,6 +58,7 @@ const OPENAI_GPT_56_MODEL_ID = "gpt-5.6";
 const OPENAI_GPT_56_SOL_MODEL_ID = "gpt-5.6-sol";
 const OPENAI_GPT_56_TERRA_MODEL_ID = "gpt-5.6-terra";
 const OPENAI_GPT_56_LUNA_MODEL_ID = "gpt-5.6-luna";
+const OPENAI_GPT_6_ASTRA_MODEL_ID = "gpt-6-astra";
 const OPENAI_GPT_55_MODEL_ID = "gpt-5.5";
 const OPENAI_GPT_55_PRO_MODEL_ID = "gpt-5.5-pro";
 const OPENAI_GPT_54_MODEL_ID = "gpt-5.4";
@@ -76,6 +77,13 @@ const OPENAI_GPT_54_MINI_CONTEXT_TOKENS = 400_000;
 const OPENAI_GPT_54_NANO_CONTEXT_TOKENS = 400_000;
 const OPENAI_GPT_54_MAX_TOKENS = 128_000;
 const OPENAI_CHAT_LATEST_COST = { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } as const;
+// OpenAI-published GPT-6 Astra standard rates (short context, per 1M tokens).
+const OPENAI_GPT_6_ASTRA_COST = {
+  input: 10,
+  output: 50,
+  cacheRead: 1,
+  cacheWrite: 12.5,
+} as const;
 const OPENAI_GPT_56_SOL_COST = {
   input: 5,
   output: 30,
@@ -133,6 +141,7 @@ const OPENAI_GPT_56_THINKING_LEVEL_MAP = {
 } as const;
 const OPENAI_MODERN_MODEL_IDS = [
   OPENAI_CHAT_LATEST_MODEL_ID,
+  OPENAI_GPT_6_ASTRA_MODEL_ID,
   OPENAI_GPT_56_MODEL_ID,
   OPENAI_GPT_56_SOL_MODEL_ID,
   OPENAI_GPT_56_TERRA_MODEL_ID,
@@ -330,12 +339,15 @@ function normalizeOpenAICodexCatalogModel(
     return undefined;
   }
   if (
+    modelId === OPENAI_GPT_6_ASTRA_MODEL_ID ||
     modelId === OPENAI_GPT_56_SOL_MODEL_ID ||
     modelId === OPENAI_GPT_56_TERRA_MODEL_ID ||
     modelId === OPENAI_GPT_56_LUNA_MODEL_ID
   ) {
     const supportsNativeUltra =
-      modelId === OPENAI_GPT_56_SOL_MODEL_ID || modelId === OPENAI_GPT_56_TERRA_MODEL_ID;
+      modelId === OPENAI_GPT_6_ASTRA_MODEL_ID ||
+      modelId === OPENAI_GPT_56_SOL_MODEL_ID ||
+      modelId === OPENAI_GPT_56_TERRA_MODEL_ID;
     const supportedReasoningEfforts = model.compat?.supportedReasoningEfforts
       ? [
           ...new Set([
@@ -405,7 +417,9 @@ function buildOpenAICodexModelFromLiveRow(row: unknown): ModelDefinitionConfig |
       : fallback?.compat;
   const thinkingLevelMap = {
     ...(reasoningLevels === undefined ? fallback?.thinkingLevelMap : {}),
-    ...(normalizeLowercaseStringOrEmpty(modelId).startsWith("gpt-5.6") ? { off: null } : {}),
+    ...(/^gpt-(?:5\.6|6)(?:[.-]|$)/u.test(normalizeLowercaseStringOrEmpty(modelId))
+      ? { off: null }
+      : {}),
     ...(reasoningLevels?.includes("xhigh") ? { xhigh: "xhigh" as const } : {}),
     ...(reasoningLevels?.includes("max") ? { max: "max" as const } : {}),
   };
@@ -644,6 +658,7 @@ function resolveOpenAIGptForwardCompatModel(ctx: ProviderResolveDynamicModelCont
       maxTokens: OPENAI_GPT_54_MAX_TOKENS,
     };
   } else if (
+    lower === OPENAI_GPT_6_ASTRA_MODEL_ID ||
     lower === OPENAI_GPT_56_MODEL_ID ||
     lower === OPENAI_GPT_56_SOL_MODEL_ID ||
     lower === OPENAI_GPT_56_TERRA_MODEL_ID ||
@@ -651,11 +666,13 @@ function resolveOpenAIGptForwardCompatModel(ctx: ProviderResolveDynamicModelCont
   ) {
     templateIds = OPENAI_GPT_56_TEMPLATE_MODEL_IDS;
     const cost =
-      lower === OPENAI_GPT_56_MODEL_ID || lower === OPENAI_GPT_56_SOL_MODEL_ID
-        ? OPENAI_GPT_56_SOL_COST
-        : lower === OPENAI_GPT_56_TERRA_MODEL_ID
-          ? OPENAI_GPT_56_TERRA_COST
-          : OPENAI_GPT_56_LUNA_COST;
+      lower === OPENAI_GPT_6_ASTRA_MODEL_ID
+        ? OPENAI_GPT_6_ASTRA_COST
+        : lower === OPENAI_GPT_56_MODEL_ID || lower === OPENAI_GPT_56_SOL_MODEL_ID
+          ? OPENAI_GPT_56_SOL_COST
+          : lower === OPENAI_GPT_56_TERRA_MODEL_ID
+            ? OPENAI_GPT_56_TERRA_COST
+            : OPENAI_GPT_56_LUNA_COST;
     patch = {
       api: "openai-responses",
       provider: PROVIDER_ID,

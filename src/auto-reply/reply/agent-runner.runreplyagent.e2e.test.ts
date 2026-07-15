@@ -53,6 +53,10 @@ type AgentRunParams = {
   silentExpected?: boolean;
   trigger?: string;
   bootstrapContextRunKind?: string;
+  thinkLevel?: string;
+  fastMode?: boolean | "auto";
+  maxNativeImages?: number;
+  maxNativeImagesSource?: string;
 };
 
 const state = vi.hoisted(() => ({
@@ -383,6 +387,52 @@ describe("runReplyAgent active steering", () => {
     expect(vi.mocked(enqueueFollowupRun)).toHaveBeenCalledTimes(1);
     expect(state.runEmbeddedAgentMock).not.toHaveBeenCalled();
     expect(onTurnAdopted).not.toHaveBeenCalled();
+  });
+});
+
+describe("runReplyAgent unified run policy", () => {
+  it("freezes brain policy before fallback dispatch", async () => {
+    const fallbackSpy = vi.spyOn(modelFallbackModule, "runWithModelFallback");
+    const { run } = createMinimalRun({
+      runOverrides: {
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        thinkLevel: "low",
+        config: {
+          agents: {
+            defaults: {
+              model: {
+                primary: "openai/gpt-5.6-sol",
+                fallbacks: ["anthropic/claude-opus-4-8"],
+              },
+              maxNativeImages: 9,
+              models: {
+                "openai/gpt-5.6-sol": { startupJournals: "paths" },
+                "anthropic/claude-opus-4-8": { startupJournals: "inline" },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    await run();
+
+    expect(fallbackSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai",
+        model: "gpt-5.6-sol",
+        fallbacksOverride: ["anthropic/claude-opus-4-8"],
+      }),
+    );
+    const [call] = mockCallArgs(state.runEmbeddedAgentMock, "run embedded agent");
+    expect(call).toMatchObject({
+      thinkLevel: "high",
+      fastMode: true,
+      maxNativeImages: 9,
+      maxNativeImagesSource: "global",
+    });
+    fallbackSpy.mockRestore();
   });
 });
 
@@ -3074,6 +3124,100 @@ describe("runReplyAgent typing (heartbeat)", () => {
       expect(thirdText).not.toContain("Model Fallback cleared:");
       expect(countMatching(phases, (phase) => phase === "fallback")).toBe(1);
       expect(countMatching(phases, (phase) => phase === "fallback_cleared")).toBe(1);
+    } finally {
+      fallbackSpy.mockRestore();
+    }
+  });
+
+  it("keeps fallback lifecycle state but suppresses transition notices when configured", async () => {
+    const sessionEntry: SessionEntry = {
+      sessionId: "session",
+      updatedAt: Date.now(),
+    };
+    const sessionStore = { main: sessionEntry };
+    let callCount = 0;
+
+    state.runEmbeddedAgentMock.mockResolvedValue({
+      payloads: [{ text: "final" }],
+      meta: {},
+    });
+    const fallbackSpy = vi
+      .spyOn(modelFallbackModule, "runWithModelFallback")
+      .mockImplementation(
+        async ({
+          provider,
+          model,
+          run,
+        }: {
+          provider: string;
+          model: string;
+          run: (provider: string, model: string) => Promise<unknown>;
+        }) => {
+          callCount += 1;
+          if (callCount === 1) {
+            return {
+              outcome: "completed" as const,
+              result: await run("deepinfra", "moonshotai/Kimi-K2.5"),
+              provider: "deepinfra",
+              model: "moonshotai/Kimi-K2.5",
+              attempts: [
+                {
+                  provider: "anthropic",
+                  model: "claude",
+                  error: "Provider anthropic is overloaded",
+                  reason: "overloaded",
+                },
+              ],
+            };
+          }
+          return {
+            outcome: "completed" as const,
+            result: await run(provider, model),
+            provider,
+            model,
+            attempts: [],
+          };
+        },
+      );
+    try {
+      const { run } = createMinimalRun({
+        sessionEntry,
+        sessionStore,
+        sessionKey: "main",
+        runOverrides: {
+          config: {
+            agents: {
+              defaults: {
+                model: {
+                  primary: "anthropic/claude",
+                  fallbacks: ["deepinfra/moonshotai/Kimi-K2.5"],
+                  fallbackNotice: "silent",
+                },
+              },
+            },
+          },
+        },
+      });
+      const phases: string[] = [];
+      const off = onAgentEvent((evt) => {
+        const phase = typeof evt.data?.phase === "string" ? evt.data.phase : null;
+        if (evt.stream === "lifecycle" && phase) {
+          phases.push(phase);
+        }
+      });
+      const first = await run();
+      const second = await run();
+      off();
+
+      const firstPayloads = Array.isArray(first) ? first : first ? [first] : [];
+      const secondPayloads = Array.isArray(second) ? second : second ? [second] : [];
+      expect(firstPayloads.map((payload) => payload.text)).toEqual(["final"]);
+      expect(secondPayloads.map((payload) => payload.text)).toEqual(["final"]);
+      expect(phases).toContain("fallback");
+      expect(phases).toContain("fallback_cleared");
+      expect(sessionEntry.fallbackNoticeSelectedModel).toBeUndefined();
+      expect(sessionEntry.fallbackNoticeActiveModel).toBeUndefined();
+      expect(sessionEntry.fallbackNoticeReason).toBeUndefined();
     } finally {
       fallbackSpy.mockRestore();
     }

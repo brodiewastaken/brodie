@@ -37,12 +37,23 @@ afterAll(() => {
 });
 
 describe("anthropic Claude model refs", () => {
-  it("upgrades retired refs without rewriting future canonical refs", () => {
+  it("resolves the bare opus family alias to the current default Opus", () => {
+    expect(resolveKnownAnthropicModelRef("opus")).toBe("anthropic/claude-opus-5");
+    expect(resolveKnownAnthropicModelRef("claude-cli/opus")).toBe("anthropic/claude-opus-5");
     expect(resolveKnownAnthropicModelRef("anthropic/claude-opus-4-5")).toBe(
+      "anthropic/claude-opus-5",
+    );
+    expect(resolveKnownAnthropicModelRef("anthropic/claude-opus-4-8")).toBe(
       "anthropic/claude-opus-4-8",
     );
+  });
+
+  it("upgrades retired refs without rewriting future canonical refs", () => {
+    expect(resolveKnownAnthropicModelRef("anthropic/claude-opus-4-5")).toBe(
+      "anthropic/claude-opus-5",
+    );
     expect(resolveKnownAnthropicModelRef("anthropic/claude-opus-4-5@anthropic:work")).toBe(
-      "anthropic/claude-opus-4-8@anthropic:work",
+      "anthropic/claude-opus-5@anthropic:work",
     );
     expect(resolveKnownAnthropicModelRef("anthropic/claude-sonnet-4-20250514")).toBe(
       "anthropic/claude-sonnet-4-6",

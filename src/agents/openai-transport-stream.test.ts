@@ -4069,6 +4069,65 @@ describe("openai transport stream", () => {
     expect(params.prompt_cache_retention).toBeUndefined();
   });
 
+  it("collapses the final text-only copy of an image-bearing queue turn", () => {
+    const marker = "BRODIE_QUEUEFIRST_MANAGED_PROVIDER_DEDUPE";
+    const queueText = `[📋 QUEUE ENGINE]: [THE FOLLOWING MESSAGE ARRIVED WHILE YOU WERE IDLE]\n${marker}`;
+    const params = buildOpenAIResponsesParams(
+      {
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        api: "openai-chatgpt-responses",
+        provider: "openai",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      } satisfies Model<"openai-chatgpt-responses">,
+      {
+        systemPrompt: "system",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: queueText },
+              { type: "text", text: "\n\nImage sidecar id: 8a8a8a8a8a8a8a8a" },
+              { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+            ],
+            timestamp: 1,
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: queueText },
+              { type: "text", text: "\n\nImage sidecar id: a1a1a1a1a1a1a1a1" },
+            ],
+            timestamp: 2,
+          },
+        ],
+        tools: [],
+      } as never,
+      { sessionId: "session-123" },
+    ) as {
+      input?: Array<{
+        role?: string;
+        content?: Array<{ type?: string; text?: string }>;
+      }>;
+    };
+
+    const markerItems =
+      params.input?.filter((item) =>
+        item.content?.some((part) => part.type === "input_text" && part.text?.includes(marker)),
+      ) ?? [];
+    expect(markerItems).toHaveLength(1);
+    expect(markerItems[0]?.content?.map((part) => part.type)).toEqual([
+      "input_text",
+      "input_text",
+      "input_image",
+    ]);
+  });
+
   it("does not add fallback instructions for custom Codex-compatible responses backends", () => {
     const params = buildOpenAIResponsesParams(
       {

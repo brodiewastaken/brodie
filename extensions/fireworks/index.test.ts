@@ -10,6 +10,7 @@ import {
   runSingleProviderCatalog,
 } from "../test-support/provider-model-test-helpers.js";
 import fireworksPlugin from "./index.js";
+import { applyFireworksConfig } from "./onboard.js";
 import {
   FIREWORKS_BASE_URL,
   FIREWORKS_DEFAULT_CONTEXT_WINDOW,
@@ -19,6 +20,30 @@ import {
 import { resolveThinkingProfile } from "./provider-policy-api.js";
 
 const FIREWORKS_KIMI_K2_6_MODEL_ID = "accounts/fireworks/models/kimi-k2p6";
+const FIREWORKS_KIMI_K3_MODEL_ID = "accounts/fireworks/models/kimi-k3";
+
+const FIREWORKS_CHAT_MODEL_IDS = [
+  "accounts/fireworks/models/deepseek-v4-flash",
+  "accounts/fireworks/models/deepseek-v4-pro",
+  "accounts/fireworks/models/glm-5p1",
+  "accounts/fireworks/models/glm-5p2",
+  "accounts/fireworks/models/gpt-oss-120b",
+  "accounts/fireworks/models/gpt-oss-20b",
+  "accounts/fireworks/models/inkling",
+  FIREWORKS_KIMI_K2_6_MODEL_ID,
+  "accounts/fireworks/models/kimi-k2p7-code",
+  FIREWORKS_KIMI_K3_MODEL_ID,
+  "accounts/fireworks/models/minimax-m2p7",
+  "accounts/fireworks/models/minimax-m3",
+  "accounts/fireworks/models/nemotron-3-ultra-nvfp4",
+  "accounts/fireworks/models/qwen3p7-plus",
+  "accounts/fireworks/routers/glm-5p2-fast",
+  "accounts/fireworks/routers/kimi-k2p6-fast",
+  "accounts/fireworks/routers/kimi-k2p6-turbo",
+  "accounts/fireworks/routers/kimi-k2p7-code-fast",
+  "accounts/fireworks/routers/kimi-k3-fast",
+  "accounts/fireworks/routers/kimi-k3-us",
+] as const;
 
 function createFireworksDefaultRuntimeModel(params: { reasoning: boolean }): ProviderRuntimeModel {
   return {
@@ -65,18 +90,117 @@ describe("fireworks provider plugin", () => {
     if (!models) {
       throw new Error("expected Fireworks catalog models");
     }
-    expect(models.map((model) => model.id)).toEqual([
-      FIREWORKS_KIMI_K2_6_MODEL_ID,
-      FIREWORKS_DEFAULT_MODEL_ID,
+    expect(FIREWORKS_DEFAULT_MODEL_ID).toBe(FIREWORKS_KIMI_K3_MODEL_ID);
+    expect(models.map((model) => model.id)).toEqual(FIREWORKS_CHAT_MODEL_IDS);
+    expect(models).not.toContainEqual(
+      expect.objectContaining({ id: "accounts/fireworks/routers/kimi-k2p5-turbo" }),
+    );
+    expect(models.find((model) => model.id === FIREWORKS_KIMI_K2_6_MODEL_ID)).toMatchObject({
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: 262144,
+      maxTokens: 262144,
+    });
+    expect(models.find((model) => model.id === "accounts/fireworks/models/inkling")).toMatchObject({
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: FIREWORKS_DEFAULT_CONTEXT_WINDOW,
+      maxTokens: 262144,
+    });
+    expect(models.find((model) => model.id === FIREWORKS_KIMI_K3_MODEL_ID)).toMatchObject({
+      reasoning: true,
+      input: ["text", "image"],
+      contextWindow: FIREWORKS_DEFAULT_CONTEXT_WINDOW,
+      maxTokens: FIREWORKS_DEFAULT_MAX_TOKENS,
+    });
+  });
+
+  it("augments an existing Fireworks config without replacing its primary model", () => {
+    const next = applyFireworksConfig({
+      agents: {
+        defaults: {
+          model: { primary: "openai/gpt-5.6-sol" },
+          models: {},
+        },
+      },
+      models: {
+        providers: {
+          fireworks: {
+            baseUrl: FIREWORKS_BASE_URL,
+            api: "openai-completions",
+            models: [
+              {
+                id: FIREWORKS_KIMI_K3_MODEL_ID,
+                name: "Kimi K3",
+                reasoning: true,
+                input: ["text", "image"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                contextWindow: FIREWORKS_DEFAULT_CONTEXT_WINDOW,
+                maxTokens: FIREWORKS_DEFAULT_MAX_TOKENS,
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(next.agents?.defaults?.model).toEqual({ primary: "openai/gpt-5.6-sol" });
+    expect(next.models?.providers?.fireworks?.models?.map((model) => model.id)).toEqual([
+      FIREWORKS_KIMI_K3_MODEL_ID,
+      ...FIREWORKS_CHAT_MODEL_IDS.filter((modelId) => modelId !== FIREWORKS_KIMI_K3_MODEL_ID),
     ]);
-    expect(models[0]?.reasoning).toBe(false);
-    expect(models[0]?.input).toEqual(["text", "image"]);
-    expect(models[0]?.contextWindow).toBe(262144);
-    expect(models[0]?.maxTokens).toBe(262144);
-    expect(models[1]?.reasoning).toBe(false);
-    expect(models[1]?.input).toEqual(["text", "image"]);
-    expect(models[1]?.contextWindow).toBe(FIREWORKS_DEFAULT_CONTEXT_WINDOW);
-    expect(models[1]?.maxTokens).toBe(FIREWORKS_DEFAULT_MAX_TOKENS);
+    expect(Object.keys(next.agents?.defaults?.models ?? {})).toEqual(
+      FIREWORKS_CHAT_MODEL_IDS.map((modelId) => `fireworks/${modelId}`),
+    );
+    expect(next.agents?.defaults?.models?.[`fireworks/${FIREWORKS_KIMI_K3_MODEL_ID}`]).toEqual({
+      alias: "Kimi K3",
+    });
+  });
+
+  it("preserves existing model selection during non-interactive API key setup", async () => {
+    const provider = await registerSingleProviderPlugin(fireworksPlugin);
+    const apiKey = provider.auth.find((method) => method.id === "api-key");
+    if (!apiKey?.runNonInteractive) {
+      throw new Error("expected Fireworks API key non-interactive auth");
+    }
+    const primaryModel = "openai/gpt-5.6-sol";
+    const fallbackModel = "anthropic/claude-opus-5";
+
+    const next = await apiKey.runNonInteractive({
+      config: {
+        agents: {
+          defaults: {
+            model: { primary: primaryModel, fallbacks: [fallbackModel] },
+            models: {
+              [primaryModel]: { alias: "Sol" },
+              [fallbackModel]: { alias: "Opus" },
+            },
+          },
+        },
+      },
+      opts: {},
+      env: {},
+      runtime: {},
+      resolveApiKey: async () => ({ key: "fw-test", source: "profile" }),
+      toApiKeyCredential: () => null,
+    } as never);
+
+    expect(next?.agents?.defaults?.model).toEqual({
+      primary: primaryModel,
+      fallbacks: [fallbackModel],
+    });
+    expect(next?.models?.providers?.fireworks?.models?.map((model) => model.id)).toEqual(
+      FIREWORKS_CHAT_MODEL_IDS,
+    );
+    expect(
+      Object.keys(next?.agents?.defaults?.models ?? {}).filter((modelRef) =>
+        modelRef.startsWith("fireworks/"),
+      ),
+    ).toEqual(FIREWORKS_CHAT_MODEL_IDS.map((modelId) => `fireworks/${modelId}`));
+    expect(next?.agents?.defaults?.models).toMatchObject({
+      [primaryModel]: { alias: "Sol" },
+      [fallbackModel]: { alias: "Opus" },
+    });
   });
 
   it("resolves forward-compat Fireworks model ids from the default template", async () => {
@@ -97,19 +221,19 @@ describe("fireworks provider plugin", () => {
     expect(resolved?.input).toEqual(["text", "image"]);
   });
 
-  it("disables reasoning metadata for Fireworks Kimi dynamic models", async () => {
+  it("enables reasoning metadata for Fireworks Kimi models with a reasoning contract", async () => {
     const provider = await registerSingleProviderPlugin(fireworksPlugin);
     const resolved = provider.resolveDynamicModel?.(
       createProviderDynamicModelContext({
         provider: "fireworks",
-        modelId: "accounts/fireworks/models/kimi-k2p5",
+        modelId: "accounts/fireworks/models/kimi-k2.6-turbo",
         models: [createFireworksDefaultRuntimeModel({ reasoning: false })],
       }),
     );
 
     expect(resolved?.provider).toBe("fireworks");
-    expect(resolved?.id).toBe("accounts/fireworks/models/kimi-k2p5");
-    expect(resolved?.reasoning).toBe(false);
+    expect(resolved?.id).toBe("accounts/fireworks/models/kimi-k2.6-turbo");
+    expect(resolved?.reasoning).toBe(true);
     expect(resolved?.input).toEqual(["text", "image"]);
   });
 
@@ -118,34 +242,19 @@ describe("fireworks provider plugin", () => {
     const resolved = provider.resolveDynamicModel?.(
       createProviderDynamicModelContext({
         provider: "fireworks",
-        modelId: "accounts/fireworks/models/glm-5p1",
+        modelId: "accounts/fireworks/models/glm-5p3-preview",
         models: [createFireworksDefaultRuntimeModel({ reasoning: false })],
       }),
     );
 
     expect(resolved?.provider).toBe("fireworks");
-    expect(resolved?.id).toBe("accounts/fireworks/models/glm-5p1");
+    expect(resolved?.id).toBe("accounts/fireworks/models/glm-5p3-preview");
     expect(resolved?.input).toEqual(["text"]);
-  });
-
-  it("disables reasoning metadata for Fireworks Kimi k2.5 aliases", async () => {
-    const provider = await registerSingleProviderPlugin(fireworksPlugin);
-    const resolved = provider.resolveDynamicModel?.(
-      createProviderDynamicModelContext({
-        provider: "fireworks",
-        modelId: "accounts/fireworks/routers/kimi-k2.5-turbo",
-        models: [createFireworksDefaultRuntimeModel({ reasoning: false })],
-      }),
-    );
-
-    expect(resolved?.provider).toBe("fireworks");
-    expect(resolved?.id).toBe("accounts/fireworks/routers/kimi-k2.5-turbo");
-    expect(resolved?.reasoning).toBe(false);
   });
 
   it("defers manifest catalog models to core static-catalog resolution", async () => {
     const provider = await registerSingleProviderPlugin(fireworksPlugin);
-    for (const modelId of [FIREWORKS_KIMI_K2_6_MODEL_ID, FIREWORKS_DEFAULT_MODEL_ID]) {
+    for (const modelId of FIREWORKS_CHAT_MODEL_IDS) {
       const resolved = provider.resolveDynamicModel?.(
         createProviderDynamicModelContext({
           provider: "fireworks",
@@ -158,41 +267,107 @@ describe("fireworks provider plugin", () => {
     }
   });
 
-  it("exposes off-only thinking policy for Fireworks Kimi models", async () => {
+  it("exposes canonical thinking levels with effective Fireworks labels", async () => {
     const provider = await registerSingleProviderPlugin(fireworksPlugin);
 
-    expect(
-      provider.resolveThinkingProfile?.({
-        provider: "fireworks",
-        modelId: "accounts/fireworks/routers/kimi-k2p5-turbo",
-      }),
-    ).toEqual({
-      levels: [{ id: "off" }],
-      defaultLevel: "off",
-    });
     expect(
       provider.resolveThinkingProfile?.({
         provider: "fireworks",
         modelId: FIREWORKS_KIMI_K2_6_MODEL_ID,
       }),
     ).toEqual({
-      levels: [{ id: "off" }],
+      levels: [
+        { id: "off" },
+        { id: "low", label: "low → on" },
+        { id: "medium", label: "medium → on" },
+        { id: "high", label: "high → on" },
+        { id: "xhigh", label: "xhigh → on" },
+        { id: "max", label: "max → on" },
+      ],
       defaultLevel: "off",
+      preserveWhenCatalogReasoningFalse: true,
     });
     expect(
       provider.resolveThinkingProfile?.({
         provider: "fireworks",
-        modelId: "accounts/fireworks/models/qwen3.6-plus",
+        modelId: "accounts/fireworks/models/kimi-k3",
       }),
-    ).toBeUndefined();
+    ).toEqual({
+      levels: [
+        { id: "low" },
+        { id: "medium", label: "medium → high" },
+        { id: "high" },
+        { id: "xhigh", label: "xhigh → max" },
+        { id: "max" },
+      ],
+      defaultLevel: "max",
+      preserveWhenCatalogReasoningFalse: true,
+    });
+    expect(
+      provider.resolveThinkingProfile?.({
+        provider: "fireworks",
+        modelId: "accounts/fireworks/models/inkling",
+      }),
+    ).toEqual({
+      levels: [
+        { id: "off" },
+        { id: "low" },
+        { id: "medium" },
+        { id: "high" },
+        { id: "xhigh" },
+        { id: "max" },
+      ],
+      defaultLevel: "high",
+      preserveWhenCatalogReasoningFalse: true,
+    });
     expect(resolveThinkingProfile({ modelId: FIREWORKS_KIMI_K2_6_MODEL_ID })).toEqual({
-      levels: [{ id: "off" }],
+      levels: [
+        { id: "off" },
+        { id: "low", label: "low → on" },
+        { id: "medium", label: "medium → on" },
+        { id: "high", label: "high → on" },
+        { id: "xhigh", label: "xhigh → on" },
+        { id: "max", label: "max → on" },
+      ],
       defaultLevel: "off",
+      preserveWhenCatalogReasoningFalse: true,
     });
     expect(
       resolveThinkingProfile({
-        modelId: "accounts/fireworks/models/qwen3.6-plus",
+        modelId: "accounts/fireworks/models/unknown-model",
       }),
     ).toBeUndefined();
+  });
+
+  it("publishes a thinking profile for every configured Fireworks chat model", async () => {
+    const provider = await registerSingleProviderPlugin(fireworksPlugin);
+    for (const modelId of FIREWORKS_CHAT_MODEL_IDS) {
+      expect(
+        provider.resolveThinkingProfile?.({
+          provider: "fireworks",
+          modelId,
+        }),
+        modelId,
+      ).toBeDefined();
+    }
+  });
+
+  it("preserves reasoning replay only for models whose Fireworks contract needs it", async () => {
+    const provider = await registerSingleProviderPlugin(fireworksPlugin);
+
+    expect(
+      provider.buildReplayPolicy?.({
+        provider: "fireworks",
+        modelId: "accounts/fireworks/routers/kimi-k3-fast",
+        modelApi: "openai-completions",
+      }),
+    ).not.toHaveProperty("dropReasoningFromHistory");
+    expect(
+      provider.buildReplayPolicy?.({
+        provider: "fireworks",
+        modelId: "accounts/fireworks/models/gpt-oss-120b",
+        modelApi: "openai-completions",
+      }),
+    ).toHaveProperty("dropReasoningFromHistory", true);
   });
 });

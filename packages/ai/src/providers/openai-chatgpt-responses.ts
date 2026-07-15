@@ -31,7 +31,11 @@ import {
   clampTimerTimeoutMs,
 } from "@openclaw/normalization-core/number-coercion";
 import { getEnvApiKey } from "../env-api-keys.js";
-import { getAiTransportHost, resolveAiTransportHeaderSentinels } from "../host.js";
+import {
+  getAiTransportHost,
+  resolveAiTransportHeaderSentinels,
+  type AiRawByteCapture,
+} from "../host.js";
 import { registerSessionResourceCleanup } from "../session-resources.js";
 import type {
   Api,
@@ -59,6 +63,7 @@ import {
 import { createSseByteGuard } from "../utils/streaming-byte-guard.js";
 import { stripSystemPromptCacheBoundary } from "../utils/system-prompt-cache-boundary.js";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.js";
+import { collapseDuplicateHumanInboundResponseInput } from "./openai-response-input-dedupe.js";
 import {
   convertResponsesMessages,
   convertResponsesToolPayload,
@@ -101,6 +106,7 @@ interface OpenAICodexResponsesOptions extends StreamOptions {
   reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
   serviceTier?: ResponseCreateParamsStreaming["service_tier"];
   textVerbosity?: "low" | "medium" | "high";
+  traceContext?: Record<string, unknown>;
 }
 
 type CodexResponseStatus =
@@ -270,7 +276,20 @@ export const streamOpenAICodexResponses: StreamFunction<
         throw new Error(`No API key for provider: ${model.provider}`);
       }
       // WebSocket auth has no fetch seam; unwrap immediately before request construction.
-      const apiKey = getAiTransportHost().resolveSecretSentinel(unresolvedApiKey);
+      const transportHost = getAiTransportHost();
+      const apiKey = transportHost.resolveSecretSentinel(unresolvedApiKey);
+      let rawByteCapture: AiRawByteCapture | undefined;
+      if (model.provider === "openai") {
+        try {
+          rawByteCapture = transportHost.createRawByteCapture({
+            provider: model.provider,
+            modelId: model.id,
+            traceContext: options?.traceContext,
+          });
+        } catch {
+          // Diagnostic capture never affects provider traffic.
+        }
+      }
       const modelHeaders = resolveAiTransportHeaderSentinels(model.headers);
       const optionHeaders = resolveAiTransportHeaderSentinels(options?.headers);
 
@@ -301,6 +320,14 @@ export const streamOpenAICodexResponses: StreamFunction<
       );
       const bodyJson = JSON.stringify(body);
       requestTimeoutMs = resolveRequestTimeoutMs(options);
+      let providerFetch = fetch;
+      if (rawByteCapture) {
+        try {
+          providerFetch = rawByteCapture.wrapFetch(fetch);
+        } catch {
+          // Diagnostic capture never affects provider traffic.
+        }
+      }
       requestTimeoutSignal = buildRequestSignal(options?.signal, requestTimeoutMs);
       firstEventAbort = createFirstStreamEventAbortController(requestTimeoutSignal);
       activeSignal = firstEventAbort.signal;
@@ -331,6 +358,7 @@ export const streamOpenAICodexResponses: StreamFunction<
               },
               requestOptions,
               firstEventAbort.abort,
+              rawByteCapture,
             );
 
             if (activeSignal?.aborted) {
@@ -395,7 +423,7 @@ export const streamOpenAICodexResponses: StreamFunction<
         }
 
         try {
-          response = await fetch(resolveCodexUrl(model.baseUrl), {
+          response = await providerFetch(resolveCodexUrl(model.baseUrl), {
             method: "POST",
             headers: sseHeaders,
             body: sseBody,
@@ -548,10 +576,14 @@ function buildRequestBody(
   context: Context,
   options?: OpenAICodexResponsesOptions,
 ): RequestBody {
-  const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+  const convertedMessages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
     includeSystemPrompt: false,
     replayResponsesItemIds: false,
   });
+  const messages =
+    model.provider === "openai"
+      ? collapseDuplicateHumanInboundResponseInput(convertedMessages)
+      : convertedMessages;
 
   const body: RequestBody = {
     model: model.id,
@@ -1328,21 +1360,26 @@ function extractWebSocketCloseError(event: unknown): Error {
   return new Error("WebSocket closed");
 }
 
-async function decodeWebSocketData(data: unknown): Promise<string | null> {
+async function decodeWebSocketData(
+  data: unknown,
+): Promise<{ text: string; bytes: Uint8Array } | null> {
   if (typeof data === "string") {
-    return data;
+    return { text: data, bytes: new TextEncoder().encode(data) };
   }
   if (data instanceof ArrayBuffer) {
-    return new TextDecoder().decode(new Uint8Array(data));
+    const bytes = new Uint8Array(data);
+    return { text: new TextDecoder().decode(bytes), bytes };
   }
   if (ArrayBuffer.isView(data)) {
     const view = data;
-    return new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    return { text: new TextDecoder().decode(bytes), bytes };
   }
   if (data && typeof data === "object" && "arrayBuffer" in data) {
     const blobLike = data as { arrayBuffer: () => Promise<ArrayBuffer> };
     const arrayBuffer = await blobLike.arrayBuffer();
-    return new TextDecoder().decode(new Uint8Array(arrayBuffer));
+    const bytes = new Uint8Array(arrayBuffer);
+    return { text: new TextDecoder().decode(bytes), bytes };
   }
   return null;
 }
@@ -1350,12 +1387,15 @@ async function decodeWebSocketData(data: unknown): Promise<string | null> {
 async function* parseWebSocket(
   socket: WebSocketLike,
   signal?: AbortSignal,
+  rawByteCapture?: AiRawByteCapture,
 ): AsyncGenerator<Record<string, unknown>> {
   const queue: Record<string, unknown>[] = [];
   let pending: (() => void) | null = null;
   let done = false;
   let failed: Error | null = null;
   let sawCompletion = false;
+  let frameIndex = 0;
+  let byteOffset = 0;
 
   const wake = () => {
     if (!pending) {
@@ -1373,10 +1413,22 @@ async function* parseWebSocket(
         if (!event || typeof event !== "object" || !("data" in event)) {
           return;
         }
-        text = await decodeWebSocketData((event as { data?: unknown }).data);
-        if (!text) {
+        const decoded = await decodeWebSocketData((event as { data?: unknown }).data);
+        if (!decoded) {
           return;
         }
+        text = decoded.text;
+        try {
+          rawByteCapture?.appendBytes({
+            event: "openai.response.websocket_frame",
+            bytes: decoded.bytes,
+            metadata: { frameIndex, byteOffset },
+          });
+        } catch {
+          // Diagnostic capture never affects provider traffic.
+        }
+        frameIndex += 1;
+        byteOffset += decoded.bytes.byteLength;
         const parsed = JSON.parse(text) as Record<string, unknown>;
         const type = typeof parsed.type === "string" ? parsed.type : "";
         if (
@@ -1551,6 +1603,7 @@ async function processWebSocketStream(
   onStart: () => void,
   options?: OpenAICodexResponsesOptions,
   abortFirstEventStream?: (reason: Error) => void,
+  rawByteCapture?: AiRawByteCapture,
 ): Promise<void> {
   const { socket, entry, reused, release } = await acquireWebSocket(
     url,
@@ -1595,10 +1648,20 @@ async function processWebSocketStream(
     if (options?.signal?.aborted) {
       throw new Error("Request was aborted");
     }
-    socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+    const requestFrame = JSON.stringify({ type: "response.create", ...requestBody });
+    try {
+      rawByteCapture?.appendBytes({
+        event: "openai.request.websocket_frame",
+        bytes: requestFrame,
+        metadata: { transport: "websocket" },
+      });
+    } catch {
+      // Diagnostic capture never affects provider traffic.
+    }
+    socket.send(requestFrame);
     await processResponsesStream(
       startWebSocketOutputOnFirstEvent(
-        mapCodexEvents(parseWebSocket(socket, options?.signal)),
+        mapCodexEvents(parseWebSocket(socket, options?.signal, rawByteCapture)),
         output,
         stream,
         onStart,

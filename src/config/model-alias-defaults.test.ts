@@ -128,7 +128,7 @@ describe("applyModelDefaults", () => {
       agents: {
         defaults: {
           models: {
-            "anthropic/claude-opus-4-8": {},
+            "anthropic/claude-opus-5": {},
             "anthropic/claude-sonnet-5": {},
             "openai/gpt-5.4": {},
           },
@@ -137,9 +137,27 @@ describe("applyModelDefaults", () => {
     } satisfies OpenClawConfig;
     const next = applyModelDefaults(cfg);
 
-    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-8"]?.alias).toBe("opus");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-5"]?.alias).toBe("opus");
     expect(next.agents?.defaults?.models?.["anthropic/claude-sonnet-5"]?.alias).toBe("sonnet");
     expect(next.agents?.defaults?.models?.["openai/gpt-5.4"]?.alias).toBe("gpt");
+  });
+
+  it("keeps an authored Opus 4.8 alias while assigning opus to Opus 5", () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          models: {
+            "anthropic/claude-opus-4-8": { alias: "opus48" },
+            "anthropic/claude-opus-5": {},
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+
+    const next = applyModelDefaults(cfg);
+
+    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-4-8"]?.alias).toBe("opus48");
+    expect(next.agents?.defaults?.models?.["anthropic/claude-opus-5"]?.alias).toBe("opus");
   });
 
   it("does not override existing aliases", () => {

@@ -10,6 +10,7 @@ import {
   resolveSubagentConfiguredModelSelection,
   resolveSubagentSpawnModelSelection,
 } from "./model-selection.js";
+import { resolveRunPolicyForConfiguredBrain, type RunPolicy } from "./run-policy.js";
 import { resolveSubagentThinkingOverride } from "./subagent-spawn-thinking.js";
 
 /** Splits a provider/model ref while preserving model-only refs. */
@@ -62,6 +63,7 @@ export function resolveSubagentModelAndThinkingPlan(params: {
   callerThinkingRaw?: string;
   callerFastMode?: boolean | "auto";
   callerIsCron?: boolean;
+  parentRunPolicy?: RunPolicy;
 }) {
   const resolvedModel = resolveSubagentSpawnModelSelection({
     cfg: params.cfg,
@@ -110,6 +112,28 @@ export function resolveSubagentModelAndThinkingPlan(params: {
           : typeof params.callerFastMode === "boolean"
             ? params.callerFastMode
             : false;
+  const resolvedRunPolicy = resolveRunPolicyForConfiguredBrain({
+    cfg: params.cfg,
+    kind: "subagent",
+    parentKind: params.callerIsCron ? "cron" : params.parentRunPolicy ? "subagent" : "main",
+    parent: params.parentRunPolicy,
+    explicitModel: resolvedModel,
+    explicitModelSource: params.modelOverride?.trim() ? "explicit" : "configured",
+    ...(thinkingPlan.thinkingOverride
+      ? {
+          explicitReasoning: thinkingPlan.thinkingOverride,
+          explicitReasoningSource: params.thinkingOverrideRaw?.trim()
+            ? ("explicit" as const)
+            : ("configured" as const),
+        }
+      : {}),
+    ...(typeof params.fastModeOverride === "boolean"
+      ? { explicitFastMode: params.fastModeOverride }
+      : {}),
+    ...(params.callerIsCron && typeof params.callerFastMode === "boolean"
+      ? { inheritedCronFastMode: params.callerFastMode }
+      : {}),
+  });
   const hasConfiguredAutoModel =
     modelOverrideSource === "auto" &&
     Boolean(
@@ -136,6 +160,7 @@ export function resolveSubagentModelAndThinkingPlan(params: {
     resolvedModel,
     modelApplied: Boolean(resolvedModel),
     thinkingOverride: thinkingPlan.thinkingOverride,
+    resolvedRunPolicy,
     initialSessionPatch: {
       ...(resolvedModel
         ? {
@@ -152,7 +177,8 @@ export function resolveSubagentModelAndThinkingPlan(params: {
           }
         : {}),
       ...thinkingPlan.initialSessionPatch,
-      fastMode,
+      ...(resolvedRunPolicy ? { thinkingLevel: resolvedRunPolicy.reasoning } : {}),
+      fastMode: resolvedRunPolicy?.fastMode ?? fastMode,
     },
   };
 }

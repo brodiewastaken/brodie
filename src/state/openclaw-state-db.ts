@@ -558,6 +558,7 @@ function backfillCronJobsFromJobJson(db: DatabaseSync): void {
             payload_message = ?,
             payload_model = ?,
             payload_fallbacks_json = ?,
+            payload_fast_mode = ?,
             payload_thinking = ?,
             payload_timeout_seconds = ?,
             payload_allow_unsafe_external_content = ?,
@@ -642,6 +643,7 @@ function backfillCronJobsFromJobJson(db: DatabaseSync): void {
       isSystemEvent ? textField(payload, "text") : textField(payload, "message"),
       isAgentTurn ? textField(payload, "model") : null,
       isAgentTurn ? jsonField(payload.fallbacks) : null,
+      isAgentTurn && typeof payload.fastMode === "boolean" ? String(payload.fastMode) : null,
       isAgentTurn ? textField(payload, "thinking") : null,
       isAgentTurn ? numberField(payload, "timeoutSeconds") : null,
       isAgentTurn && typeof payload.allowUnsafeExternalContent === "boolean"
@@ -816,6 +818,7 @@ function ensureAdditiveStateColumns(db: DatabaseSync): void {
   ensureColumn(db, "cron_jobs", "payload_message TEXT");
   ensureColumn(db, "cron_jobs", "payload_model TEXT");
   ensureColumn(db, "cron_jobs", "payload_fallbacks_json TEXT");
+  ensureColumn(db, "cron_jobs", "payload_fast_mode TEXT");
   ensureColumn(db, "cron_jobs", "payload_thinking TEXT");
   ensureColumn(db, "cron_jobs", "payload_timeout_seconds INTEGER");
   ensureColumn(db, "cron_jobs", "payload_allow_unsafe_external_content INTEGER");

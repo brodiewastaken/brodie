@@ -19,6 +19,7 @@ import type { ProviderPlugin } from "../plugins/types.js";
 import type {
   ProviderReasoningOutputModeContext,
   ProviderReplayPolicyContext,
+  ProviderRuntimeModel,
   ProviderSanitizeReplayHistoryContext,
 } from "./plugin-entry.js";
 
@@ -31,6 +32,7 @@ export {
   resolveClaudeModelIdentity,
   resolveClaudeMythos5ModelIdentity,
   resolveClaudeNativeThinkingLevelMap,
+  resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
   requiresClaudeDefaultSampling,
   requiresClaudeMandatoryAdaptiveThinking,
@@ -100,6 +102,19 @@ export function normalizeProviderId(
   provider: string,
 ): string {
   return normalizeProviderIdCore(provider);
+}
+
+/** Compare canonical flat rates without assuming display-only models include cost metadata. */
+export function modelCostsEqual(
+  current: ProviderRuntimeModel["cost"] | undefined,
+  expected: ProviderRuntimeModel["cost"],
+): boolean {
+  return (
+    current?.input === expected.input &&
+    current?.output === expected.output &&
+    current?.cacheRead === expected.cacheRead &&
+    current?.cacheWrite === expected.cacheWrite
+  );
 }
 export {
   createMoonshotThinkingWrapper,

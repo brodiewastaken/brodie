@@ -58,4 +58,29 @@ describe("ChannelsSchema bundled runtime loading", () => {
     expect(loadPluginMetadataSnapshotMock).not.toHaveBeenCalled();
     expect(collectBundledChannelConfigsMock).not.toHaveBeenCalled();
   });
+
+  it("accepts a channel model override with thinking and fast-mode defaults", async () => {
+    const runtime = await importFreshModule<typeof import("./zod-schema.channels-config.js")>(
+      import.meta.url,
+      "./zod-schema.channels-config.js?scope=channels-model-thinking",
+    );
+
+    const parsed = runtime.ChannelsSchema.parse({
+      modelByChannel: {
+        slack: {
+          "*": {
+            model: "anthropic/claude-fable-5",
+            thinking: "low",
+            fastMode: false,
+          },
+        },
+      },
+    });
+
+    expect(parsed?.modelByChannel?.slack?.["*"]).toEqual({
+      model: "anthropic/claude-fable-5",
+      thinking: "low",
+      fastMode: false,
+    });
+  });
 });

@@ -170,8 +170,10 @@ function expectContinueResult(
 }
 
 async function resolveHelloWithModelDefaults(params: {
-  defaultThinking: "off" | "low" | "medium";
-  defaultThinkingByModel?: Record<string, "off" | "low" | "medium">;
+  defaultThinking: "off" | "low" | "medium" | "high";
+  defaultThinkingByModel?: Record<string, "off" | "low" | "medium" | "high">;
+  channelThinkingDefault?: "off" | "low" | "medium" | "high";
+  channelFastModeDefault?: boolean;
   defaultReasoning: "on";
   cfg?: Parameters<typeof resolveReplyDirectives>[0]["cfg"];
   body?: string;
@@ -245,6 +247,8 @@ async function resolveHelloWithModelDefaults(params: {
     aliasIndex: { byAlias: new Map(), byKey: new Map() },
     provider: params.provider ?? "openai",
     model: params.model ?? "gpt-4o-mini",
+    channelThinkingDefault: params.channelThinkingDefault,
+    channelFastModeDefault: params.channelFastModeDefault,
     hasOneTurnModelOverride: params.hasOneTurnModelOverride,
     hasResolvedHeartbeatModelOverride: false,
     typing,
@@ -722,6 +726,59 @@ describe("resolveReplyDirectives", () => {
       resolvedReasoningLevel: "on",
     });
     expect(resolveDefaultReasoningLevel).toHaveBeenCalledOnce();
+  });
+
+  it("uses the channel thinking default before the selected model default", async () => {
+    const { result, resolveDefaultThinkingLevel } = await resolveHelloWithModelDefaults({
+      defaultThinking: "high",
+      channelThinkingDefault: "low",
+      defaultReasoning: "on",
+    });
+
+    expectContinueResult(result, {
+      resolvedThinkLevel: "low",
+      resolvedReasoningLevel: "off",
+    });
+    expect(resolveDefaultThinkingLevel).not.toHaveBeenCalled();
+  });
+
+  it("uses the channel fast-mode default before the selected model default", async () => {
+    mocks.resolveFastModeState.mockReturnValueOnce({
+      mode: true,
+      enabled: true,
+      source: "config",
+      fastAutoOnSeconds: 30,
+    });
+    const { result } = await resolveHelloWithModelDefaults({
+      defaultThinking: "high",
+      channelFastModeDefault: false,
+      defaultReasoning: "on",
+    });
+
+    expectContinueResult(result, {
+      resolvedFastMode: false,
+      resolvedFastModeOverride: true,
+    });
+  });
+
+  it("keeps an explicit session fast-mode selection ahead of the channel default", async () => {
+    mocks.resolveFastModeState.mockReturnValueOnce({
+      mode: true,
+      enabled: true,
+      source: "session",
+      fastAutoOnSeconds: 30,
+    });
+    const { result } = await resolveHelloWithModelDefaults({
+      defaultThinking: "high",
+      channelFastModeDefault: false,
+      defaultReasoning: "on",
+      sessionEntry: makeSessionEntry({ fastMode: true }),
+    });
+
+    expectContinueResult(result, {
+      resolvedFastMode: true,
+      resolvedFastModeOverride: false,
+    });
   });
 
   it("does not re-enable model reasoning when thinking was explicitly disabled", async () => {

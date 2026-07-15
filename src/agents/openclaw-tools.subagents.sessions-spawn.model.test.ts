@@ -107,6 +107,66 @@ describe("subagent spawn model + thinking plan", () => {
     expect(plan.initialSessionPatch.fastMode).toBe(true);
   });
 
+  it("freezes brodie child policy before the child session starts", () => {
+    const plan = expectOkPlan(
+      resolveSubagentModelAndThinkingPlan({
+        cfg: createConfig({
+          agents: {
+            defaults: {
+              model: { primary: "openai/gpt-5.6-sol" },
+              subagents: {
+                model: {
+                  primary: "openai/gpt-5.6-sol",
+                  fallbacks: ["anthropic/claude-opus-5"],
+                },
+                thinking: "low",
+                fastMode: false,
+              },
+              models: {
+                "openai/gpt-5.6-sol": { startupJournals: "paths" },
+                "anthropic/claude-opus-5": { startupJournals: "inline" },
+              },
+            },
+          },
+        }),
+        targetAgentId: "research",
+        thinkingOverrideRaw: "low",
+      }),
+    );
+    expect(plan.resolvedRunPolicy).toMatchObject({
+      primary: { provider: "openai", model: "gpt-5.6-sol" },
+      fallbacks: [{ provider: "anthropic", model: "claude-opus-5" }],
+      reasoning: "low",
+      fastMode: false,
+      textVerbosity: "low",
+    });
+    expect(plan.initialSessionPatch).toMatchObject({ thinkingLevel: "low", fastMode: false });
+    expect(Object.isFrozen(plan.resolvedRunPolicy)).toBe(true);
+  });
+
+  it("inherits cron Fast OFF into the frozen child policy", () => {
+    const plan = expectOkPlan(
+      resolveSubagentModelAndThinkingPlan({
+        cfg: createConfig({
+          agents: {
+            defaults: {
+              subagents: {
+                model: "openai/gpt-5.6-sol",
+                fastMode: true,
+              },
+              models: { "openai/gpt-5.6-sol": { startupJournals: "paths" } },
+            },
+          },
+        }),
+        targetAgentId: "research",
+        callerFastMode: false,
+        callerIsCron: true,
+      }),
+    );
+    expect(plan.resolvedRunPolicy?.fastMode).toBe(false);
+    expect(plan.resolvedRunPolicy?.source.fastMode).toBe("parent");
+  });
+
   it("rejects invalid thinking levels before any runtime work", () => {
     const plan = resolveSubagentModelAndThinkingPlan({
       cfg: createConfig(),

@@ -17,6 +17,7 @@ import { resolveFastModeState } from "../../agents/fast-mode.js";
 import { runAgentHarnessBeforeMessageWriteHook } from "../../agents/harness/hook-helpers.js";
 import { resolveAgentHarnessPolicy } from "../../agents/harness/policy.js";
 import { listOpenAIAuthProfileProvidersForAgentRuntime } from "../../agents/openai-routing.js";
+import { resolveRunPolicyForConfiguredBrain } from "../../agents/run-policy.js";
 import { resolveIngressWorkspaceOverrideForSpawnedRun } from "../../agents/spawned-context.js";
 import type { SilentReplyPromptMode } from "../../agents/system-prompt.types.js";
 import { resolveEffectiveAgentRuntime } from "../../agents/thinking-runtime.js";
@@ -464,6 +465,7 @@ type RunPreparedReplyParams = {
   directives: InlineDirectives;
   defaultActivation: Parameters<typeof buildGroupIntro>[0]["defaultActivation"];
   resolvedThinkLevel: ThinkLevel | undefined;
+  runPolicyReasoningOverride?: ThinkLevel;
   resolvedFastMode?: FastMode;
   resolvedFastModeAutoOnSeconds?: number;
   resolvedFastModeOverride?: boolean;
@@ -754,10 +756,16 @@ export async function runPreparedReply(
   const startupAction =
     resetTriggeredAction ??
     (softResetTriggered || /^\/reset(?:\s|$)/i.test(normalizedCommandBody) ? "reset" : "new");
+  const resetRunPolicy = resolveRunPolicyForConfiguredBrain({
+    cfg,
+    kind: isSubagentSessionKey(sessionKey) ? "subagent" : "main",
+    explicitModel: `${provider}/${model}`,
+  });
   const resetJournalMode =
-    startupAction === "reset"
+    resetRunPolicy?.startupJournals ??
+    (startupAction === "reset"
       ? "paths"
-      : (cfg.agents?.defaults?.models?.[`${provider}/${model}`]?.startupJournals ?? "paths");
+      : (cfg.agents?.defaults?.models?.[`${provider}/${model}`]?.startupJournals ?? "paths"));
   const resetSystemMessage =
     isBareSessionReset &&
     isResetOrNewCommand &&
@@ -1588,6 +1596,7 @@ export async function runPreparedReply(
       authProfileId,
       authProfileIdSource,
       thinkLevel: resolvedThinkLevel,
+      runPolicyReasoningOverride: params.runPolicyReasoningOverride,
       ...(() => {
         if (useFastReplyRuntime) {
           return {

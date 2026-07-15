@@ -1,6 +1,7 @@
 // Defines agent default configuration types shared by runtime schemas.
 import type { SilentReplyPolicyShape } from "../shared/silent-reply-policy.js";
 import type {
+  AgentDefaultModelConfig,
   AgentModelConfig,
   AgentToolModelConfig,
   AgentRuntimePolicyConfig,
@@ -38,6 +39,8 @@ export type PromptOverlaysConfig = {
 export type AgentModelEntryConfig = {
   /** Optional display/lookup alias for this provider/model entry. */
   alias?: string;
+  /** Additional display/lookup aliases. */
+  aliases?: string[];
   /** Provider-specific API parameters (e.g., GLM-4.7 thinking mode). */
   params?: Record<string, unknown>;
   /** Optional agent execution runtime for this specific provider/model entry. */
@@ -46,6 +49,8 @@ export type AgentModelEntryConfig = {
   streaming?: boolean;
   /** Journal injection mode selected once when /new starts this model. */
   startupJournals?: "inline" | "paths";
+  /** Maximum native image blocks restored for runs selected on this model. */
+  maxNativeImages?: number;
 };
 
 export type AgentModelListConfig = {
@@ -224,8 +229,8 @@ export type CliBackendConfig = {
 export type AgentDefaultsConfig = {
   /** Global default provider params applied to all models before per-model and per-agent overrides. */
   params?: Record<string, unknown>;
-  /** Primary model and fallbacks (provider/model). Accepts string or {primary,fallbacks}. */
-  model?: AgentModelConfig;
+  /** Primary model, fallbacks, and fallback notice policy. */
+  model?: AgentDefaultModelConfig;
   /** Optional lower-cost model for short internal tasks such as generated session titles. */
   utilityModel?: string;
   /**
@@ -401,6 +406,8 @@ export type AgentDefaultsConfig = {
    * Default: 1200.
    */
   imageMaxDimensionPx?: number;
+  /** Global native-image restore ceiling. Per-model values take precedence; default: 42. */
+  maxNativeImages?: number;
   /**
    * Image compression/detail preference for image-tool media loading.
    * Default: auto, which adapts to provider/model limits and image count.

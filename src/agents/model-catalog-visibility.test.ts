@@ -31,6 +31,7 @@ describe("resolveVisibleModelCatalog", () => {
     });
 
     expect(isCodexRoutableOpenAIPlatformCatalogEntry(entry("gpt-5.6"))).toBe(false);
+    expect(isCodexRoutableOpenAIPlatformCatalogEntry(entry("gpt-6-astra"))).toBe(true);
     expect(isCodexRoutableOpenAIPlatformCatalogEntry(entry("gpt-5.6-sol"))).toBe(true);
     expect(isCodexRoutableOpenAIPlatformCatalogEntry(entry("gpt-5.6-terra"))).toBe(true);
     expect(isCodexRoutableOpenAIPlatformCatalogEntry(entry("gpt-5.6-luna"))).toBe(true);

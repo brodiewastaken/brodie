@@ -9,11 +9,12 @@ import {
   applyAnthropicRefusal,
   findActiveAnthropicToolTurnAssistantIndex,
   omitFoundryBearerCredentialHeaders,
-  prepareClaudeSonnet5RequestContext,
+  prepareClaudeNoPrefillRequestContext,
   projectAnthropicTools,
   reconcileAnthropicToolChoice,
   requiresClaudeAdaptiveThinking,
   resolveClaudeNativeThinkingLevelMap,
+  resolveClaudeOpus5ModelIdentity,
   resolveClaudeSonnet5ModelIdentity,
   resolveOriginalAnthropicToolName,
   readAnthropicFallbackBoundary,
@@ -54,6 +55,15 @@ import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/st
 import { createAbortError as createNamedAbortError } from "../infra/abort-signal.js";
 import { toErrorObject } from "../infra/errors.js";
 import { readResponseTextSnippet } from "../infra/http-body.js";
+import {
+  appendRawByteStreamBytesEvent,
+  appendRawByteStreamJsonEvent,
+  appendRawByteStreamUtf8Event,
+  createRawByteStreamTrace,
+  isRawByteStreamEnabled,
+  redactRawByteStreamHeaders,
+  type RawByteStreamTrace,
+} from "../llm/raw-byte-stream.js";
 import type {
   AssistantMessageDiagnostic,
   Context,
@@ -88,7 +98,7 @@ import {
 } from "./transport-stream-shared.js";
 import type { ContextUsage } from "./usage.js";
 
-const CLAUDE_CODE_VERSION = "2.1.75";
+const CLAUDE_CODE_VERSION = "2.1.258";
 const CLAUDE_CODE_BILLING_SYSTEM_BLOCK = `x-anthropic-billing-header: cc_version=${CLAUDE_CODE_VERSION}; cc_entrypoint=sdk-cli;`;
 const ANTHROPIC_MESSAGES_ERROR_BODY_MAX_BYTES = 8 * 1024;
 const ANTHROPIC_MESSAGES_ERROR_BODY_MAX_CHARS = 400;
@@ -391,6 +401,10 @@ function normalizeToolCallId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 }
 
+function normalizeAnthropicToolCallArguments(value: unknown): unknown {
+  return coerceTransportToolCallArguments(value);
+}
+
 function convertAnthropicMessages(
   messages: Context["messages"],
   model: AnthropicTransportModel,
@@ -531,7 +545,7 @@ function convertAnthropicMessages(
             type: "tool_use",
             id: block.id,
             name: isOAuthToken ? toClaudeCodeName(block.name) : block.name,
-            input: coerceTransportToolCallArguments(block.arguments),
+            input: normalizeAnthropicToolCallArguments(block.arguments),
           });
         }
       }
@@ -758,17 +772,30 @@ function assertAnthropicSsePendingBufferWithinLimit(pendingChars: number): void 
 async function* parseAnthropicSseBody(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
+  rawByteTrace?: RawByteStreamTrace,
 ): AsyncIterable<Record<string, unknown>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let completed = false;
+  let chunkIndex = 0;
+  let byteOffset = 0;
   try {
     while (true) {
       const { done, value } = await readAnthropicSseChunk(reader, signal);
       if (done) {
         completed = true;
         break;
+      }
+      if (rawByteTrace) {
+        appendRawByteStreamBytesEvent({
+          event: "anthropic.response.sse_chunk",
+          trace: rawByteTrace,
+          bytes: value,
+          metadata: { chunkIndex, byteOffset },
+        });
+        chunkIndex += 1;
+        byteOffset += value.byteLength;
       }
       buffer = `${buffer}${decoder.decode(value, { stream: true })}`.replaceAll("\r\n", "\n");
       let frameEnd = buffer.indexOf("\n\n");
@@ -815,6 +842,7 @@ function createAnthropicMessagesClient(params: {
   baseURL?: string;
   defaultHeaders?: Record<string, string>;
   fetch: typeof fetch;
+  rawByteTrace?: RawByteStreamTrace;
 }): AnthropicMessagesClient {
   const url = resolveAnthropicMessagesUrl(params.baseURL);
   return {
@@ -829,14 +857,44 @@ function createAnthropicMessagesClient(params: {
           },
           params.defaultHeaders,
         );
+        const serializedBody = JSON.stringify(body);
+        if (params.rawByteTrace) {
+          appendRawByteStreamJsonEvent({
+            event: "anthropic.request.headers",
+            trace: params.rawByteTrace,
+            value: redactRawByteStreamHeaders(headers ?? {}),
+            metadata: { url, method: "POST" },
+          });
+          appendRawByteStreamUtf8Event({
+            event: "anthropic.request.body",
+            trace: params.rawByteTrace,
+            text: serializedBody,
+          });
+        }
         const response = await params.fetch(url, {
           method: "POST",
           headers,
-          body: JSON.stringify(body),
+          body: serializedBody,
           signal: options?.signal,
         });
+        if (params.rawByteTrace) {
+          appendRawByteStreamJsonEvent({
+            event: "anthropic.response.headers",
+            trace: params.rawByteTrace,
+            value: redactRawByteStreamHeaders(Object.fromEntries(response.headers.entries())),
+            metadata: { status: response.status },
+          });
+        }
         if (!response.ok) {
           const detail = await readAnthropicMessagesErrorBodySnippet(response);
+          if (params.rawByteTrace) {
+            appendRawByteStreamUtf8Event({
+              event: "anthropic.response.error_body",
+              trace: params.rawByteTrace,
+              text: detail,
+              metadata: { status: response.status },
+            });
+          }
           throw new Error(
             detail || `Anthropic Messages request failed with HTTP ${response.status}`,
           );
@@ -844,7 +902,7 @@ function createAnthropicMessagesClient(params: {
         if (!response.body) {
           return;
         }
-        yield* parseAnthropicSseBody(response.body, options?.signal);
+        yield* parseAnthropicSseBody(response.body, options?.signal, params.rawByteTrace);
       },
     },
   };
@@ -879,8 +937,9 @@ function createAnthropicTransportClient(params: {
   context: Context;
   apiKey: string;
   options: AnthropicTransportOptions | undefined;
+  rawByteTrace?: RawByteStreamTrace;
 }) {
-  const { model, context, apiKey, options } = params;
+  const { model, context, apiKey, options, rawByteTrace } = params;
   const needsInterleavedBeta =
     (options?.interleavedThinking ?? true) && !supportsAdaptiveThinking(model);
   // Kimi's Anthropic thinking SSE is already well-formed for this parser, but
@@ -910,6 +969,7 @@ function createAnthropicTransportClient(params: {
           options?.headers,
         ),
         fetch,
+        rawByteTrace,
       }),
       isOAuthToken: false,
     };
@@ -935,6 +995,7 @@ function createAnthropicTransportClient(params: {
           options?.headers,
         ),
         fetch,
+        rawByteTrace,
       }),
       isOAuthToken: false,
     };
@@ -962,6 +1023,7 @@ function createAnthropicTransportClient(params: {
           options?.headers,
         ),
         fetch,
+        rawByteTrace,
       }),
       isOAuthToken: true,
     };
@@ -984,6 +1046,7 @@ function createAnthropicTransportClient(params: {
         options?.headers,
       ),
       fetch,
+      rawByteTrace,
     }),
     isOAuthToken: false,
   };
@@ -1133,7 +1196,9 @@ function resolveAnthropicTransportOptions(
   const baseMaxTokens = resolveAnthropicMessagesMaxTokens({
     modelMaxTokens: model.maxTokens,
     requestedMaxTokens: options?.maxTokens,
-    useModelDefault: resolveClaudeSonnet5ModelIdentity(model) !== undefined,
+    useModelDefault:
+      resolveClaudeOpus5ModelIdentity(model) !== undefined ||
+      resolveClaudeSonnet5ModelIdentity(model) !== undefined,
   });
   if (baseMaxTokens === undefined) {
     throw new Error(
@@ -1230,12 +1295,21 @@ export function createAnthropicMessagesTransportStreamFn(): StreamFn {
           throw new Error(`No API key for provider: ${model.provider}`);
         }
         const transportOptions = resolveAnthropicTransportOptions(model, options, apiKey);
-        const requestContext = prepareClaudeSonnet5RequestContext(model, context);
+        const rawByteTrace = isRawByteStreamEnabled()
+          ? createRawByteStreamTrace({
+              provider: model.provider,
+              modelId: model.id,
+              traceContext: (rawOptions as { traceContext?: Record<string, unknown> } | undefined)
+                ?.traceContext,
+            })
+          : undefined;
+        const requestContext = prepareClaudeNoPrefillRequestContext(model, context);
         const { client, isOAuthToken } = createAnthropicTransportClient({
           model,
           context: requestContext,
           apiKey,
           options: transportOptions,
+          rawByteTrace,
         });
         const builtParams = buildAnthropicParams(
           model,

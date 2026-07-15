@@ -5,6 +5,7 @@ import {
   HeartbeatSchema,
   AgentSandboxSchema,
   AgentContextLimitsSchema,
+  AgentDefaultModelSchema,
   AgentModelRuntimeEntrySchema,
   AgentModelSchema,
   AgentToolModelSchema,
@@ -53,7 +54,7 @@ export const AgentDefaultsSchema = z
   .object({
     /** Global default provider params applied to all models before per-model and per-agent overrides. */
     params: z.record(z.string(), z.unknown()).optional(),
-    model: AgentModelSchema.optional(),
+    model: AgentDefaultModelSchema.optional(),
     utilityModel: z.string().optional(),
     imageModel: AgentToolModelSchema.optional(),
     imageGenerationModel: AgentToolModelSchema.optional(),
@@ -233,6 +234,7 @@ export const AgentDefaultsSchema = z
     timeoutSeconds: z.number().int().positive().optional(),
     mediaMaxMb: z.number().positive().optional(),
     imageMaxDimensionPx: z.number().int().positive().optional(),
+    maxNativeImages: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
     imageQuality: z.enum(["auto", "efficient", "balanced", "high"]).optional(),
     typingIntervalSeconds: z.number().int().positive().optional(),
     typingMode: TypingModeSchema.optional(),
